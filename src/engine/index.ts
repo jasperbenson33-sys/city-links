@@ -1,7 +1,9 @@
-export * from './seed';
-export * from './geometryHelpers';
+export * from '../lib/geometryHelpers';
 export * from './trajectory';
-export * from './propCatalog';
-export * from './tileBlueprints';
-export * from './courseValidator';
-export * from './courseGenerator';
+export {
+  COURSE_MASTER_PLAN,
+  getCourseSurfaceElevationAt,
+  getMasterPlanGroundElevationAt,
+  getMasterPlanSurfaceTagAt,
+  isWorldPointInWaterHazard,
+} from '../config/courseMasterPlan';

@@ -1,3 +1,4 @@
+export type Vec2Tuple = [number, number];
 export type Vec3Tuple = [number, number, number];
 
 export interface AABB3D {
@@ -5,54 +6,58 @@ export interface AABB3D {
   max: Vec3Tuple;
 }
 
-/**
- * Island grid constants:
- * 6 x 6 grid of 8m x 8m modular tiles = 48m x 48m island centered at (0, 0, 0).
- * Canonical Local & World Frame: +Y = Up, +Z = Forward (South), -Z = North, +X = Right (East), -X = West.
- * Ground contact datum in every local prop/tile frame is exact y = 0.
- */
-export const GRID_COLS = 6;
-export const GRID_ROWS = 6;
-export const TILE_SIZE = 8;
-export const ISLAND_SIZE = GRID_COLS * TILE_SIZE; // 48m
-export const ISLAND_HALF_SIZE = ISLAND_SIZE / 2; // 24m
+export interface OBB2D {
+  centerXZ: Vec2Tuple;
+  halfExtentsXZ: Vec2Tuple;
+  /** Right-handed Three.js rotation around +Y in radians */
+  rotationY: number;
+  /** Unit local +X axis in world XZ: [cos(ry), -sin(ry)] */
+  axisX: Vec2Tuple;
+  /** Unit local +Z axis in world XZ: [sin(ry), cos(ry)] */
+  axisZ: Vec2Tuple;
+}
 
 /**
- * Canonical elevation tiers (meters in world Y).
+ * Canonical Local & World Coordinate Frame ("Hole 1: 5th & Mercer"):
+ * - +Y = Up ([0, 1, 0])
+ * - +Z = Local Forward ([0, 0, 1]) / World South
+ * - -Z = World North (Leg 1 along 5th Ave from Tee toward Mercer Corner)
+ * - +X = Local Right ([1, 0, 0]) / World East (Leg 2 along Mercer St into Courtyard Green)
+ * - -X = World West
+ * - Every local prop/building mesh sits flush on local y = 0.00m at its resting datum.
  */
 export const ELEVATIONS = {
-  WATER_BASIN_Y: -0.22,
-  WATER_SURFACE_Y: -0.15,
-  WATER_RIM_Y: 0.0,
-  GUTTER_TROUGH_Y: -0.06,
-  STREET_Y: 0.0,
-  SIDEWALK_Y: 0.15,
-  PARKLET_GREEN_Y: 0.15,
+  /** Recessed storm-drain concrete channel (-2cm below road asphalt) */
+  GUTTER_CHANNEL_Y: -0.02,
+  /** Main street asphalt surface datum */
+  ROAD_ASPHALT_Y: 0.0,
+  /** Continuous 15cm stone curb height */
   CURB_HEIGHT: 0.15,
-  TERRACE_Y: 1.35,
+  /** Raised limestone/brick sidewalks, corner plaza aprons, and South Subway Plaza */
+  SIDEWALK_Y: 0.15,
+  /** Elevated sunlit AstroTurf Pocket-Park Courtyard Green & Café Terrace */
+  COURTYARD_GREEN_Y: 0.6,
+  /** Courtyard stone fountain basin floor (+0.60m + 0.02m) */
+  FOUNTAIN_BASIN_Y: 0.62,
+  /** Courtyard stone fountain water surface (+0.60m + 0.18m) */
+  FOUNTAIN_WATER_Y: 0.78,
+  /** Courtyard stone fountain coping rim (+0.60m + 0.28m) */
+  FOUNTAIN_RIM_Y: 0.88,
+
+  // Compatibility aliases while downstream physics/store workers migrate
+  STREET_Y: 0.0,
+  GUTTER_TROUGH_Y: -0.02,
+  PARKLET_GREEN_Y: 0.6,
+  TERRACE_Y: 0.6,
+  WATER_BASIN_Y: 0.62,
+  WATER_SURFACE_Y: 0.78,
+  WATER_RIM_Y: 0.88,
 } as const;
 
-export type ElevationTierId = 0 | 1 | 1.15 | 2;
-
-/**
- * Typed edge sockets ordered [north (-Z), east (+X), south (+Z), west (-X)].
- */
-export type EdgeSocket =
-  | 'asphalt_road'
-  | 'curb_gutter'
-  | 'sidewalk_plaza'
-  | 'parklet_green'
-  | 'terrace_wall'
-  | 'ramp_step'
-  | 'water_hazard';
+/** Exact resting zone elevations allowed for grounded props & structures */
+export type AllowedGroundDatum = -0.02 | 0 | 0.15 | 0.6;
 
 export type CardinalDirection = 'north' | 'east' | 'south' | 'west';
-
-/** Ordered [north, east, south, west] */
-export type CardinalSockets = [EdgeSocket, EdgeSocket, EdgeSocket, EdgeSocket];
-
-/** Clockwise quarter-turns when viewed from +Y looking down: 0=0°, 1=90° CW, 2=180°, 3=270° CW */
-export type TileRotationSteps = 0 | 1 | 2 | 3;
 
 export type FlagColor = 'red' | 'yellow' | 'blue' | 'purple' | 'green';
 
@@ -110,316 +115,549 @@ export const FLAG_COLOR_META: Record<FlagColor, FlagColorMeta> = {
   },
 };
 
-export type CupArchetype =
-  | 'corner_parklet'
-  | 'sunken_courtyard'
-  | 'elevated_cafe_terrace'
-  | 'transit_island_green'
-  | 'pocket_garden_green';
+export type PhysicsSurfaceTag =
+  | 'road_asphalt'
+  | 'storm_gutter'
+  | 'stone_curb'
+  | 'sidewalk_paver'
+  | 'subway_brick_plaza'
+  | 'crosswalk_landing'
+  | 'loading_zone_asphalt'
+  | 'courtyard_ramp'
+  | 'courtyard_paver'
+  | 'putting_green_turf'
+  | 'green_fringe_collar'
+  | 'patio_rough'
+  | 'fountain_hazard'
+  | 'awning_cushion'
+  | 'umbrella_bounce'
+  | 'van_ramp_metal'
+  | 'van_roof_deck'
+  | 'masonry_wall';
 
-export const CUP_ARCHETYPES: readonly CupArchetype[] = [
-  'corner_parklet',
-  'sunken_courtyard',
-  'elevated_cafe_terrace',
-  'transit_island_green',
-  'pocket_garden_green',
-] as const;
-
-export type TileBlueprintId =
-  | 'road_straight'
-  | 'road_corner_gutter'
-  | 'road_t_junction'
-  | 'road_cross_intersection'
-  | 'curb_gutter_boulevard'
-  | 'curb_gutter_corner_90'
-  | 'sidewalk_plaza_open'
-  | 'parklet_green_promenade'
-  | 'parklet_green_connector'
-  | 'terrace_ramp_approach'
-  | 'terrace_stair_chute_top'
-  | 'terrace_rooftop_lounge'
-  | 'fountain_plaza_hazard'
-  | 'canal_water_hazard'
-  | 'cup_corner_parklet'
-  | 'cup_sunken_courtyard'
-  | 'cup_elevated_cafe_terrace'
-  | 'cup_transit_island_green'
-  | 'cup_pocket_garden_green';
-
-export type TileCategory =
-  | 'road'
-  | 'gutter'
-  | 'plaza'
-  | 'ramp'
-  | 'terrace'
-  | 'hazard'
-  | 'cup';
-
-export type SurfaceMaterialKind =
-  | 'asphalt'
-  | 'sidewalk'
-  | 'turf_green'
-  | 'terrace_deck'
-  | 'curb_wall'
-  | 'terrace_wall'
-  | 'stone_rim'
-  | 'gutter_trough'
-  | 'water_basin';
-
-/**
- * Local-space axis-aligned box surface inside an 8m x 8m tile (before tile.rotationY).
- * Local origin is (0, 0, 0) at tile center; local x,z in [-4, 4].
- */
-export interface TileBoxSurface {
+export interface CenterlineSegmentSpec {
   id: string;
-  kind: SurfaceMaterialKind;
-  center: Vec3Tuple;
-  size: Vec3Tuple;
-  topY: number;
-  friction: number;
-  restitution: number;
-  /** True if this box acts as a vertical blocking wall rather than walkable floor */
-  isWall?: boolean;
+  kind: 'straight' | 'arc_right_90';
+  label: string;
+  startXZ: Vec2Tuple;
+  endXZ: Vec2Tuple;
+  arcPivotXZ?: Vec2Tuple;
+  arcRadius?: number;
+  startAngleRad?: number;
+  endAngleRad?: number;
+  lengthMeters: number;
 }
 
-/**
- * Local-space sloped ramp / stair-chute inside a tile connecting lowerY -> upperY.
- * Ramp climbs along its local +Z or -Z axis according to yawRad and pitchRad.
- */
-export interface TileRampSpec {
+export interface GroundSurfaceZoneSpec {
   id: string;
-  /** Midpoint of the sloped slab in tile-local coordinates */
-  center: Vec3Tuple;
-  /** Width (X), thickness (Y), sloped length (Z) in ramp local frame */
+  label: string;
+  surfaceTag: PhysicsSurfaceTag;
+  boundsXZ: {
+    minX: number;
+    maxX: number;
+    minZ: number;
+    maxZ: number;
+  };
+  /** Top resting surface elevation in world Y */
+  topY: number;
+  /** Slab visual/collider thickness extending downward from topY */
+  slabThickness: number;
+  friction: number;
+  restitution: number;
+  /** Linear roll damping applied when ball rolls on this zone */
+  rollDamping: number;
+  aabb: AABB3D;
+}
+
+export interface StormGutterTrackSpec {
+  id: string;
+  label: string;
+  kind: 'straight' | 'corner_90';
+  /** Channel width in meters (~0.45m) */
+  width: number;
+  /** Recessed channel floor elevation (-0.02m) */
+  channelY: number;
+  /** Depth below adjacent 0.00m road asphalt (0.02m) */
+  depthBelowRoad: number;
+  /** Adjacent stone curb top elevation (+0.15m) */
+  adjacentCurbTopY: number;
+  /** Straight segment endpoints in world [x, channelY, z] */
+  start?: Vec3Tuple;
+  end?: Vec3Tuple;
+  /** 90-degree corner curve parameters in world XZ: x = pivotX + R*cos(a), z = pivotZ + R*sin(a) */
+  arcPivot?: Vec3Tuple;
+  arcRadius?: number;
+  startAngleRad?: number;
+  endAngleRad?: number;
+  /** Optional hydrant-fed water boost velocity vector [vx, vy, vz] along this gutter */
+  waterBoostVelocity?: Vec3Tuple;
+  aabb: AABB3D;
+}
+
+export interface StormDrainGrateSpec {
+  id: string;
+  gutterId: string;
+  /** World position [x, -0.02, z] flush in storm-drain gutter channel */
+  position: Vec3Tuple;
   size: Vec3Tuple;
-  /** Euler rotation [pitchX, yawY, 0] in tile-local frame */
-  rotation: Vec3Tuple;
+  rotationY: number;
+  aabb: AABB3D;
+}
+
+export interface StoneCurbSegmentSpec {
+  id: string;
+  label: string;
+  kind: 'straight' | 'beveled_45' | 'curved_90';
   bottomY: number;
   topY: number;
-  /** Tile-local XZ bounds for analytical elevation queries */
-  localBoundsXZ: { minX: number; maxX: number; minZ: number; maxZ: number };
-  /** Direction in tile-local space along which elevation increases ('north'=-Z, 'south'=+Z, 'east'=+X, 'west'=-X) */
-  climbDirection: CardinalDirection;
-  friction: number;
+  height: number;
+  /** World center [x, midY, z] for straight/beveled curbs */
+  center: Vec3Tuple;
+  /** Local box size [widthX, heightY, depthZ] */
+  size: Vec3Tuple;
+  rotationY: number;
+  bevelAngleDeg?: number;
+  arcPivotXZ?: Vec2Tuple;
+  arcRadius?: number;
+  startAngleRad?: number;
+  endAngleRad?: number;
   restitution: number;
+  friction: number;
+  aabb: AABB3D;
 }
 
-/**
- * Recessed U-shaped storm-drain gutter track (straight or 90-degree curved corner).
- * Coordinates are in tile-local space (mount inside tile group).
- */
+export interface WalkableRampSpec {
+  id: string;
+  label: string;
+  surfaceTag: PhysicsSurfaceTag;
+  boundsXZ: {
+    minX: number;
+    maxX: number;
+    minZ: number;
+    maxZ: number;
+  };
+  bottomY: number;
+  topY: number;
+  climbDirection: CardinalDirection;
+  slopeAngleDeg: number;
+  slabThickness: number;
+  friction: number;
+  restitution: number;
+  aabb: AABB3D;
+}
+
+export type BuildingPaletteId =
+  | 'terracotta'
+  | 'ochre'
+  | 'cream_limestone'
+  | 'warm_brick'
+  | 'sage_trim';
+
+export type BuildingRoofStyle =
+  | 'hipped_terracotta_tile'
+  | 'cornice_parapet'
+  | 'mansard_slate'
+  | 'campanile_spire';
+
+export interface PerimeterBuildingSpec {
+  id: string;
+  name: string;
+  ring: 'primary_facade' | 'skyline_backdrop';
+  corridorSector:
+    | 'south_subway_backstop'
+    | 'west_5th_ave'
+    | 'north_mercer_bend'
+    | 'north_courtyard'
+    | 'east_courtyard_backstop'
+    | 'south_courtyard'
+    | 'south_mercer_se_corner'
+    | 'east_5th_ave';
+  /** Base ground elevation (0.00m so buildings extend seamlessly below any sidewalk lip) */
+  groundY: number;
+  boundsXZ: {
+    minX: number;
+    maxX: number;
+    minZ: number;
+    maxZ: number;
+  };
+  /** Total facade/roof height in meters (10m-16m primary, 18m-26m backdrop skyline) */
+  height: number;
+  stories: 3 | 4 | 5 | 6;
+  palette: BuildingPaletteId;
+  trimPalette: BuildingPaletteId;
+  roofStyle: BuildingRoofStyle;
+  /** Primary inward-facing street orientation for shopfronts, balconies & shutters */
+  frontFace: CardinalDirection;
+  shopfrontBayCount: number;
+  windowColumns: number;
+  hasShutters: boolean;
+  shutterHex: string;
+  julietBalconyCount: number;
+  hasFireEscape: boolean;
+  shopfrontAwningHex?: string;
+  /** True if the flush left-sidewalk Scaffolding Shed bolts directly onto this facade */
+  isScaffoldingHost?: boolean;
+  aabb: AABB3D;
+}
+
+export interface ArchitecturalWallSpec {
+  id: string;
+  label: string;
+  kind:
+    | 'stone_retaining_wall'
+    | 'wrought_iron_planter_wall'
+    | 'subway_stair_parapet'
+    | 'courtyard_boundary_wall';
+  groundY: number;
+  topY: number;
+  center: Vec3Tuple;
+  size: Vec3Tuple;
+  rotationY: number;
+  surfaceTag: PhysicsSurfaceTag;
+  restitution: number;
+  aabb: AABB3D;
+}
+
+export interface StringLightSpanSpec {
+  id: string;
+  label: string;
+  startAnchor: Vec3Tuple;
+  endAnchor: Vec3Tuple;
+  sagMeters: number;
+  bulbCount: number;
+}
+
+export interface CourtyardPergolaSpec {
+  id: string;
+  groundY: number;
+  boundsXZ: {
+    minX: number;
+    maxX: number;
+    minZ: number;
+    maxZ: number;
+  };
+  beamClearHeight: number;
+  rafterCount: number;
+  postPositions: Vec3Tuple[];
+}
+
+export interface HoleCupSpec {
+  id: string;
+  flagColor: FlagColor;
+  /** World cup center [x, +0.60, z] flush on sunlit courtyard putting green */
+  position: Vec3Tuple;
+  elevationY: number;
+  cupRadius: number;
+  cupDepth: number;
+  /** Obstacle-free AstroTurf green radius around cup (>= 1.5m) */
+  apronRadius: number;
+  pinHeight: number;
+}
+
+export interface CrosswalkLandingPadSpec {
+  id: string;
+  /** Ideal A-Position target [x, 0.00, z] for Tee shots setting up the Dogleg Right approach */
+  center: Vec3Tuple;
+  boundsXZ: {
+    minX: number;
+    maxX: number;
+    minZ: number;
+    maxZ: number;
+  };
+  stripeCount: number;
+  elevationY: number;
+}
+
+export interface VanLoadingZoneSpec {
+  id: string;
+  boundsXZ: {
+    minX: number;
+    maxX: number;
+    minZ: number;
+    maxZ: number;
+  };
+  elevationY: number;
+  stripeAngleDeg: number;
+}
+
+export type PropType =
+  | 'scaffolding_tunnel'
+  | 'delivery_box_van'
+  | 'hazard_cone'
+  | 'overhanging_street_tree'
+  | 'hotdog_cart_umbrella'
+  | 'fire_hydrant_jet'
+  | 'curved_gutter_corner'
+  | 'subway_steam_grate'
+  | 'fountain_water_hazard'
+  | 'bistro_umbrella_set'
+  | 'planter_hedge_rough'
+  | 'subway_entrance_portal'
+  | 'brass_bollard'
+  | 'subway_bench'
+  | 'menu_a_frame_board'
+  | 'trash_receptacle'
+  | 'street_tree'
+  | 'street_lamp'
+  | 'pigeon_flock';
+
+export interface PropReactiveSpec {
+  kind:
+    | 'awning_cushion_bank'
+    | 'umbrella_trampoline'
+    | 'hydrant_water_jet'
+    | 'gutter_corner_bank'
+    | 'steam_updraft'
+    | 'scaffolding_underpass'
+    | 'van_ramp_and_roof_launch'
+    | 'water_hazard'
+    | 'patio_rough_damping'
+    | 'pigeon_scatter';
+  zoneCenter: Vec3Tuple;
+  zoneHalfExtents?: Vec3Tuple;
+  zoneRadius?: number;
+  restitution?: number;
+  boostVelocity?: Vec3Tuple;
+  cycleSeconds?: number;
+  dutyCycle?: number;
+  underpassClearHeight?: number;
+  underpassClearWidth?: number;
+  quickDropPosition?: Vec3Tuple;
+  penaltyStrokes?: number;
+}
+
+export interface ScaffoldingShedMetadata {
+  hostBuildingId: string;
+  hostFacadeX: number;
+  wallGapMeters: number;
+  clearHeightMeters: number;
+  clearWidthMeters: number;
+  tunnelLengthMeters: number;
+}
+
+export interface DeliveryVanRampMetadata {
+  loadingZoneId: string;
+  rampBottomZ: number;
+  rampTopZ: number;
+  rampBottomY: number;
+  rampTopY: number;
+  rampWidth: number;
+  rampLaunchAngleDeg: number;
+  roofDeckTopY: number;
+  roofRestitution: number;
+}
+
+export interface OverhangingTreeMetadata {
+  pitCenter: Vec3Tuple;
+  trunkAabb: AABB3D;
+  canopyAabb: AABB3D;
+  blocksRightAerialXRange: Vec2Tuple;
+  leavesLeftCrosswalkOpenXRange: Vec2Tuple;
+}
+
+export interface HotdogAwningMetadata {
+  pitchDeg: number;
+  restitution: number;
+  /** World-space center of the pitched striped canvas awning */
+  awningCenter: Vec3Tuple;
+  awningSize: Vec3Tuple;
+  /** Exact unit normal of the 28-deg pitched awning in world space */
+  worldNormal: Vec3Tuple;
+  /** Expected A-Position wedge incoming velocity at awning impact */
+  designIncomingVelocity: Vec3Tuple;
+  /** Reflected outgoing velocity toward the Cup */
+  designReflectedVelocity: Vec3Tuple;
+  /** Landing coordinate on +0.60m green */
+  predictedGreenLandingXZ: Vec2Tuple;
+  /** Final cushioned rollout coordinate within <= 2.0m of Cup */
+  predictedStopXZ: Vec2Tuple;
+}
+
+export interface HydrantGutterBoostMetadata {
+  nearestGrateId: string;
+  gratePosition: Vec3Tuple;
+  distanceToGrateMeters: number;
+  curvedGutterId: string;
+  streamImpactPoint: Vec3Tuple;
+  gutterExitBoostVector: Vec3Tuple;
+}
+
+export interface SteamGrateLiftMetadata {
+  utilityBayBoundsXZ: {
+    minX: number;
+    maxX: number;
+    minZ: number;
+    maxZ: number;
+  };
+  cycleSeconds: number;
+  activeSeconds: number;
+  upwardImpulseVelocity: Vec3Tuple;
+  clearsFountainId: string;
+  targetFrontFringePoint: Vec3Tuple;
+}
+
+export interface PlacedProp {
+  id: string;
+  name: string;
+  type: PropType;
+  /** Zone label ('road', 'sidewalk', 'subway_plaza', 'courtyard', 'gutter') */
+  zone:
+    | 'road'
+    | 'sidewalk'
+    | 'subway_plaza'
+    | 'courtyard_green'
+    | 'courtyard_patio'
+    | 'gutter';
+  /** World position [x, groundY, z] with local y = 0 flush on groundY */
+  position: Vec3Tuple;
+  /** Exact resting ground elevation (-0.02, 0.00, 0.15, or 0.60) */
+  groundY: AllowedGroundDatum;
+  /** Right-handed Three.js Y-axis rotation in radians */
+  rotationY: number;
+  /** Local bounding dimensions [widthX, heightY, depthZ] with local y in [0, heightY] */
+  localSize: Vec3Tuple;
+  /** Overall world-space enclosing AABB */
+  aabb: AABB3D;
+  /** Exact solid 3D sub-volume colliders used for physics & overlap auditing (empty for flush ground grates/flocks) */
+  solidColliders: AABB3D[];
+  surfaceTag: PhysicsSurfaceTag;
+  blocksGroundRoll: boolean;
+  reactive?: PropReactiveSpec;
+  scaffoldingMeta?: ScaffoldingShedMetadata;
+  vanRampMeta?: DeliveryVanRampMetadata;
+  treeOverhangMeta?: OverhangingTreeMetadata;
+  hotdogAwningMeta?: HotdogAwningMetadata;
+  hydrantBoostMeta?: HydrantGutterBoostMetadata;
+  steamLiftMeta?: SteamGrateLiftMetadata;
+  // Legacy optional tile indices kept optional for smooth component migration
+  tileCol?: number;
+  tileRow?: number;
+}
+
+export type CoursePropSpec = PlacedProp;
+
+export interface StrategicShotRouteSpec {
+  id: string;
+  name: string;
+  strokeNumber: 1 | 2;
+  recommendedClub: 'driver' | 'wedge' | 'skimmer' | 'putter';
+  origin: Vec3Tuple;
+  targetPoint: Vec3Tuple;
+  summary: string;
+  keyPropIds: string[];
+}
+
+export type AuditStationId =
+  | 'tee_forward'
+  | 'tee_backward_180'
+  | 'mid_street'
+  | 'corner_dogleg'
+  | 'courtyard_green_out';
+
+export interface AuditCameraStationSpec {
+  id: AuditStationId;
+  label: string;
+  groundY: AllowedGroundDatum;
+  /** Eye-level camera position [x, groundY + 1.65, z] */
+  position: Vec3Tuple;
+  lookAt: Vec3Tuple;
+  fovDeg: number;
+  expectedLandmarks: string[];
+}
+
+export interface StreetScoutCameraSpec {
+  id: 'street_scout_peek';
+  label: string;
+  position: Vec3Tuple;
+  lookAt: Vec3Tuple;
+  fovDeg: number;
+  maxAllowedHeightY: number;
+}
+
+export interface CourseMasterPlan {
+  holeNumber: 1;
+  holeId: 'hole-1-5th-and-mercer';
+  holeName: 'Hole 1: 5th & Mercer';
+  subtitle: string;
+  par: 4;
+  targetCenterlineMeters: 72;
+  computedCenterlineMeters: number;
+  worldBoundsXZ: {
+    minX: number;
+    maxX: number;
+    minZ: number;
+    maxZ: number;
+  };
+  teePosition: Vec3Tuple;
+  teeElevationY: AllowedGroundDatum;
+  /** Initial compass aim yaw (0 = North along -Z down 5th Ave) */
+  initialAimYaw: number;
+  aPositionCrosswalk: CrosswalkLandingPadSpec;
+  vanLoadingZone: VanLoadingZoneSpec;
+  cup: HoleCupSpec;
+  fountainDropZone: Vec3Tuple;
+  centerlineSegments: CenterlineSegmentSpec[];
+  groundZones: GroundSurfaceZoneSpec[];
+  gutters: StormGutterTrackSpec[];
+  stormGrates: StormDrainGrateSpec[];
+  curbs: StoneCurbSegmentSpec[];
+  ramps: WalkableRampSpec[];
+  perimeterBuildings: PerimeterBuildingSpec[];
+  skylineBackdrops: PerimeterBuildingSpec[];
+  architecturalWalls: ArchitecturalWallSpec[];
+  courtyardPergola: CourtyardPergolaSpec;
+  stringLightSpans: StringLightSpanSpec[];
+  props: CoursePropSpec[];
+  strategicRoutes: StrategicShotRouteSpec[];
+  auditStations: AuditCameraStationSpec[];
+  streetScoutCamera: StreetScoutCameraSpec;
+}
+
+// ============================================================================
+// Legacy Compatibility Structural Types (for smooth downstream migration)
+// ============================================================================
+export type TileRampSpec = WalkableRampSpec & {
+  localBoundsXZ: { minX: number; maxX: number; minZ: number; maxZ: number };
+};
+
 export interface GutterTrackSpec {
   id: string;
   kind: 'straight' | 'corner_90';
-  /** Width of U-channel (meters, typically 0.52m) */
   width: number;
-  /** Recessed depth below street 0.00m (typically 0.06m -> troughY = -0.06m) */
   depth: number;
   troughY: number;
-  /** Adjacent 15cm concrete curb wall height (0.15m) */
   curbHeight: number;
-  /** For straight tracks: local start & end [x, y, z] */
   start?: Vec3Tuple;
   end?: Vec3Tuple;
-  /** For 90-degree curved corner tracks: arc pivot [x, 0, z], radius, startAngleRad, endAngleRad in XZ */
   arcCenter?: Vec3Tuple;
   arcRadius?: number;
   startAngleRad?: number;
   endAngleRad?: number;
 }
 
-/**
- * Water hazard sensor volume in tile-local space.
- */
-export interface WaterZoneSpec {
-  id: string;
-  shape: 'box' | 'cylinder';
-  center: Vec3Tuple;
-  /** Used when shape === 'box' */
-  size?: Vec3Tuple;
-  /** Used when shape === 'cylinder' */
-  radius?: number;
-  height?: number;
-  surfaceY: number;
-  basinY: number;
-}
-
 export interface PlacedTile {
   id: string;
-  col: number;
-  row: number;
-  /** World X center of this 8m x 8m tile */
   worldX: number;
-  /** World Z center of this 8m x 8m tile */
   worldZ: number;
-  blueprintId: TileBlueprintId;
-  category: TileCategory;
-  /** Clockwise quarter turns from top view (0..3) */
-  rotationSteps: TileRotationSteps;
-  /** Exact Three.js Y-axis rotation in radians: -rotationSteps * (Math.PI / 2) */
   rotationY: number;
-  /** World-oriented edge sockets [north (-Z), east (+X), south (+Z), west (-X)] */
-  sockets: CardinalSockets;
-  /** Primary playable surface elevation of this tile */
-  baseElevationY: number;
-  tier: ElevationTierId;
-  cupArchetype?: CupArchetype;
-  flagColor?: FlagColor;
-  /** Local-space cup offset [lx, groundY, lz] if this is a cup tile */
-  localCupOffset?: Vec3Tuple;
-  /** Local-space next-tee offset [lx, groundY, lz] if this is a cup tile */
-  localNextTeeOffset?: Vec3Tuple;
-  surfaces: TileBoxSurface[];
-  ramps: TileRampSpec[];
   gutters: GutterTrackSpec[];
-  waterZones: WaterZoneSpec[];
-  /** World-space bounding box of this tile */
-  aabb: AABB3D;
-}
-
-export type PropType =
-  | 'hotdog_cart_umbrella'
-  | 'fire_hydrant_jet'
-  | 'curved_gutter_corner'
-  | 'subway_steam_grate'
-  | 'scaffolding_tunnel'
-  | 'delivery_box_van'
-  | 'bistro_umbrella_set'
-  | 'fountain_water_hazard'
-  | 'pigeon_flock'
-  | 'street_tree'
-  | 'brass_bollard'
-  | 'street_lamp';
-
-export const SIGNATURE_PROP_TYPES: readonly PropType[] = [
-  'hotdog_cart_umbrella',
-  'fire_hydrant_jet',
-  'curved_gutter_corner',
-  'subway_steam_grate',
-  'scaffolding_tunnel',
-  'delivery_box_van',
-  'bistro_umbrella_set',
-  'fountain_water_hazard',
-  'pigeon_flock',
-] as const;
-
-export const ALL_PROP_TYPES: readonly PropType[] = [
-  ...SIGNATURE_PROP_TYPES,
-  'street_tree',
-  'brass_bollard',
-  'street_lamp',
-] as const;
-
-export interface PropReactiveSpec {
-  kind:
-    | 'umbrella_trampoline'
-    | 'hydrant_water_jet'
-    | 'gutter_corner_bank'
-    | 'steam_updraft'
-    | 'scaffolding_underpass'
-    | 'van_roof_bounce'
-    | 'water_hazard'
-    | 'pigeon_scatter';
-  /** World-space center of reactive sensor/collider */
-  zoneCenter: Vec3Tuple;
-  /** Half-extents or radius depending on sensor geometry */
-  zoneHalfExtents?: Vec3Tuple;
-  zoneRadius?: number;
-  /** Restitution for trampoline/rooftop bounces (0.55 for umbrellas) */
-  restitution?: number;
-  /** Deterministic velocity boost or updraft impulse in world [vx, vy, vz] */
-  boostVelocity?: Vec3Tuple;
-  /** Periodic gust cycle in seconds (e.g. subway steam grate) */
-  cycleSeconds?: number;
-  /** Fraction of cycle active in (0, 1] */
-  dutyCycle?: number;
-  /** Clear underpass height in meters for Skimmer shots (cart wheel gap, scaffolding tunnel) */
-  underpassClearHeight?: number;
-  underpassClearWidth?: number;
-}
-
-export interface PlacedProp {
-  id: string;
-  type: PropType;
-  tileCol: number;
-  tileRow: number;
-  /** World position [x, groundY, z]; position[1] matches host surface elevation within 1e-4 */
-  position: Vec3Tuple;
-  /** Exact host surface elevation in world Y */
-  groundY: number;
-  /** Rotation around +Y in radians */
-  rotationY: number;
-  /** Local-space full size [widthX, heightY, depthZ] with local y in [0, heightY] */
-  localSize: Vec3Tuple;
-  /** Exact world-space AABB */
-  aabb: AABB3D;
-  /** True if the prop has solid blocking footprint at ground level; false for pure ground grates/birds */
-  blocksGroundRoll: boolean;
-  reactive?: PropReactiveSpec;
 }
 
 export interface FlagPinSpec {
   color: FlagColor;
   index: number;
-  archetype: CupArchetype;
-  tileCol: number;
-  tileRow: number;
-  /** World cup center [x, elevationY, z] flush on green surface */
   position: Vec3Tuple;
   elevationY: number;
-  tier: ElevationTierId;
-  /** Obstacle-free green apron radius around cup (>= 1.5m) */
   apronRadius: number;
-  /** Cup capture radius in meters */
   cupRadius: number;
-  /** Flat next-tee position on the clear 1.5m apron beside this cup */
   nextTeePosition: Vec3Tuple;
 }
 
-export interface CourseReachabilityEdge {
-  fromId: 'start' | FlagColor;
-  toFlag: FlagColor;
-  strokes: number;
-  recommendedClubs: string[];
-}
-
 export interface GeneratedCityCourse {
-  /** Requested user/daily seed string */
   seed: string;
-  /** Sub-seed attempt index that passed 100% hard validation (0 when first attempt passes) */
-  resolvedAttempt: number;
-  /** Effective deterministic seed string (`seed` or `${seed}#${resolvedAttempt}`) */
-  effectiveSeed: string;
-  gridCols: number;
-  gridRows: number;
-  tileSize: number;
-  islandSize: number;
-  /** 36 placed modular tiles in row-major order (index = row * 6 + col) */
   tiles: PlacedTile[];
-  /** Validated city props with exact groundY and non-overlapping AABBs */
   props: PlacedProp[];
-  /** Initial starting tee position [x, groundY, z] */
   startTeePosition: Vec3Tuple;
-  startTeeTile: { col: number; row: number };
-  /** Suggested initial camera/aim yaw in radians from startTeePosition */
   initialAimYaw: number;
-  /** All 5 color-coded flags across the 5 distinct cup archetypes */
   flags: FlagPinSpec[];
-  /** Pre-verified reachability matrix (start -> all 5 flags, and all 5x4 flag pairs in <= 3 strokes) */
-  reachability: CourseReachabilityEdge[];
-  /** Generation time in milliseconds */
-  generationMs: number;
-}
-
-export interface CourseValidationResult {
-  valid: boolean;
-  errors: string[];
-  socketMismatches: number;
-  curbChannelDiscontinuities: number;
-  unreachableTier2Greens: number;
-  aabbOverlaps: number;
-  floatingProps: number;
-  minFlagSpacingMeters: number;
-  apronViolations: number;
-  maxPairwiseStrokes: number;
 }

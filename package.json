@@ -7,7 +7,7 @@
     "build": "next build",
     "start": "next start",
     "typecheck": "tsc --noEmit",
-    "test": "node --no-warnings --experimental-strip-types --import ./tests/register-ts.mjs --test tests/generator.test.ts"
+    "test": "node --no-warnings --experimental-strip-types --import ./tests/register-ts.mjs --test tests/layoutAudit.test.ts"
   },
   "dependencies": {
     "@react-three/drei": "^10.7.9",
