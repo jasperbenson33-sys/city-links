@@ -4,26 +4,32 @@ import React, { useMemo, useRef } from 'react';
 import { useFrame } from '@react-three/fiber';
 import * as THREE from 'three';
 import {
-  buildCoaxialUmbrellaSpec,
   buildCoaxialWheelSpec,
+  buildPitchedAwningSpec,
   type CoaxialWheelSpec,
-} from '@/engine/geometryHelpers';
+} from '@/lib/geometryHelpers';
 import { CONFETTI_TOYBOX_MATERIALS, TOYBOX_MATERIALS } from '@/materials';
 
 export interface HotdogCartPropProps {
   position?: [number, number, number];
   rotationY?: number;
-  /** Timestamp (performance.now() * 0.001 or clock elapsed seconds) of most recent umbrella hit. */
+  /** Timestamp (performance.now() * 0.001) of most recent awning hit. */
   lastHitAt?: number;
+  /** Pitched awning slope in degrees matching COURSE_MASTER_PLAN (28 deg). */
+  pitchDeg?: number;
+  /** Restitution coefficient for QA display & wireframe metadata. */
+  restitution?: number;
   showWireframe?: boolean;
 }
 
-const STEAM_COUNT = 8;
-const CONFETTI_COUNT = 18;
+const STEAM_COUNT = 7;
+const CONFETTI_COUNT = 16;
+const LUG_COUNT = 6;
 
 /**
  * Shared sub-component rendering a coaxial spoked wheel directly from CoaxialWheelSpec.
- * Every tire, rim, hub, spoke, and axle shares the exact same wheel rotation plane & center.
+ * Every tire, rim, hub, hubcap, lug-bolt ring, spoke, and axle shares the exact same
+ * wheel rotation plane & center along spec.axleDirection.
  */
 export function CoaxialWheelMeshGroup({
   spec,
@@ -31,16 +37,47 @@ export function CoaxialWheelMeshGroup({
   tireMaterial = TOYBOX_MATERIALS.tireRubber,
   rimMaterial = TOYBOX_MATERIALS.chromeSilver,
   hubMaterial = TOYBOX_MATERIALS.brassAccent,
+  showLugRing = true,
 }: {
   spec: CoaxialWheelSpec;
   position: [number, number, number];
   tireMaterial?: THREE.Material;
   rimMaterial?: THREE.Material;
   hubMaterial?: THREE.Material;
+  showLugRing?: boolean;
 }) {
+  const lugPositions = useMemo(() => {
+    if (!showLugRing) return [] as Array<[number, number, number]>;
+    const [cx, cy, cz] = spec.wheelCenter;
+    const [ox, , oz] = spec.hubcap.outboardPosition;
+    const lugOrbitR = Math.min(
+      spec.rim.innerRadius * 0.62,
+      Math.max(spec.hub.radius * 0.68, spec.hubcap.radius * 0.58)
+    );
+
+    const isX = spec.axleAxis === 'x';
+    const u: [number, number, number] = isX ? [0, 1, 0] : [1, 0, 0];
+    const v: [number, number, number] = isX ? [0, 0, 1] : [0, 1, 0];
+
+    const baseAx = isX ? ox : oz;
+    const axisDir = isX ? 0 : 2;
+    const centerArr: [number, number, number] = [cx, cy, cz];
+    centerArr[axisDir] = baseAx;
+
+    return Array.from({ length: LUG_COUNT }, (_, idx) => {
+      const a = (idx / LUG_COUNT) * Math.PI * 2;
+      const ca = Math.cos(a) * lugOrbitR;
+      const sa = Math.sin(a) * lugOrbitR;
+      return [
+        centerArr[0] + u[0] * ca + v[0] * sa,
+        centerArr[1] + u[1] * ca + v[1] * sa,
+        centerArr[2] + u[2] * ca + v[2] * sa,
+      ] as [number, number, number];
+    });
+  }, [spec, showLugRing]);
+
   return (
     <group position={position}>
-      {/* Torus Tire (bottom touches exact y = 0) */}
       <mesh
         castShadow
         receiveShadow
@@ -58,7 +95,6 @@ export function CoaxialWheelMeshGroup({
         />
       </mesh>
 
-      {/* Coaxial Inner Metal Rim Band */}
       <mesh
         castShadow
         position={spec.rim.position}
@@ -77,7 +113,6 @@ export function CoaxialWheelMeshGroup({
         />
       </mesh>
 
-      {/* Coaxial Hub & Axle */}
       <mesh
         castShadow
         position={spec.hub.position}
@@ -93,6 +128,48 @@ export function CoaxialWheelMeshGroup({
           ]}
         />
       </mesh>
+
+      <mesh
+        castShadow
+        position={spec.hubcap.outboardPosition}
+        rotation={spec.hubcap.rotation}
+        material={hubMaterial}
+      >
+        <cylinderGeometry
+          args={[
+            spec.hubcap.radius,
+            spec.hubcap.radius,
+            spec.hubcap.thickness,
+            12,
+          ]}
+        />
+      </mesh>
+      <mesh
+        position={spec.hubcap.inboardPosition}
+        rotation={spec.hubcap.rotation}
+        material={TOYBOX_MATERIALS.darkIron}
+      >
+        <cylinderGeometry
+          args={[
+            spec.hubcap.radius * 0.9,
+            spec.hubcap.radius * 0.9,
+            spec.hubcap.thickness,
+            12,
+          ]}
+        />
+      </mesh>
+
+      {lugPositions.map((lugPos, idx) => (
+        <mesh
+          key={`lug-${idx}`}
+          position={lugPos}
+          rotation={spec.hub.rotation}
+          material={TOYBOX_MATERIALS.darkIron}
+        >
+          <cylinderGeometry args={[0.011, 0.011, 0.022, 6]} />
+        </mesh>
+      ))}
+
       <mesh
         position={spec.axle.position}
         rotation={spec.axle.rotation}
@@ -108,7 +185,6 @@ export function CoaxialWheelMeshGroup({
         />
       </mesh>
 
-      {/* Coaxial Radial Spokes lying strictly inside the wheel plane */}
       {spec.spokes.map((spoke) => (
         <mesh
           key={spoke.index}
@@ -125,20 +201,26 @@ export function CoaxialWheelMeshGroup({
 }
 
 /**
- * Curbside Hotdog Cart & Bouncy Striped Umbrella.
- * - Twin coaxial spoked wheels flush at y = 0 with wide underpass clearance for Skimmer shots.
- * - Coaxial striped umbrella canopy with squash-and-stretch hit spring, brass vendor bell, and steamer puffs.
+ * Curbside Hotdog Vendor Cart & 28-Degree Pitched Striped Awning.
+ * - Twin coaxial spoked wheels flush at y = 0 + rear/front stabilizer kickstands at y = 0.
+ * - Stainless & painted cream/coral cart with glowing glass warmer/condiment bay and steaming hotdogs.
+ * - Red-and-white striped canvas awning built via buildPitchedAwningSpec(pitchDeg: 28, restitution: 0.28)
+ *   supported cleanly from below by 4 corner counter stanchions + underside purlins/rafters
+ *   trimmed strictly to the underside plane so zero poles pierce through the top canvas.
  */
 export function HotdogCartProp({
   position = [0, 0, 0],
   rotationY = 0,
   lastHitAt = -10,
+  pitchDeg = 28,
+  restitution = 0.28,
   showWireframe = false,
 }: HotdogCartPropProps) {
-  const canopyBounceRef = useRef<THREE.Group>(null);
+  const awningBounceRef = useRef<THREE.Group>(null);
   const bellRef = useRef<THREE.Group>(null);
   const steamGroupRef = useRef<THREE.Group>(null);
   const confettiGroupRef = useRef<THREE.Group>(null);
+  const elapsedRef = useRef(0);
 
   const wheelSpec = useMemo(
     () =>
@@ -151,410 +233,516 @@ export function HotdogCartProp({
         hubRadius: 0.062,
         hubWidth: 0.12,
         axleRadius: 0.022,
-        axleLength: 0.2,
+        axleLength: 0.22,
       }),
     []
   );
 
-  // Umbrella mounted on cart counter top (y = 1.18) -> canopy base at 2.04m, apex at 2.46m
-  const cartDeckY = 1.18;
-  const umbrellaSpec = useMemo(
+  const awningSpec = useMemo(
     () =>
-      buildCoaxialUmbrellaSpec({
-        canopyBaseY: 0.86,
-        canopyHeight: 0.42,
-        canopyRadius: 1.28,
-        ribCount: 8,
-        poleRadius: 0.032,
-        baseStandRadius: 0.14,
-        baseStandHeight: 0.04,
-        restitution: 0.55,
+      buildPitchedAwningSpec({
+        width: 2.1,
+        slopedDepth: 1.65,
+        centerY: 2.15,
+        pitchDeg,
+        stripeCount: 7,
+        mountBottomY: 1.18,
+        restitution,
+        rotationY,
       }),
-    []
+    [pitchDeg, restitution, rotationY]
   );
 
   const confettiSpecs = useMemo(() => {
     return Array.from({ length: CONFETTI_COUNT }, (_, i) => {
       const ang = (i / CONFETTI_COUNT) * Math.PI * 2;
-      const spd = 1.8 + (i % 4) * 0.65;
+      const spd = 1.6 + (i % 4) * 0.55;
       return {
         vx: Math.cos(ang) * spd,
-        vy: 2.8 + (i % 5) * 0.5,
+        vy: 2.4 + (i % 5) * 0.45,
         vz: Math.sin(ang) * spd,
         rotSpeed: 6 + (i % 4) * 2,
       };
     });
   }, []);
 
-  useFrame(({ clock }) => {
-    const t = clock.getElapsedTime();
-    const now = performance.now() * 0.001;
-    const dtAnim = now - lastHitAt;
-    const hitActive = dtAnim >= 0 && dtAnim < 0.85;
+  // 4 corner counter stanchions trimmed cleanly to the exact underside plane of the 28-deg awning
+  const cornerStanchions = useMemo(() => {
+    const cartDeckY = 1.18;
+    const pitchRad = (pitchDeg * Math.PI) / 180;
+    const centerY = awningSpec.center[1];
+    // Canvas panel bottom surface vertical projection: -halfThickness / cos(pitchRad) (~0.034m) + snug seat
+    const undersideOffset = 0.045;
+    const zFront = 0.58;
+    const zRear = -0.58;
+    const xs = [-0.64, 0.64];
+    const zs = [zFront, zRear];
 
-    if (canopyBounceRef.current) {
-      if (hitActive) {
-        const decay = Math.exp(-5.6 * dtAnim);
-        const wave = Math.cos(dtAnim * 24.0);
-        const sy = 1.0 - 0.34 * decay * wave;
-        const sxz = 1.0 + 0.22 * decay * wave;
-        canopyBounceRef.current.scale.set(sxz, sy, sxz);
+    const posts: Array<{
+      x: number;
+      z: number;
+      topY: number;
+      height: number;
+      midY: number;
+    }> = [];
+    for (const x of xs) {
+      for (const z of zs) {
+        const topY = centerY - z * Math.tan(pitchRad) - undersideOffset;
+        const height = Math.max(0.2, topY - cartDeckY);
+        posts.push({
+          x,
+          z,
+          topY,
+          height,
+          midY: cartDeckY + height * 0.5,
+        });
+      }
+    }
+
+    const frontTopY = centerY - zFront * Math.tan(pitchRad) - undersideOffset;
+    const rearTopY = centerY - zRear * Math.tan(pitchRad) - undersideOffset;
+    const rafterDx = zFront - zRear;
+    const rafterDy = rearTopY - frontTopY;
+    const rafterLength = Math.hypot(rafterDx, rafterDy) + 0.16;
+
+    return {
+      posts,
+      frontPurlin: { y: frontTopY, z: zFront },
+      rearPurlin: { y: rearTopY, z: zRear },
+      rafter: {
+        y: (frontTopY + rearTopY) * 0.5 - 0.015,
+        z: (zFront + zRear) * 0.5,
+        length: rafterLength,
+        pitchRad,
+      },
+    };
+  }, [awningSpec.center, pitchDeg]);
+
+  useFrame((_, delta) => {
+    elapsedRef.current += Math.min(delta, 0.05);
+    const t = elapsedRef.current;
+    const now = typeof performance !== 'undefined' ? performance.now() * 0.001 : t;
+    const dt = now - lastHitAt;
+
+    if (awningBounceRef.current) {
+      if (dt >= 0 && dt < 0.72) {
+        const decay = Math.exp(-5.4 * dt);
+        const wave = Math.sin(dt * 24.0);
+        const sx = 1 + 0.12 * decay * wave;
+        const sy = 1 - 0.16 * decay * wave;
+        awningBounceRef.current.scale.set(sx, sy, sx);
       } else {
-        const breathe = 1.0 + Math.sin(t * 2.1) * 0.01;
-        canopyBounceRef.current.scale.set(breathe, 1.0, breathe);
+        const breath = 1 + Math.sin(t * 2.1) * 0.006;
+        awningBounceRef.current.scale.set(breath, 1, breath);
       }
     }
 
     if (bellRef.current) {
-      if (dtAnim >= 0 && dtAnim < 0.95) {
-        bellRef.current.rotation.z =
-          Math.sin(dtAnim * 42.0) * 0.48 * Math.exp(-3.4 * dtAnim);
-      } else {
-        bellRef.current.rotation.z = Math.sin(t * 1.9) * 0.04;
-      }
+      bellRef.current.rotation.z =
+        dt >= 0 && dt < 0.9
+          ? Math.sin(dt * 26.0) * 0.42 * Math.exp(-3.4 * dt)
+          : Math.sin(t * 1.9) * 0.04;
     }
 
     if (steamGroupRef.current) {
       const children = steamGroupRef.current.children;
-      const boost = hitActive ? 1.7 : 1.0;
       for (let i = 0; i < children.length; i++) {
         const puff = children[i];
-        const phase = (t * 0.85 + i / STEAM_COUNT) % 1.0;
-        const ang = i * 0.85;
+        const phase = (t * 0.65 + i / STEAM_COUNT) % 1.0;
+        const rise = phase * 0.52;
         puff.position.set(
-          Math.cos(ang) * 0.16 * phase * boost,
-          phase * 0.72 * boost,
-          Math.sin(ang) * 0.16 * phase * boost
+          Math.sin(t * 2.2 + i * 1.3) * 0.12,
+          1.48 + rise,
+          Math.cos(t * 1.8 + i) * 0.08
         );
-        puff.scale.setScalar(Math.max(0.01, Math.sin(phase * Math.PI) * 0.11 * boost));
+        const s = Math.sin(phase * Math.PI) * 0.072;
+        puff.scale.setScalar(Math.max(0.01, s));
       }
     }
 
     if (confettiGroupRef.current) {
-      const burstActive = dtAnim >= 0 && dtAnim < 1.05;
-      confettiGroupRef.current.visible = burstActive;
-      if (burstActive) {
+      const active = dt >= 0 && dt < 1.1;
+      confettiGroupRef.current.visible = active;
+      if (active) {
         const children = confettiGroupRef.current.children;
         for (let i = 0; i < children.length; i++) {
+          const piece = children[i];
           const spec = confettiSpecs[i];
-          const chip = children[i];
-          chip.position.set(
-            spec.vx * dtAnim,
-            spec.vy * dtAnim - 4.8 * dtAnim * dtAnim,
-            spec.vz * dtAnim
+          piece.position.set(
+            spec.vx * dt * 0.62,
+            2.28 + spec.vy * dt - 4.9 * dt * dt,
+            spec.vz * dt * 0.62
           );
-          chip.rotation.x = dtAnim * spec.rotSpeed;
-          chip.rotation.z = dtAnim * spec.rotSpeed * 0.8;
-          chip.scale.setScalar(Math.max(0.01, (1 - dtAnim / 1.05) * 0.12));
+          piece.rotation.set(dt * spec.rotSpeed, dt * spec.rotSpeed * 0.8, 0);
         }
       }
     }
   });
 
-  const sliceAngle = (Math.PI * 2) / umbrellaSpec.canopy.segments;
-  const canopyCenterY = umbrellaSpec.canopy.position[1];
+  const cartDeckY = 1.18;
+  const [centerX, centerY, centerZ] = awningSpec.center;
 
   return (
     <group
-      name="hotdog-cart-umbrella-prop"
+      name="hotdog-cart-prop"
       position={position}
       rotation={[0, rotationY, 0]}
     >
-      {/* Twin Coaxial Spoked Wheels Flush at y = 0 (1.38m clear tunnel gap between tires!) */}
-      <CoaxialWheelMeshGroup spec={wheelSpec} position={[-0.76, 0, 0]} />
-      <CoaxialWheelMeshGroup spec={wheelSpec} position={[0.76, 0, 0]} />
+      {/* Twin Coaxial Spoked Wheels Seated Flush at y = 0 */}
+      <CoaxialWheelMeshGroup
+        spec={wheelSpec}
+        position={[-0.76, 0, 0]}
+        rimMaterial={TOYBOX_MATERIALS.chromeSilver}
+        hubMaterial={TOYBOX_MATERIALS.brassAccent}
+      />
+      <CoaxialWheelMeshGroup
+        spec={wheelSpec}
+        position={[0.76, 0, 0]}
+        rimMaterial={TOYBOX_MATERIALS.chromeSilver}
+        hubMaterial={TOYBOX_MATERIALS.brassAccent}
+      />
 
-      {/* Vertical Wheel Struts connecting Axle Hubs (y=0.34) up into Cart Underside (y=0.60) */}
-      {[-0.68, 0.68].map((sx, idx) => (
-        <mesh
-          key={`strut-${idx}`}
-          castShadow
-          position={[sx, 0.48, 0]}
-          material={TOYBOX_MATERIALS.darkIron}
-        >
-          <boxGeometry args={[0.07, 0.3, 0.09]} />
-        </mesh>
+      {/* Solid Cross Axle Connecting Twin Wheels */}
+      <mesh
+        castShadow
+        position={[0, wheelSpec.wheelCenter[1], 0]}
+        rotation={[0, 0, Math.PI * 0.5]}
+        material={TOYBOX_MATERIALS.darkIron}
+      >
+        <cylinderGeometry args={[0.026, 0.026, 1.54, 8]} />
+      </mesh>
+
+      {/* Four Corner Stabilizer Kickstands Flush at y = 0 */}
+      {(
+        [
+          [-0.46, -0.72],
+          [0.46, -0.72],
+          [-0.46, 0.72],
+          [0.46, 0.72],
+        ] as Array<[number, number]>
+      ).map(([kx, kz], idx) => (
+        <group key={`kickstand-${idx}`} position={[kx, 0, kz]}>
+          <mesh
+            castShadow
+            receiveShadow
+            position={[0, 0.015, 0]}
+            material={TOYBOX_MATERIALS.tireRubber}
+          >
+            <cylinderGeometry args={[0.055, 0.065, 0.03, 10]} />
+          </mesh>
+          <mesh
+            castShadow
+            position={[0, 0.24, 0]}
+            material={TOYBOX_MATERIALS.darkIron}
+          >
+            <cylinderGeometry args={[0.024, 0.024, 0.44, 8]} />
+          </mesh>
+        </group>
       ))}
 
-      {/* Elevated Cart Chassis (bottom at y = 0.60 > 0.56m clear underpass!) */}
+      {/* Lower Painted Cream & Coral Cart Carriage (y: 0.44 -> 1.18) */}
       <mesh
         castShadow
         receiveShadow
-        position={[0, 0.86, 0]}
+        position={[0, 0.8, 0]}
+        material={TOYBOX_MATERIALS.pastelCream}
+      >
+        <boxGeometry args={[1.32, 0.68, 1.66]} />
+      </mesh>
+      <mesh
+        castShadow
+        receiveShadow
+        position={[0, 0.82, 0]}
         material={TOYBOX_MATERIALS.awningCoral}
       >
-        <boxGeometry args={[1.32, 0.52, 1.88]} />
+        <boxGeometry args={[1.35, 0.2, 1.69]} />
       </mesh>
-      {/* Crisp Cream Waist Stripe */}
       <mesh
-        position={[0, 0.86, 0]}
-        material={TOYBOX_MATERIALS.awningCream}
+        castShadow
+        position={[0, 1.12, 0]}
+        material={TOYBOX_MATERIALS.brassAccent}
       >
-        <boxGeometry args={[1.35, 0.16, 1.91]} />
+        <boxGeometry args={[1.38, 0.04, 1.72]} />
       </mesh>
-      {/* Brushed Stainless Cart Counter Top (top at y = 1.18) */}
+
+      {/* Stainless Serving Counter Deck (top at y = 1.18) */}
       <mesh
         castShadow
         receiveShadow
-        position={[0, 1.15, 0]}
+        position={[0, 1.16, 0]}
         material={TOYBOX_MATERIALS.chromeSilver}
       >
-        <boxGeometry args={[1.42, 0.06, 1.98]} />
+        <boxGeometry args={[1.42, 0.04, 1.8]} />
       </mesh>
-      {/* Rear Push Handle (-Z) */}
-      <mesh
-        castShadow
-        position={[0, 1.06, -1.06]}
-        rotation={[0, 0, Math.PI * 0.5]}
-        material={TOYBOX_MATERIALS.chromeSilver}
-      >
-        <cylinderGeometry args={[0.026, 0.026, 1.16, 8]} />
-      </mesh>
-      {[-0.52, 0.52].map((hx, idx) => (
+
+      {/* Side Condiment Shelf (+X) with Ketchup, Mustard & Napkin Dispenser */}
+      <group position={[0.78, 1.14, 0]}>
         <mesh
-          key={`handle-arm-${idx}`}
-          position={[hx, 1.06, -1.0]}
-          rotation={[Math.PI * 0.5, 0, 0]}
+          castShadow
+          receiveShadow
           material={TOYBOX_MATERIALS.chromeSilver}
         >
-          <cylinderGeometry args={[0.022, 0.022, 0.18, 6]} />
-        </mesh>
-      ))}
-
-      {/* 3D Hotdog-in-a-Bun Display Sign on Counter */}
-      <group position={[0.26, 1.29, 0.42]} rotation={[0, -0.35, 0]}>
-        <mesh
-          castShadow
-          rotation={[Math.PI * 0.5, 0, 0]}
-          material={TOYBOX_MATERIALS.hotdogBun}
-        >
-          <capsuleGeometry args={[0.11, 0.34, 6, 10]} />
+          <boxGeometry args={[0.16, 0.03, 0.88]} />
         </mesh>
         <mesh
           castShadow
-          position={[0, 0.055, 0]}
-          rotation={[Math.PI * 0.5, 0, 0]}
-          material={TOYBOX_MATERIALS.hotdogSausage}
+          position={[0.01, 0.1, -0.22]}
+          material={TOYBOX_MATERIALS.hydrantCoral}
         >
-          <capsuleGeometry args={[0.072, 0.42, 6, 10]} />
+          <cylinderGeometry args={[0.032, 0.038, 0.16, 10]} />
+        </mesh>
+        <mesh
+          castShadow
+          position={[0.01, 0.19, -0.22]}
+          material={TOYBOX_MATERIALS.hydrantCoral}
+        >
+          <coneGeometry args={[0.016, 0.04, 8]} />
+        </mesh>
+        <mesh
+          castShadow
+          position={[0.01, 0.1, -0.02]}
+          material={TOYBOX_MATERIALS.taxiAmber}
+        >
+          <cylinderGeometry args={[0.032, 0.038, 0.16, 10]} />
+        </mesh>
+        <mesh
+          castShadow
+          position={[0.01, 0.19, -0.02]}
+          material={TOYBOX_MATERIALS.taxiAmber}
+        >
+          <coneGeometry args={[0.016, 0.04, 8]} />
+        </mesh>
+        <mesh
+          castShadow
+          position={[0.01, 0.095, 0.22]}
+          material={TOYBOX_MATERIALS.chromeSilver}
+        >
+          <boxGeometry args={[0.08, 0.14, 0.14]} />
         </mesh>
       </group>
 
-      {/* Steamer Lid & Rising Steam Puffs */}
-      <mesh
-        castShadow
-        position={[-0.24, 1.23, -0.38]}
-        material={TOYBOX_MATERIALS.chromeSilver}
-      >
-        <boxGeometry args={[0.52, 0.1, 0.62]} />
-      </mesh>
-      <group ref={steamGroupRef} position={[-0.24, 1.3, -0.38]}>
+      {/* Rear Push Bar (-Z) */}
+      <group position={[0, 1.04, -0.95]}>
+        <mesh
+          castShadow
+          position={[-0.48, 0, 0.06]}
+          rotation={[Math.PI * 0.5, 0, 0]}
+          material={TOYBOX_MATERIALS.darkIron}
+        >
+          <cylinderGeometry args={[0.02, 0.02, 0.14, 8]} />
+        </mesh>
+        <mesh
+          castShadow
+          position={[0.48, 0, 0.06]}
+          rotation={[Math.PI * 0.5, 0, 0]}
+          material={TOYBOX_MATERIALS.darkIron}
+        >
+          <cylinderGeometry args={[0.02, 0.02, 0.14, 8]} />
+        </mesh>
+        <mesh
+          castShadow
+          rotation={[0, 0, Math.PI * 0.5]}
+          material={TOYBOX_MATERIALS.chromeSilver}
+        >
+          <cylinderGeometry args={[0.024, 0.024, 1.04, 10]} />
+        </mesh>
+      </group>
+
+      {/* Glowing Condiment & Hotdog Warmer Bay on Counter */}
+      <group position={[0, cartDeckY, -0.04]}>
+        <mesh
+          castShadow
+          receiveShadow
+          position={[0, 0.03, 0]}
+          material={TOYBOX_MATERIALS.chromeSilver}
+        >
+          <boxGeometry args={[0.88, 0.06, 0.72]} />
+        </mesh>
+        <mesh
+          position={[0, 0.09, 0]}
+          material={TOYBOX_MATERIALS.bulbWarmGlow}
+        >
+          <boxGeometry args={[0.74, 0.05, 0.58]} />
+        </mesh>
+        <mesh
+          position={[0, 0.19, 0]}
+          material={TOYBOX_MATERIALS.windowSkyGlass}
+        >
+          <boxGeometry args={[0.82, 0.22, 0.66]} />
+        </mesh>
+        <mesh
+          castShadow
+          position={[0, 0.31, 0]}
+          material={TOYBOX_MATERIALS.chromeSilver}
+        >
+          <boxGeometry args={[0.86, 0.03, 0.7]} />
+        </mesh>
+        {[-0.2, 0, 0.2].map((hx, idx) => (
+          <group key={`hotdog-${idx}`} position={[hx, 0.14, 0]}>
+            <mesh
+              castShadow
+              rotation={[Math.PI * 0.5, 0, 0]}
+              material={TOYBOX_MATERIALS.hotdogBun}
+            >
+              <capsuleGeometry args={[0.042, 0.18, 4, 8]} />
+            </mesh>
+            <mesh
+              castShadow
+              position={[0, 0.022, 0]}
+              rotation={[Math.PI * 0.5, 0, 0]}
+              material={TOYBOX_MATERIALS.hotdogSausage}
+            >
+              <capsuleGeometry args={[0.025, 0.22, 4, 8]} />
+            </mesh>
+          </group>
+        ))}
+      </group>
+
+      {/* Brass Vendor Bell on Front Left Counter */}
+      <group ref={bellRef} position={[-0.48, cartDeckY + 0.08, 0.74]}>
+        <mesh
+          castShadow
+          position={[0, -0.05, 0]}
+          material={TOYBOX_MATERIALS.darkIron}
+        >
+          <cylinderGeometry args={[0.02, 0.028, 0.06, 8]} />
+        </mesh>
+        <mesh castShadow material={TOYBOX_MATERIALS.brassAccent}>
+          <coneGeometry args={[0.068, 0.1, 10]} />
+        </mesh>
+      </group>
+
+      {/* 4 Corner Awning Support Stanchions Trimmed Strictly to Underside Plane of 28-Deg Awning */}
+      {cornerStanchions.posts.map((post, idx) => (
+        <group key={`corner-stanchion-${idx}`}>
+          <mesh
+            castShadow
+            position={[post.x, post.midY, post.z]}
+            material={TOYBOX_MATERIALS.chromeSilver}
+          >
+            <cylinderGeometry args={[0.022, 0.024, post.height, 8]} />
+          </mesh>
+          <mesh
+            position={[post.x, cartDeckY + 0.015, post.z]}
+            material={TOYBOX_MATERIALS.brassAccent}
+          >
+            <cylinderGeometry args={[0.036, 0.042, 0.03, 8]} />
+          </mesh>
+          <mesh
+            position={[post.x, post.topY - 0.015, post.z]}
+            material={TOYBOX_MATERIALS.brassAccent}
+          >
+            <cylinderGeometry args={[0.032, 0.032, 0.03, 8]} />
+          </mesh>
+        </group>
+      ))}
+
+      {/* Underside Front & High-Rear Transverse Purlins + Pitched Side Rafters */}
+      {[cornerStanchions.frontPurlin, cornerStanchions.rearPurlin].map(
+        (purlin, idx) => (
+          <mesh
+            key={`purlin-${idx}`}
+            castShadow
+            position={[0, purlin.y - 0.015, purlin.z]}
+            rotation={[0, 0, Math.PI * 0.5]}
+            material={TOYBOX_MATERIALS.chromeSilver}
+          >
+            <cylinderGeometry args={[0.018, 0.018, 1.88, 8]} />
+          </mesh>
+        )
+      )}
+      {[-0.64, 0.64].map((rx, idx) => (
+        <mesh
+          key={`rafter-${idx}`}
+          castShadow
+          position={[rx, cornerStanchions.rafter.y, cornerStanchions.rafter.z]}
+          rotation={[Math.PI * 0.5 + cornerStanchions.rafter.pitchRad, 0, 0]}
+          material={TOYBOX_MATERIALS.chromeSilver}
+        >
+          <cylinderGeometry
+            args={[0.018, 0.018, cornerStanchions.rafter.length, 8]}
+          />
+        </mesh>
+      ))}
+
+      {/* 28-Degree Pitched Red-and-White Striped Awning (Restitution: 0.28) */}
+      <group position={[centerX, centerY, centerZ]}>
+        <group ref={awningBounceRef}>
+          <group position={[-centerX, -centerY, -centerZ]}>
+            {awningSpec.stripePanels.map((panel) => (
+              <mesh
+                key={`stripe-${panel.index}`}
+                castShadow
+                receiveShadow
+                position={panel.position}
+                rotation={panel.rotation}
+                material={
+                  panel.isAlternateStripe
+                    ? TOYBOX_MATERIALS.awningCream
+                    : TOYBOX_MATERIALS.awningCoral
+                }
+              >
+                <boxGeometry args={panel.size} />
+              </mesh>
+            ))}
+
+            {/* Front Valance Drop Apron */}
+            <mesh
+              castShadow
+              receiveShadow
+              position={awningSpec.frontValance.position}
+              rotation={awningSpec.frontValance.rotation}
+              material={TOYBOX_MATERIALS.awningCoral}
+            >
+              <boxGeometry args={awningSpec.frontValance.size} />
+            </mesh>
+          </group>
+        </group>
+      </group>
+
+      {/* Animated Gentle Warmer Steam Puffs */}
+      <group ref={steamGroupRef}>
         {Array.from({ length: STEAM_COUNT }, (_, idx) => (
-          <mesh key={idx} material={TOYBOX_MATERIALS.steamColumnWhite}>
-            <icosahedronGeometry args={[1, 1]} />
+          <mesh
+            key={`steam-${idx}`}
+            position={[0, 1.55, 0]}
+            material={TOYBOX_MATERIALS.steamColumnWhite}
+          >
+            <icosahedronGeometry args={[0.9, 0]} />
           </mesh>
         ))}
       </group>
 
-      {/* Shiny Brass Vendor Bell Hanging on Front Corner */}
-      <group ref={bellRef} position={[-0.56, 1.32, 0.86]}>
-        <mesh
-          castShadow
-          position={[0, -0.07, 0]}
-          material={TOYBOX_MATERIALS.brassAccent}
-        >
-          <coneGeometry args={[0.13, 0.18, 12]} />
-        </mesh>
-        <mesh position={[0, 0.03, 0]} material={TOYBOX_MATERIALS.brassAccent}>
-          <sphereGeometry args={[0.04, 8, 8]} />
-        </mesh>
+      {/* Joyful Confetti Burst on Awning Bounce */}
+      <group ref={confettiGroupRef} visible={false}>
+        {confettiSpecs.map((_, idx) => (
+          <mesh
+            key={`confetti-${idx}`}
+            material={
+              CONFETTI_TOYBOX_MATERIALS[idx % CONFETTI_TOYBOX_MATERIALS.length]
+            }
+          >
+            <boxGeometry args={[0.075, 0.02, 0.11]} />
+          </mesh>
+        ))}
       </group>
 
-      {/* Coaxial Bouncy Striped Umbrella Mounted Flush on Counter (y = 1.18) */}
-      <group position={[0, cartDeckY, 0]}>
-        <mesh
-          castShadow
-          position={umbrellaSpec.baseStand.position}
-          material={TOYBOX_MATERIALS.brassAccent}
-        >
-          <cylinderGeometry
-            args={[
-              umbrellaSpec.baseStand.radius,
-              umbrellaSpec.baseStand.radius * 1.08,
-              umbrellaSpec.baseStand.height,
-              14,
-            ]}
-          />
-        </mesh>
-        <mesh
-          castShadow
-          position={umbrellaSpec.pole.position}
-          material={TOYBOX_MATERIALS.brassAccent}
-        >
-          <cylinderGeometry
-            args={[
-              umbrellaSpec.pole.radius,
-              umbrellaSpec.pole.radius,
-              umbrellaSpec.pole.length,
-              10,
-            ]}
-          />
-        </mesh>
-        <mesh
-          position={umbrellaSpec.runnerHub.position}
-          material={TOYBOX_MATERIALS.chromeSilver}
-        >
-          <cylinderGeometry
-            args={[
-              umbrellaSpec.runnerHub.radius,
-              umbrellaSpec.runnerHub.radius,
-              umbrellaSpec.runnerHub.height,
-              12,
-            ]}
-          />
-        </mesh>
-
-        {/* Coaxial Stretchers & Squash-and-Stretch Canopy */}
-        <group
-          ref={canopyBounceRef}
-          position={[0, canopyCenterY, 0]}
-        >
-          <group position={[0, -canopyCenterY, 0]}>
-            {umbrellaSpec.ribs.map((rib) => (
-              <mesh
-                key={`rib-${rib.index}`}
-                position={rib.position}
-                rotation={rib.rotation}
-                material={TOYBOX_MATERIALS.darkIron}
-              >
-                <cylinderGeometry args={[rib.radius, rib.radius, rib.length, 6]} />
-              </mesh>
-            ))}
-            {umbrellaSpec.stretchers.map((st) => (
-              <mesh
-                key={`str-${st.index}`}
-                position={st.position}
-                rotation={st.rotation}
-                material={TOYBOX_MATERIALS.chromeSilver}
-              >
-                <cylinderGeometry args={[st.radius, st.radius, st.length, 6]} />
-              </mesh>
-            ))}
-
-            {/* 8 Alternating Coral & Cream Canopy Wedges Aligned to Ribs */}
-            {Array.from({ length: umbrellaSpec.canopy.segments }, (_, idx) => {
-              const thetaStart = Math.PI * 0.5 + idx * sliceAngle;
-              const midAz = (idx + 0.5) * sliceAngle;
-              const mat =
-                idx % 2 === 0
-                  ? TOYBOX_MATERIALS.awningCoral
-                  : TOYBOX_MATERIALS.awningCream;
-              return (
-                <React.Fragment key={`wedge-${idx}`}>
-                  <mesh
-                    castShadow
-                    receiveShadow
-                    position={umbrellaSpec.canopy.position}
-                    material={mat}
-                  >
-                    <cylinderGeometry
-                      args={[
-                        0.05,
-                        umbrellaSpec.canopy.radius,
-                        umbrellaSpec.canopy.height,
-                        1,
-                        1,
-                        false,
-                        thetaStart,
-                        sliceAngle,
-                      ]}
-                    />
-                  </mesh>
-                  {/* Scalloped Valance Flap */}
-                  <mesh
-                    castShadow
-                    position={[
-                      Math.cos(midAz) * (umbrellaSpec.canopy.radius * 0.94),
-                      umbrellaSpec.canopy.baseY - 0.06,
-                      -Math.sin(midAz) * (umbrellaSpec.canopy.radius * 0.94),
-                    ]}
-                    rotation={[0, midAz + Math.PI * 0.5, 0]}
-                    material={mat}
-                  >
-                    <boxGeometry args={[umbrellaSpec.canopy.radius * 0.72, 0.13, 0.04]} />
-                  </mesh>
-                </React.Fragment>
-              );
-            })}
-
-            {/* Coaxial Brass Finial */}
-            <mesh
-              castShadow
-              position={umbrellaSpec.finial.position}
-              material={TOYBOX_MATERIALS.brassAccent}
-            >
-              <sphereGeometry args={[umbrellaSpec.finial.radius * 1.4, 10, 8]} />
-            </mesh>
-          </group>
-        </group>
-
-        {/* Confetti Pop on Umbrella Bounce */}
-        <group
-          ref={confettiGroupRef}
-          position={[0, umbrellaSpec.canopy.apexY, 0]}
-          visible={false}
-        >
-          {confettiSpecs.map((_, idx) => (
-            <mesh
-              key={idx}
-              material={CONFETTI_TOYBOX_MATERIALS[idx % CONFETTI_TOYBOX_MATERIALS.length]}
-            >
-              <boxGeometry args={[1, 0.16, 0.65]} />
-            </mesh>
-          ))}
-        </group>
-      </group>
-
-      {/* QA Collider & Underpass Wireframes */}
       {showWireframe && (
         <group>
-          {/* Left & Right Wheel Colliders */}
-          {[-0.76, 0.76].map((wx, idx) => (
-            <mesh
-              key={`wf-w-${idx}`}
-              position={[wx, wheelSpec.outerRadius, 0]}
-              material={TOYBOX_MATERIALS.qaColliderWireframe}
-            >
-              <boxGeometry
-                args={[0.2, wheelSpec.outerRadius * 2, wheelSpec.outerRadius * 2]}
-              />
-            </mesh>
-          ))}
-          {/* Cart Body Collider */}
-          <mesh position={[0, 0.89, 0]} material={TOYBOX_MATERIALS.qaColliderWireframe}>
-            <boxGeometry args={[1.4, 0.58, 1.98]} />
-          </mesh>
-          {/* Clear Underpass Tunnel Indicator */}
-          <mesh position={[0, 0.28, 0]} material={TOYBOX_MATERIALS.qaSensorWireframe}>
-            <boxGeometry args={[1.05, 0.56, 2.0]} />
-          </mesh>
-          {/* Umbrella Trampoline Collider */}
           <mesh
-            position={[
-              umbrellaSpec.trampolineCollider.center[0],
-              cartDeckY + umbrellaSpec.trampolineCollider.center[1],
-              umbrellaSpec.trampolineCollider.center[2],
-            ]}
+            position={awningSpec.center}
+            rotation={awningSpec.canvasRotation}
+            material={TOYBOX_MATERIALS.qaColliderWireframe}
+          >
+            <boxGeometry
+              args={[awningSpec.width, 0.06, awningSpec.slopedDepth]}
+            />
+          </mesh>
+          <mesh
+            position={[0, 1.25, 0]}
             material={TOYBOX_MATERIALS.qaBoundsWireframe}
           >
-            <cylinderGeometry
-              args={[
-                umbrellaSpec.trampolineCollider.radius,
-                umbrellaSpec.trampolineCollider.radius,
-                umbrellaSpec.trampolineCollider.height,
-                16,
-              ]}
-            />
+            <boxGeometry args={[1.65, 2.5, 2.0]} />
           </mesh>
         </group>
       )}

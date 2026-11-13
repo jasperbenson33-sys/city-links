@@ -4,69 +4,288 @@ import React, { useEffect, useRef } from 'react';
 import {
   CLUB_ORDER,
   CLUB_SPECS,
-  FLAG_COLORS,
-  FLAG_COLOR_META,
-  type FlagColor,
+  type ClubId,
+  type PhysicsSurfaceTag,
+  type SoundEventPayload,
+  type Vec3Tuple,
 } from '@/types';
+import { HOLE_1_CUP } from '@/config/courseMasterPlan';
 import { useCurbsideStore } from '@/store';
-import { soundEngine } from '@/audio/soundEngine';
+import { soundEngine } from '@/lib/sound';
 import { ClubHeadIcon } from './ClubHeadIcon';
 import { ScorecardModal } from './ScorecardModal';
 
+type ShotPhase =
+  | 'aiming'
+  | 'pulling'
+  | 'ball_in_flight'
+  | 'settling'
+  | 'fountain_drop'
+  | 'holed_out';
+
+interface StoreCompat {
+  holeNumber?: number;
+  holeName?: string;
+  par?: number;
+  holeDistanceMeters?: number;
+  strokes?: number;
+  totalStrokes?: number;
+  personalBest?: number | null;
+  dailyBest?: { bestStrokes?: number } | null;
+  hydratePersonalBest?: () => void;
+  hydrateDailyBest?: () => void;
+  selectedClub?: ClubId;
+  selectClub?: (club: ClubId) => void;
+  setSelectedClub?: (club: ClubId, manual?: boolean) => void;
+  shotPhase?: ShotPhase;
+  ballPhase?: string;
+  aimPower?: number;
+  aimPreview?: { isAiming?: boolean; power?: number };
+  distanceToPinMeters?: number;
+  ballPosition?: Vec3Tuple;
+  currentSurfaceTag?: PhysicsSurfaceTag;
+  isStreetScoutActive?: boolean;
+  cameraMode?: string;
+  toggleStreetScout?: () => void;
+  toggleCameraMode?: () => void;
+  isMuted?: boolean;
+  muted?: boolean;
+  toggleMute?: () => void;
+  toggleMuted?: () => void;
+  isHoleComplete?: boolean;
+  isRoundComplete?: boolean;
+  penaltyStrokes?: number;
+  lastEventBanner?: string | null;
+  trickToast?: { seq: number; label: string } | null;
+  replayHole?: () => void;
+  resetHole?: () => void;
+  restartRound?: () => void;
+  soundEventSeq?: number;
+  lastSoundEvent?: SoundEventPayload | null;
+}
+
+const CLUB_UI_META: Record<
+  ClubId,
+  { label: string; badge: string; accentHex: string }
+> = {
+  driver: {
+    label: 'Sky Driver',
+    badge: 'Carry',
+    accentHex: CLUB_SPECS.driver.accentHex,
+  },
+  wedge: {
+    label: 'Cloud Lobber',
+    badge: 'Wedge',
+    accentHex: CLUB_SPECS.wedge.accentHex,
+  },
+  skimmer: {
+    label: 'Curb Skimmer',
+    badge: 'Low Punch',
+    accentHex: CLUB_SPECS.skimmer.accentHex,
+  },
+  putter: {
+    label: 'Sidewalk Putter',
+    badge: 'Roll',
+    accentHex: CLUB_SPECS.putter.accentHex,
+  },
+};
+
+function formatLieDisplay(
+  surfaceTag: PhysicsSurfaceTag | undefined,
+  strokes: number,
+  distanceToPin: number,
+): { label: string; dotColor: string } {
+  if (
+    strokes === 0 &&
+    distanceToPin > 44 &&
+    (!surfaceTag || surfaceTag === 'road_asphalt')
+  ) {
+    return { label: 'Tee Box', dotColor: '#D95D39' };
+  }
+
+  switch (surfaceTag) {
+    case 'road_asphalt':
+      return { label: '5th Ave Fairway', dotColor: '#64748B' };
+    case 'crosswalk_landing':
+      return { label: 'Crosswalk A-Pos', dotColor: '#F59E0B' };
+    case 'loading_zone_asphalt':
+      return { label: 'Loading Zone', dotColor: '#FACC15' };
+    case 'sidewalk_paver':
+      return { label: 'Sidewalk', dotColor: '#D6B88D' };
+    case 'subway_brick_plaza':
+      return { label: 'Subway Plaza', dotColor: '#B45309' };
+    case 'storm_gutter':
+      return { label: 'Storm Gutter', dotColor: '#0EA5E9' };
+    case 'stone_curb':
+      return { label: 'Stone Curb', dotColor: '#94A3B8' };
+    case 'courtyard_ramp':
+      return { label: 'Courtyard Ramp', dotColor: '#C28E5C' };
+    case 'courtyard_paver':
+      return { label: 'Courtyard Stone', dotColor: '#E0BA84' };
+    case 'green_fringe_collar':
+      return { label: 'Green Fringe', dotColor: '#16A34A' };
+    case 'putting_green_turf':
+      return { label: 'Putting Green', dotColor: '#22C55E' };
+    case 'patio_rough':
+      return { label: 'Patio Rough', dotColor: '#65A30D' };
+    case 'fountain_hazard':
+      return { label: 'Fountain Drop', dotColor: '#0284C7' };
+    case 'awning_cushion':
+      return { label: 'Awning Cushion', dotColor: '#EF4444' };
+    case 'umbrella_bounce':
+      return { label: 'Café Umbrella', dotColor: '#F97316' };
+    case 'van_ramp_metal':
+      return { label: 'Van Ramp', dotColor: '#475569' };
+    case 'van_roof_deck':
+      return { label: 'Van Roof', dotColor: '#334155' };
+    case 'masonry_wall':
+      return { label: 'Brick Wall', dotColor: '#9A3412' };
+    default:
+      return { label: 'Tee Box', dotColor: '#D95D39' };
+  }
+}
+
+function getBannerBadgeEmoji(banner: string): string {
+  const lower = banner.toLowerCase();
+  if (lower.includes('awning') || lower.includes('umbrella')) return '🎪';
+  if (lower.includes('gutter') || lower.includes('hydrant')) return '💦';
+  if (lower.includes('steam')) return '💨';
+  if (lower.includes('fountain') || lower.includes('penalty')) return '💧';
+  if (lower.includes('van') || lower.includes('ramp')) return '🚐';
+  if (lower.includes('scaffold')) return '🏗️';
+  if (lower.includes('cup') || lower.includes('hole')) return '⛳';
+  return '✨';
+}
+
+function formatPinDistance(meters: number): string {
+  const clamped = Math.max(0, meters);
+  if (clamped < 10) {
+    return `${clamped.toFixed(1)}m`;
+  }
+  return `${Math.round(clamped)}m`;
+}
+
 export function CurbsideHud() {
-  const seed = useCurbsideStore((s) => s.seed);
-  const roundMode = useCurbsideStore((s) => s.roundMode);
-  const totalStrokes = useCurbsideStore((s) => s.totalStrokes);
-  const sunkFlags = useCurbsideStore((s) => s.sunkFlags);
-  const sunkOrder = useCurbsideStore((s) => s.sunkOrder);
-  const activeTargetFlag = useCurbsideStore((s) => s.activeTargetFlag);
-  const lastSunkFlag = useCurbsideStore((s) => s.lastSunkFlag);
-  const isRoundComplete = useCurbsideStore((s) => s.isRoundComplete);
-  const dailyBest = useCurbsideStore((s) => s.dailyBest);
+  const holeNumber = useCurbsideStore(
+    (s) => (s as unknown as StoreCompat).holeNumber ?? 1,
+  );
+  const holeName = useCurbsideStore(
+    (s) => (s as unknown as StoreCompat).holeName ?? '5th & Mercer',
+  );
+  const par = useCurbsideStore((s) => (s as unknown as StoreCompat).par ?? 4);
+  const holeDistanceMeters = useCurbsideStore(
+    (s) => (s as unknown as StoreCompat).holeDistanceMeters ?? 72,
+  );
 
-  const selectedClub = useCurbsideStore((s) => s.selectedClub);
-  const ballPhase = useCurbsideStore((s) => s.ballPhase);
-  const hasTakenFirstStroke = useCurbsideStore((s) => s.hasTakenFirstStroke);
-  const aimPreview = useCurbsideStore((s) => s.aimPreview);
-  const cameraMode = useCurbsideStore((s) => s.cameraMode);
-  const muted = useCurbsideStore((s) => s.muted);
-  const canMulligan = useCurbsideStore((s) => s.canMulligan);
-  const trickToast = useCurbsideStore((s) => s.trickToast);
+  const strokes = useCurbsideStore((s) => {
+    const st = s as unknown as StoreCompat;
+    return st.strokes ?? st.totalStrokes ?? 0;
+  });
 
-  const hydrateDailyBest = useCurbsideStore((s) => s.hydrateDailyBest);
-  const loadDailyCity = useCurbsideStore((s) => s.loadDailyCity);
-  const loadRandomCity = useCurbsideStore((s) => s.loadRandomCity);
-  const restartRound = useCurbsideStore((s) => s.restartRound);
-  const mulligan = useCurbsideStore((s) => s.mulligan);
-  const setSelectedClub = useCurbsideStore((s) => s.setSelectedClub);
-  const toggleCameraMode = useCurbsideStore((s) => s.toggleCameraMode);
-  const toggleMuted = useCurbsideStore((s) => s.toggleMuted);
+  const personalBest = useCurbsideStore((s) => {
+    const st = s as unknown as StoreCompat;
+    if (st.personalBest !== undefined) return st.personalBest;
+    return st.dailyBest?.bestStrokes ?? null;
+  });
 
-  // Track Daily Best prior to completing a round so ScorecardModal knows if it beat a prior score
-  const previousDailyBestRef = useRef<number | null>(null);
-  useEffect(() => {
-    if (!isRoundComplete) {
-      previousDailyBestRef.current = dailyBest?.bestStrokes ?? null;
+  const selectedClub = useCurbsideStore(
+    (s) => ((s as unknown as StoreCompat).selectedClub ?? 'driver') as ClubId,
+  );
+
+  const shotPhase = useCurbsideStore((s) => {
+    const st = s as unknown as StoreCompat;
+    if (st.shotPhase) return st.shotPhase;
+    if (st.ballPhase === 'cupped') return 'holed_out';
+    if (st.ballPhase === 'inflight') return 'ball_in_flight';
+    if (st.ballPhase === 'hazard_drop') return 'fountain_drop';
+    if (st.aimPreview?.isAiming) return 'pulling';
+    return 'aiming';
+  });
+
+  const aimPower = useCurbsideStore((s) => {
+    const st = s as unknown as StoreCompat;
+    if (typeof st.aimPower === 'number') return st.aimPower;
+    return st.aimPreview?.power ?? 0;
+  });
+
+  const distanceToPinMeters = useCurbsideStore((s) => {
+    const st = s as unknown as StoreCompat;
+    if (typeof st.distanceToPinMeters === 'number') {
+      return st.distanceToPinMeters;
     }
-  }, [isRoundComplete, dailyBest]);
+    if (Array.isArray(st.ballPosition)) {
+      const dx = HOLE_1_CUP.position[0] - st.ballPosition[0];
+      const dz = HOLE_1_CUP.position[2] - st.ballPosition[2];
+      return Math.hypot(dx, dz);
+    }
+    return holeDistanceMeters;
+  });
 
-  // Hydrate Daily Best and subscribe Web Audio toybox synth with zero extra React renders
+  const currentSurfaceTag = useCurbsideStore(
+    (s) => (s as unknown as StoreCompat).currentSurfaceTag,
+  );
+
+  const isStreetScoutActive = useCurbsideStore((s) => {
+    const st = s as unknown as StoreCompat;
+    if (typeof st.isStreetScoutActive === 'boolean') {
+      return st.isStreetScoutActive;
+    }
+    return st.cameraMode === 'street_scout';
+  });
+
+  const isMuted = useCurbsideStore((s) => {
+    const st = s as unknown as StoreCompat;
+    if (typeof st.isMuted === 'boolean') return st.isMuted;
+    return st.muted ?? false;
+  });
+
+  const isHoleComplete = useCurbsideStore((s) => {
+    const st = s as unknown as StoreCompat;
+    return Boolean(
+      st.isHoleComplete || st.isRoundComplete || st.shotPhase === 'holed_out',
+    );
+  });
+
+  const lastEventBanner = useCurbsideStore((s) => {
+    const st = s as unknown as StoreCompat;
+    return st.lastEventBanner ?? st.trickToast?.label ?? null;
+  });
+
+  // Track Personal Best prior to completion so ScorecardModal knows when beaten
+  const previousBestRef = useRef<number | null>(null);
   useEffect(() => {
-    hydrateDailyBest();
+    if (!isHoleComplete) {
+      previousBestRef.current = personalBest;
+    }
+  }, [isHoleComplete, personalBest]);
+
+  // Hydrate Personal Best & initialize Web Audio unlock/mute sync once
+  useEffect(() => {
+    const initState = useCurbsideStore.getState() as unknown as StoreCompat;
+    initState.hydratePersonalBest?.();
+    initState.hydrateDailyBest?.();
+
     const cleanupAudio = soundEngine.init();
-    soundEngine.setMuted(useCurbsideStore.getState().muted);
+    const initialMuted = Boolean(initState.isMuted ?? initState.muted ?? false);
+    soundEngine.setMuted(initialMuted);
 
-    let lastSeq = useCurbsideStore.getState().soundEventSeq;
-    let lastMuted = useCurbsideStore.getState().muted;
+    let lastMuted = initialMuted;
+    let lastSeq = initState.soundEventSeq ?? 0;
 
-    const unsubscribe = useCurbsideStore.subscribe((state) => {
-      if (state.muted !== lastMuted) {
-        lastMuted = state.muted;
-        soundEngine.setMuted(state.muted);
+    const unsubscribe = useCurbsideStore.subscribe((rawState) => {
+      const state = rawState as unknown as StoreCompat;
+      const nextMuted = Boolean(state.isMuted ?? state.muted ?? false);
+      if (nextMuted !== lastMuted) {
+        lastMuted = nextMuted;
+        soundEngine.setMuted(nextMuted);
       }
-      if (state.soundEventSeq !== lastSeq && state.lastSoundEvent) {
+      if (
+        typeof state.soundEventSeq === 'number' &&
+        state.soundEventSeq !== lastSeq &&
+        state.lastSoundEvent
+      ) {
         lastSeq = state.soundEventSeq;
-        if (!state.muted) {
+        if (!nextMuted) {
           soundEngine.playPayload(state.lastSoundEvent);
         }
       }
@@ -76,193 +295,137 @@ export function CurbsideHud() {
       unsubscribe();
       cleanupAudio();
     };
-  }, [hydrateDailyBest]);
+  }, []);
 
-  const handleToggleSound = () => {
-    const wasMuted = useCurbsideStore.getState().muted;
-    toggleMuted();
+  const handleSelectClub = (clubId: ClubId) => {
+    soundEngine.unlock();
+    soundEngine.playUiClick(0.75);
+    const st = useCurbsideStore.getState() as unknown as StoreCompat;
+    if (st.selectClub) {
+      st.selectClub(clubId);
+    } else {
+      st.setSelectedClub?.(clubId, true);
+    }
+  };
+
+  const handleToggleStreetScout = () => {
+    soundEngine.unlock();
+    soundEngine.playUiClick(0.8);
+    const st = useCurbsideStore.getState() as unknown as StoreCompat;
+    if (st.toggleStreetScout) {
+      st.toggleStreetScout();
+    } else {
+      st.toggleCameraMode?.();
+    }
+  };
+
+  const handleToggleMute = () => {
+    const st = useCurbsideStore.getState() as unknown as StoreCompat;
+    const wasMuted = Boolean(st.isMuted ?? st.muted ?? false);
+    if (st.toggleMute) {
+      st.toggleMute();
+    } else {
+      st.toggleMuted?.();
+    }
     if (wasMuted) {
       soundEngine.setMuted(false);
       soundEngine.unlock();
-      soundEngine.play('ui_tap', { intensity: 0.7 });
+      soundEngine.playUiClick(0.75);
     } else {
       soundEngine.setMuted(true);
     }
   };
 
-  // Build 5 flag progress dots: sunk flags first in exact player order, then remaining unsunk flags
-  const orderedFlagDots: Array<{
-    color: FlagColor;
-    sunk: boolean;
-    orderNumber: number | null;
-  }> = [
-    ...sunkOrder.map((entry) => ({
-      color: entry.color,
-      sunk: true,
-      orderNumber: entry.orderIndex + 1,
-    })),
-    ...FLAG_COLORS.filter((c) => !sunkFlags[c]).map((color) => ({
-      color,
-      sunk: false,
-      orderNumber: null,
-    })),
-  ];
+  const handleReplayHole = () => {
+    soundEngine.unlock();
+    soundEngine.playUiClick(0.85);
+    const st = useCurbsideStore.getState() as unknown as StoreCompat;
+    if (st.replayHole) {
+      st.replayHole();
+    } else if (st.resetHole) {
+      st.resetHole();
+    } else {
+      st.restartRound?.();
+    }
+  };
 
-  const activeClub = CLUB_SPECS[selectedClub];
-  const showFirstStrokeWhisper =
-    !isRoundComplete &&
-    !hasTakenFirstStroke &&
-    !aimPreview.isAiming &&
-    !trickToast;
-  const showCuppedLegChip =
-    !isRoundComplete && ballPhase === 'cupped' && lastSunkFlag !== null;
+  const lie = formatLieDisplay(currentSurfaceTag, strokes, distanceToPinMeters);
+  const activeClubAccent = CLUB_SPECS[selectedClub]?.accentHex ?? '#FF6B4A';
+  const showGestureHint =
+    !isHoleComplete &&
+    strokes === 0 &&
+    shotPhase === 'aiming' &&
+    aimPower <= 0.01 &&
+    !lastEventBanner;
+  const isPulling = !isHoleComplete && shotPhase === 'pulling';
+  const displayDistance =
+    strokes === 0 && Math.abs(distanceToPinMeters - holeDistanceMeters) < 18
+      ? holeDistanceMeters
+      : distanceToPinMeters;
 
   return (
     <div
       className="pointer-events-none fixed inset-0 z-20 flex flex-col justify-between overflow-hidden"
       style={{
         paddingTop:
-          'max(0.625rem, var(--safe-top, env(safe-area-inset-top, 0px)))',
+          'max(0.55rem, var(--safe-top, env(safe-area-inset-top, 0px)))',
         paddingBottom:
-          'max(0.75rem, var(--safe-bottom, env(safe-area-inset-bottom, 0px)))',
+          'max(0.7rem, var(--safe-bottom, env(safe-area-inset-bottom, 0px)))',
         paddingLeft:
           'max(0.625rem, var(--safe-left, env(safe-area-inset-left, 0px)))',
         paddingRight:
           'max(0.625rem, var(--safe-right, env(safe-area-inset-right, 0px)))',
       }}
     >
-      {/* TOP BAR: Compact City Pill + 4 Action Buttons + Flag Progress Strip */}
+      {/* TOP WHISPER BAR + DYNAMIC LIE / EVENT TOAST */}
       <div className="pointer-events-none flex flex-col gap-1.5">
-        <header className="pointer-events-none flex items-center justify-between gap-1.5">
-          {/* City Pill (Daily • YYYY-MM-DD or 1-Tap Return from Random City) */}
-          {roundMode === 'daily' ? (
-            <div
-              aria-label={`Today's Daily City ${seed}`}
-              className="pointer-events-none inline-flex min-h-[44px] max-w-[calc(100%-188px)] shrink items-center gap-1.5 truncate rounded-full border border-[#E2C294] bg-[#FFFDF8]/95 px-3 py-1.5 text-[12px] font-extrabold tracking-tight text-[#231914] shadow-[0_6px_18px_-6px_rgba(35,25,20,0.2)]"
-            >
-              <span aria-hidden="true" className="shrink-0 text-[13px]">
-                ☀️
+        <header className="pointer-events-none flex items-start justify-between gap-1.5">
+          {/* Left Compact Hole Pill */}
+          <div
+            aria-label={`Hole ${holeNumber}, ${holeName}, Par ${par}, ${formatPinDistance(displayDistance)} to pin`}
+            className="pointer-events-none inline-flex min-h-[44px] min-w-0 shrink flex-col justify-center rounded-2xl border border-[#E2C294] bg-[#FFFDF8]/92 px-3 py-1 text-[#231914] shadow-[0_6px_18px_-6px_rgba(35,25,20,0.2)] backdrop-blur-sm"
+          >
+            <div className="flex items-center gap-1.5 text-[11px] leading-tight font-black tracking-tight uppercase">
+              <span className="inline-block h-2 w-2 shrink-0 rounded-full bg-[#D95D39]" />
+              <span className="truncate">
+                Hole {holeNumber} • {holeName}
               </span>
-              <span className="truncate">Daily • {seed}</span>
             </div>
-          ) : (
-            <button
-              type="button"
-              data-hud-interactive="true"
-              onPointerDown={(e) => e.stopPropagation()}
-              onClick={loadDailyCity}
-              aria-label="Return to Today's Daily City"
-              className="pointer-events-auto inline-flex min-h-[44px] max-w-[calc(100%-188px)] shrink items-center gap-1.5 truncate rounded-full border border-[#E2C294] bg-[#FFFDF8]/95 px-2.5 py-1.5 text-[11.5px] font-extrabold tracking-tight text-[#231914] shadow-[0_6px_18px_-6px_rgba(35,25,20,0.2)] transition-transform duration-150 hover:bg-[#FFF5E2] active:scale-[0.96] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#231914]"
-            >
-              <span className="truncate">Random City</span>
-              <span className="shrink-0 rounded-full bg-[#231914] px-1.5 py-0.5 text-[10px] font-extrabold text-[#FFFDF8]">
-                Daily ↩
+            <div className="mt-0.5 flex items-center gap-1.5 text-[10.5px] leading-tight font-extrabold text-[#543E32] tabular-nums">
+              <span>PAR {par}</span>
+              <span aria-hidden="true" className="text-[#C7A67B]">
+                •
               </span>
-            </button>
-          )}
+              <span className="text-[#B93815]">
+                {formatPinDistance(displayDistance)} to pin
+              </span>
+            </div>
+          </div>
 
-          {/* Top-Right 44x44px Action Buttons */}
+          {/* Right Compact Controls Capsule */}
           <div
             data-hud-interactive="true"
             onPointerDown={(e) => e.stopPropagation()}
-            className="pointer-events-auto inline-flex shrink-0 items-center rounded-full border border-[#E2C294] bg-[#FFFDF8]/95 p-0.5 shadow-[0_6px_18px_-6px_rgba(35,25,20,0.2)]"
+            className="pointer-events-auto inline-flex shrink-0 items-center rounded-full border border-[#E2C294] bg-[#FFFDF8]/92 p-0.5 shadow-[0_6px_18px_-6px_rgba(35,25,20,0.2)] backdrop-blur-sm"
           >
-            {/* 1-Tap New Random City */}
-            <button
-              type="button"
-              aria-label="New Random City"
-              title="New Random City"
-              onClick={loadRandomCity}
-              className="flex h-11 w-11 items-center justify-center rounded-full text-[#231914] transition-[transform,background-color] duration-150 hover:bg-[#F5E6CE]/80 active:scale-[0.93] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#231914]"
-            >
-              <svg
-                viewBox="0 0 24 24"
-                fill="none"
-                aria-hidden="true"
-                className="h-[19px] w-[19px]"
-              >
-                <rect
-                  x="3.5"
-                  y="3.5"
-                  width="17"
-                  height="17"
-                  rx="4.2"
-                  stroke="currentColor"
-                  strokeWidth="2"
-                />
-                <circle cx="8.5" cy="8.5" r="1.4" fill="currentColor" />
-                <circle cx="15.5" cy="8.5" r="1.4" fill="currentColor" />
-                <circle cx="12" cy="12" r="1.4" fill="currentColor" />
-                <circle cx="8.5" cy="15.5" r="1.4" fill="currentColor" />
-                <circle cx="15.5" cy="15.5" r="1.4" fill="currentColor" />
-              </svg>
-            </button>
-
-            {/* 1-Tap Overview / Ball Focus Camera Toggle */}
+            {/* 1-Tap Street Scout Peek Toggle */}
             <button
               type="button"
               aria-label={
-                cameraMode === 'overview'
-                  ? 'Switch to Ball Focus view'
-                  : 'Switch to City Overview'
+                isStreetScoutActive
+                  ? 'Exit Street Scout Peek'
+                  : 'Street Scout Peek'
               }
-              aria-pressed={cameraMode === 'focus'}
-              title={cameraMode === 'overview' ? 'Ball Focus' : 'City Overview'}
-              onClick={toggleCameraMode}
+              aria-pressed={isStreetScoutActive}
+              title="Street Scout Peek"
+              onClick={handleToggleStreetScout}
               className={`flex h-11 w-11 items-center justify-center rounded-full transition-[transform,background-color,color] duration-150 active:scale-[0.93] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#231914] ${
-                cameraMode === 'focus'
-                  ? 'bg-[#231914] text-[#FFFDF8]'
+                isStreetScoutActive
+                  ? 'bg-[#D95D39] text-[#FFFDF8] shadow-xs'
                   : 'text-[#231914] hover:bg-[#F5E6CE]/80'
               }`}
             >
-              {cameraMode === 'overview' ? (
-                <svg
-                  viewBox="0 0 24 24"
-                  fill="none"
-                  aria-hidden="true"
-                  className="h-[19px] w-[19px]"
-                >
-                  <circle
-                    cx="12"
-                    cy="12"
-                    r="3.2"
-                    stroke="currentColor"
-                    strokeWidth="2"
-                  />
-                  <path
-                    d="M12 3.5V6.5M12 17.5V20.5M3.5 12H6.5M17.5 12H20.5"
-                    stroke="currentColor"
-                    strokeWidth="2"
-                    strokeLinecap="round"
-                  />
-                </svg>
-              ) : (
-                <svg
-                  viewBox="0 0 24 24"
-                  fill="none"
-                  aria-hidden="true"
-                  className="h-[19px] w-[19px]"
-                >
-                  <path
-                    d="M4 9V5.5C4 4.67 4.67 4 5.5 4H9M15 4H18.5C19.33 4 20 4.67 20 5.5V9M20 15V18.5C20 19.33 19.33 20 18.5 20H15M9 20H5.5C4.67 20 4 19.33 4 18.5V15"
-                    stroke="currentColor"
-                    strokeWidth="2"
-                    strokeLinecap="round"
-                    strokeLinejoin="round"
-                  />
-                  <circle cx="12" cy="12" r="2.2" fill="currentColor" />
-                </svg>
-              )}
-            </button>
-
-            {/* 1-Tap Restart Round */}
-            <button
-              type="button"
-              aria-label="Restart Round"
-              title="Restart Round"
-              onClick={restartRound}
-              className="flex h-11 w-11 items-center justify-center rounded-full text-[#231914] transition-[transform,background-color] duration-150 hover:bg-[#F5E6CE]/80 active:scale-[0.93] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#231914]"
-            >
+              {/* Elevated Corner Overview Eye/Map Icon */}
               <svg
                 viewBox="0 0 24 24"
                 fill="none"
@@ -270,35 +433,34 @@ export function CurbsideHud() {
                 className="h-[19px] w-[19px]"
               >
                 <path
-                  d="M4.5 10.5A7.5 7.5 0 1 1 6.7 17.3"
+                  d="M2.8 12C4.9 8.2 8.2 6.2 12 6.2C15.8 6.2 19.1 8.2 21.2 12C19.1 15.8 15.8 17.8 12 17.8C8.2 17.8 4.9 15.8 2.8 12Z"
                   stroke="currentColor"
-                  strokeWidth="2.1"
-                  strokeLinecap="round"
-                />
-                <path
-                  d="M4.5 5.5V10.5H9.5"
-                  stroke="currentColor"
-                  strokeWidth="2.1"
-                  strokeLinecap="round"
+                  strokeWidth="2"
                   strokeLinejoin="round"
+                />
+                <circle
+                  cx="12"
+                  cy="12"
+                  r="2.6"
+                  fill="currentColor"
                 />
               </svg>
             </button>
 
-            {/* 1-Tap Sound Mute */}
+            {/* Sound Mute Toggle */}
             <button
               type="button"
-              aria-label={muted ? 'Unmute Sound' : 'Mute Sound'}
-              aria-pressed={!muted}
-              title={muted ? 'Sound Off' : 'Sound On'}
-              onClick={handleToggleSound}
+              aria-label={isMuted ? 'Unmute Sound' : 'Mute Sound'}
+              aria-pressed={!isMuted}
+              title={isMuted ? 'Sound Off' : 'Sound On'}
+              onClick={handleToggleMute}
               className={`flex h-11 w-11 items-center justify-center rounded-full transition-[transform,background-color,color] duration-150 active:scale-[0.93] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#231914] ${
-                muted
+                isMuted
                   ? 'bg-[#EADAC2] text-[#4A3629]'
                   : 'text-[#231914] hover:bg-[#F5E6CE]/80'
               }`}
             >
-              {muted ? (
+              {isMuted ? (
                 <svg
                   viewBox="0 0 24 24"
                   fill="none"
@@ -340,201 +502,176 @@ export function CurbsideHud() {
                 </svg>
               )}
             </button>
+
+            {/* Quick Reset-Hole Button */}
+            <button
+              type="button"
+              aria-label="Reset Hole"
+              title="Reset Hole"
+              onClick={handleReplayHole}
+              className="flex h-11 w-11 items-center justify-center rounded-full text-[#231914] transition-[transform,background-color] duration-150 hover:bg-[#F5E6CE]/80 active:scale-[0.93] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#231914]"
+            >
+              <svg
+                viewBox="0 0 24 24"
+                fill="none"
+                aria-hidden="true"
+                className="h-[19px] w-[19px]"
+              >
+                <path
+                  d="M4.5 10.5A7.5 7.5 0 1 1 6.7 17.3"
+                  stroke="currentColor"
+                  strokeWidth="2.1"
+                  strokeLinecap="round"
+                />
+                <path
+                  d="M4.5 5.5V10.5H9.5"
+                  stroke="currentColor"
+                  strokeWidth="2.1"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                />
+              </svg>
+            </button>
           </div>
         </header>
 
-        {/* Row 2: Compact 5-Flag Progress Dots + Strokes + Daily Best + Optional 1-Tap Mulligan */}
-        <div className="pointer-events-none flex items-center justify-center gap-1.5">
+        {/* Sub-Row: Subtle Lie Pill (Left) + Stroke & Personal Best Badge (Right) */}
+        <div className="pointer-events-none flex items-center justify-between gap-2">
           <div
-            aria-label={`Flags sunk: ${sunkOrder.length} of 5. Total strokes: ${totalStrokes}`}
-            className="pointer-events-none inline-flex min-h-[36px] items-center gap-2 rounded-full border border-[#E2C294] bg-[#FFFDF8]/95 px-3 py-1 text-[#231914] shadow-[0_6px_16px_-6px_rgba(35,25,20,0.18)]"
+            aria-label={`Current lie: ${lie.label}`}
+            className="pointer-events-none inline-flex items-center gap-1.5 rounded-full border border-[#E2C294]/90 bg-[#FFFDF8]/88 px-2.5 py-1 text-[11px] leading-none font-extrabold tracking-tight text-[#231914] shadow-[0_4px_12px_-4px_rgba(35,25,20,0.16)] backdrop-blur-sm"
           >
-            {/* 5 Color-Coded Flag Dots (sunk flags fill in exact player sink order) */}
-            <div className="flex items-center gap-1.5">
-              {orderedFlagDots.map(({ color, sunk, orderNumber }) => {
-                const meta = FLAG_COLOR_META[color];
-                const isTarget = !sunk && activeTargetFlag === color;
-                const darkCheckInk = color === 'yellow' ? '#231914' : '#FFFFFF';
-                return (
-                  <span
-                    key={color}
-                    title={`${meta.label} flag${sunk ? ' (sunk)' : ''}`}
-                    className={`relative inline-flex h-4 w-4 items-center justify-center rounded-full text-[9px] leading-none font-black transition-transform duration-200 ${
-                      sunk ? 'scale-105 shadow-xs' : 'bg-white/90'
-                    }`}
-                    style={{
-                      backgroundColor: sunk ? meta.hex : 'rgba(255,255,255,0.9)',
-                      border: `2px solid ${meta.hex}`,
-                      boxShadow: isTarget
-                        ? `0 0 0 2px rgba(35,25,20,0.22)`
-                        : undefined,
-                      color: darkCheckInk,
-                    }}
-                  >
-                    {sunk ? orderNumber : ''}
-                  </span>
-                );
-              })}
-            </div>
-
             <span
               aria-hidden="true"
-              className="h-3.5 w-[1px] bg-[#E2C294]"
+              className="inline-block h-2 w-2 rounded-full"
+              style={{ backgroundColor: lie.dotColor }}
             />
+            <span>{lie.label}</span>
+          </div>
 
-            {/* Stroke Counter */}
-            <span className="text-[12.5px] font-black tracking-tight text-[#231914] tabular-nums">
-              {totalStrokes}{' '}
-              <span className="font-bold text-[#543E32]">
-                {totalStrokes === 1 ? 'Stroke' : 'Strokes'}
-              </span>
+          <div
+            aria-label={`Stroke ${strokes}${personalBest !== null ? `, Best ${personalBest}` : ''}`}
+            className="pointer-events-none inline-flex items-center gap-1.5 rounded-full border border-[#E2C294]/90 bg-[#FFFDF8]/92 px-2.5 py-1 text-[11px] leading-none font-extrabold tracking-tight text-[#231914] shadow-[0_4px_12px_-4px_rgba(35,25,20,0.16)] backdrop-blur-sm tabular-nums"
+          >
+            <span className="text-[#6B5142] uppercase">Stroke</span>
+            <span className="text-[12.5px] font-black text-[#231914]">
+              {strokes}
             </span>
-
-            {/* Daily Best Badge */}
-            {roundMode === 'daily' && dailyBest !== null && (
-              <span className="inline-flex items-center rounded-full border border-[#D99B26]/70 bg-[#FEF08A] px-2 py-0.5 text-[10.5px] font-extrabold tracking-tight text-[#422006] tabular-nums">
-                Best {dailyBest.bestStrokes}
-              </span>
+            {personalBest !== null && (
+              <>
+                <span aria-hidden="true" className="h-3 w-[1px] bg-[#E2C294]" />
+                <span className="inline-flex items-center rounded-full border border-[#D99B26]/70 bg-[#FEF08A] px-1.5 py-0.5 text-[9.5px] font-black text-[#422006]">
+                  BEST {personalBest}
+                </span>
+              </>
             )}
           </div>
-
-          {/* 1-Tap Mulligan button (only shown after at least 1 shot and before round ends) */}
-          {canMulligan && !isRoundComplete && (
-            <button
-              type="button"
-              data-hud-interactive="true"
-              onPointerDown={(e) => e.stopPropagation()}
-              onClick={mulligan}
-              aria-label="Mulligan last shot"
-              title="Mulligan last shot"
-              className="pointer-events-auto flex h-11 min-w-[44px] items-center justify-center gap-1 rounded-full border border-[#E2C294] bg-[#FFFDF8]/95 px-2.5 text-[11.5px] font-extrabold text-[#231914] shadow-[0_6px_16px_-6px_rgba(35,25,20,0.18)] transition-[transform,background-color] duration-150 hover:bg-[#F5E6CE] active:scale-[0.94] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#231914]"
-            >
-              <span aria-hidden="true" className="text-[13px]">
-                ↶
-              </span>
-              <span className="hidden min-[390px]:inline">Undo</span>
-            </button>
-          )}
         </div>
 
-        {/* Non-blocking Whisper before first stroke */}
-        {showFirstStrokeWhisper && (
-          <div className="pointer-events-none mt-0.5 flex justify-center">
-            <div className="pointer-events-none inline-flex items-center rounded-full border border-[#E2C294] bg-[#FFFDF8]/92 px-3.5 py-1 text-[12px] font-extrabold tracking-tight text-[#231914] shadow-[0_6px_16px_-6px_rgba(35,25,20,0.18)]">
-              Drag to aim &amp; release
-            </div>
-          </div>
-        )}
-
-        {/* Non-blocking Cupped Flag Chip (flags 1..4) */}
-        {showCuppedLegChip && lastSunkFlag && (
+        {/* Celebratory Event / Trick-Shot Toast */}
+        {lastEventBanner && !isHoleComplete && (
           <div
+            key={lastEventBanner}
             role="status"
             aria-live="polite"
             className="animate-toast-pop pointer-events-none mt-0.5 flex justify-center"
           >
-            <div className="pointer-events-none inline-flex items-center gap-1.5 rounded-full border border-[#E2C294] bg-[#FFFDF8] px-3.5 py-1 text-[12.5px] font-extrabold tracking-tight text-[#231914] shadow-[0_8px_20px_-6px_rgba(35,25,20,0.24)]">
+            <div className="pointer-events-none inline-flex items-center gap-1.5 rounded-full border border-[#D95D39]/50 bg-[#FFFDF8]/96 px-3.5 py-1 text-[12px] font-black tracking-tight text-[#231914] shadow-[0_8px_20px_-6px_rgba(35,25,20,0.24)]">
               <span aria-hidden="true">
-                {FLAG_COLOR_META[lastSunkFlag.color].emoji}
+                {getBannerBadgeEmoji(lastEventBanner)}
               </span>
-              <span>
-                {FLAG_COLOR_META[lastSunkFlag.color].label} Flag •{' '}
-                {lastSunkFlag.strokes}{' '}
-                {lastSunkFlag.strokes === 1 ? 'Stroke' : 'Strokes'}
-              </span>
-            </div>
-          </div>
-        )}
-
-        {/* Reactive Trick-Shot & Penalty Micro-Toasts */}
-        {trickToast && (
-          <div
-            key={trickToast.seq}
-            role="status"
-            aria-live="polite"
-            className="animate-toast-pop pointer-events-none mt-0.5 flex justify-center"
-          >
-            <div className="pointer-events-none inline-flex items-center rounded-full border border-[#E2C294] bg-[#FFFDF8] px-3.5 py-1 text-[12.5px] font-extrabold tracking-tight text-[#231914] shadow-[0_8px_20px_-6px_rgba(35,25,20,0.22)]">
-              {trickToast.label}
+              <span>{lastEventBanner}</span>
             </div>
           </div>
         )}
       </div>
 
-      {/* 5-FLAG COMPLETE SCORECARD MODAL */}
-      <ScorecardModal previousDailyBest={previousDailyBestRef.current} />
+      {/* HOLE COMPLETE CELEBRATION CARD */}
+      <ScorecardModal previousBest={previousBestRef.current} />
 
-      {/* BOTTOM THUMB ZONE: Subtle Pull Meter + 1-Tap 4-Club Switcher Pill */}
-      {!isRoundComplete && (
+      {/* BOTTOM THUMB ZONE: Pull Meter / Gesture Hint + 4-Club Selector Dock */}
+      {!isHoleComplete && (
         <div className="pointer-events-none flex flex-col items-center gap-1.5">
-          {/* Tactile Pull-Power Bar while aiming (zero yardages/numbers) */}
-          {aimPreview.isAiming && (
-            <div className="pointer-events-none flex flex-col items-center gap-1">
-              {aimPreview.power < 0.08 && (
-                <span className="rounded-full bg-[#231914]/85 px-2.5 py-0.5 text-[11px] font-bold text-[#FFFDF8]">
-                  Release inside ring to cancel
-                </span>
-              )}
-              <div className="pointer-events-none h-2.5 w-44 overflow-hidden rounded-full border border-white/80 bg-[#231914]/25 p-0.5 shadow-inner">
-                <div
-                  className="h-full rounded-full transition-[width] duration-75 ease-out"
-                  style={{
-                    width: `${Math.max(6, Math.min(100, aimPreview.power * 100))}%`,
-                    backgroundColor: activeClub.accentHex,
-                  }}
-                />
+          {/* Pre-Stroke 1 Non-Intrusive Gesture Hint */}
+          {showGestureHint && (
+            <div className="pointer-events-none flex justify-center">
+              <div className="pointer-events-none inline-flex items-center rounded-full border border-[#E2C294]/90 bg-[#FFFDF8]/90 px-3 py-1 text-[11px] font-extrabold tracking-tight text-[#231914] shadow-[0_6px_16px_-6px_rgba(35,25,20,0.18)] backdrop-blur-sm">
+                Pull back to power &amp; aim • Drag screen to look
               </div>
             </div>
           )}
 
-          {/* Sleek 1-Tap 4-Club Switcher Pill */}
+          {/* Tactile Pull Power Meter */}
+          {isPulling && (
+            <div className="pointer-events-none flex flex-col items-center gap-1">
+              {aimPower < 0.08 && (
+                <span className="rounded-full bg-[#231914]/85 px-2.5 py-0.5 text-[10.5px] font-bold text-[#FFFDF8]">
+                  Release near ball to cancel
+                </span>
+              )}
+              <div className="pointer-events-none flex items-center gap-2 rounded-full border border-[#E2C294] bg-[#FFFDF8]/90 px-2.5 py-1 shadow-sm">
+                <div className="h-2 w-36 overflow-hidden rounded-full bg-[#231914]/15">
+                  <div
+                    className="h-full rounded-full transition-[width] duration-75 ease-out"
+                    style={{
+                      width: `${Math.max(4, Math.min(100, aimPower * 100))}%`,
+                      backgroundColor: activeClubAccent,
+                    }}
+                  />
+                </div>
+                <span className="w-8 text-right text-[10.5px] font-black text-[#231914] tabular-nums">
+                  {Math.round(Math.max(0, Math.min(1, aimPower)) * 100)}%
+                </span>
+              </div>
+            </div>
+          )}
+
+          {/* Bottom 4-Club Selector Dock */}
           <nav
             aria-label="Golf Clubs"
             data-hud-interactive="true"
             onPointerDown={(e) => e.stopPropagation()}
-            className="pointer-events-auto mx-auto grid w-full max-w-[23.5rem] grid-cols-4 gap-1 rounded-[1.5rem] border border-[#E2C294] bg-[#FFFDF8]/95 p-1 shadow-[0_12px_28px_-8px_rgba(35,25,20,0.26)]"
+            className="pointer-events-auto mx-auto grid w-full max-w-[23.5rem] grid-cols-4 gap-1 rounded-[1.45rem] border border-[#E2C294] bg-[#FFFDF8]/95 p-1 shadow-[0_12px_28px_-8px_rgba(35,25,20,0.26)] backdrop-blur-sm"
           >
             {CLUB_ORDER.map((clubId) => {
-              const club = CLUB_SPECS[clubId];
+              const meta = CLUB_UI_META[clubId];
               const isSelected = selectedClub === clubId;
               return (
                 <button
                   key={clubId}
                   type="button"
-                  aria-label={`${club.name} (${club.subtitle})`}
+                  aria-label={`${meta.label} (${meta.badge})`}
                   aria-pressed={isSelected}
-                  onClick={() => setSelectedClub(clubId, true)}
+                  onClick={() => handleSelectClub(clubId)}
                   style={
                     isSelected
                       ? {
-                          boxShadow: `0 3px 10px -2px rgba(35,25,20,0.34), inset 0 0 0 2px ${club.accentHex}`,
+                          boxShadow: `0 3px 10px -2px rgba(35,25,20,0.34), inset 0 0 0 2px ${meta.accentHex}`,
                         }
                       : undefined
                   }
-                  className={`flex min-h-[48px] flex-col items-center justify-center gap-0.5 rounded-[1.15rem] px-1 py-1.5 leading-none transition-[transform,background-color,color,box-shadow] duration-150 active:scale-[0.96] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#231914] ${
+                  className={`flex min-h-[54px] flex-col items-center justify-center gap-0.5 rounded-[1.1rem] px-1 py-1.5 text-center leading-none transition-[transform,background-color,color,box-shadow] duration-150 active:scale-[0.96] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#231914] ${
                     isSelected
                       ? 'bg-[#231914] text-[#FFFDF8]'
                       : 'text-[#231914] hover:bg-[#F5E6CE]/75'
                   }`}
                 >
-                  <div className="flex items-center gap-1">
-                    <span
-                      aria-hidden="true"
-                      className="inline-flex shrink-0 items-center"
-                      style={isSelected ? { color: club.accentHex } : undefined}
-                    >
-                      <ClubHeadIcon club={clubId} className="h-4 w-4" />
-                    </span>
-                    <span className="text-[11.5px] font-black tracking-tight whitespace-nowrap">
-                      {club.name}
-                    </span>
-                  </div>
                   <span
-                    className={`text-[9.5px] font-extrabold tracking-wide uppercase ${
-                      isSelected ? 'text-[#FDE68A]' : 'text-[#543E32]'
+                    aria-hidden="true"
+                    className="inline-flex shrink-0 items-center justify-center"
+                    style={isSelected ? { color: meta.accentHex } : undefined}
+                  >
+                    <ClubHeadIcon club={clubId} className="h-4 w-4" />
+                  </span>
+                  <span className="mt-0.5 text-[10px] leading-[1.08] font-black tracking-tight">
+                    {meta.label}
+                  </span>
+                  <span
+                    className={`text-[8.5px] leading-none font-extrabold tracking-wide uppercase ${
+                      isSelected ? 'text-[#FDE68A]' : 'text-[#6B5142]'
                     }`}
                   >
-                    {club.subtitle}
+                    {meta.badge}
                   </span>
                 </button>
               );

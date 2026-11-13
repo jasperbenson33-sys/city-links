@@ -7,96 +7,139 @@ import { TOYBOX_MATERIALS } from '@/materials';
 
 export interface FountainHazardPropProps {
   position?: [number, number, number];
+  /** Outer coping radius in meters (default 1.25 -> 2.50m diameter matching COURSE_MASTER_PLAN). */
   radius?: number;
   lastSplashAt?: number;
   showWireframe?: boolean;
 }
 
-const PLUME_COUNT = 14;
+const UPPER_PLUME_COUNT = 8;
+const LOWER_PLUME_COUNT = 16;
 const SPLASH_DROP_COUNT = 12;
 
+function createOctagonRingGeometry(
+  outerR: number,
+  innerR: number,
+  height: number
+): THREE.ExtrudeGeometry {
+  const shape = new THREE.Shape();
+  const hole = new THREE.Path();
+  const sides = 8;
+  const offset = Math.PI / 8;
+
+  for (let i = 0; i <= sides; i++) {
+    const a = offset + (i / sides) * Math.PI * 2;
+    const x = Math.cos(a) * outerR;
+    const y = Math.sin(a) * outerR;
+    if (i === 0) shape.moveTo(x, y);
+    else shape.lineTo(x, y);
+  }
+
+  for (let i = 0; i <= sides; i++) {
+    const a = offset - (i / sides) * Math.PI * 2;
+    const x = Math.cos(a) * innerR;
+    const y = Math.sin(a) * innerR;
+    if (i === 0) hole.moveTo(x, y);
+    else hole.lineTo(x, y);
+  }
+  shape.holes.push(hole);
+
+  const geo = new THREE.ExtrudeGeometry(shape, {
+    depth: height,
+    bevelEnabled: false,
+    steps: 1,
+  });
+  geo.rotateX(-Math.PI * 0.5);
+  geo.computeVertexNormals();
+  return geo;
+}
+
 /**
- * Multi-tier Limestone Plaza Fountain Hazard seated cleanly at y = 0.
- * Features a stone basin rim, shimmering turquoise water, tiered bowl & brass spout,
- * animated cascading droplets, and splash burst trigger.
+ * Walkabout: Venice-inspired Carved Limestone Octagonal Courtyard Fountain Hazard.
+ * - Seated flush at local y = 0 (world +0.60m terrace), outer rim +0.28m (+0.31m coping),
+ *   shimmering turquoise water pool at +0.18m.
+ * - Central tiered octagonal pedestal, twin bowls, brass top spout (1.42m total height),
+ *   and animated arching low-poly water plumes.
  */
 export function FountainHazardProp({
   position = [0, 0, 0],
-  radius = 1.52,
+  radius = 1.25,
   lastSplashAt = -10,
   showWireframe = false,
 }: FountainHazardPropProps) {
-  const plumeGroupRef = useRef<THREE.Group>(null);
+  const upperPlumeRef = useRef<THREE.Group>(null);
+  const lowerPlumeRef = useRef<THREE.Group>(null);
   const splashGroupRef = useRef<THREE.Group>(null);
   const splashRingRef = useRef<THREE.Mesh>(null);
   const waterSurfaceRef = useRef<THREE.Mesh>(null);
+  const elapsedRef = useRef(0);
 
+  const wallOuterR = Math.max(0.95, radius - 0.06);
+  const innerR = Math.max(0.68, wallOuterR - 0.22);
   const rimHeight = 0.28;
-  const innerR = Math.max(0.85, radius - 0.22);
+  const waterLevelY = 0.18;
 
-  // Watertight limestone basin wall + beveled top coping ring seated flush at y = 0
-  const { rimWallGeo, copingGeo } = useMemo(() => {
-    const wallShape = new THREE.Shape();
-    wallShape.absarc(0, 0, radius, 0, Math.PI * 2, false);
-    const wallHole = new THREE.Path();
-    wallHole.absarc(0, 0, innerR, 0, Math.PI * 2, true);
-    wallShape.holes.push(wallHole);
-    const wGeo = new THREE.ExtrudeGeometry(wallShape, {
-      depth: rimHeight,
-      bevelEnabled: false,
-      curveSegments: 24,
+  const { rimWallGeo, copingGeo, cornerPillars } = useMemo(() => {
+    const wGeo = createOctagonRingGeometry(wallOuterR, innerR, rimHeight);
+    const cGeo = createOctagonRingGeometry(radius, innerR - 0.03, 0.05);
+
+    const pillarR = radius - 0.1;
+    const pillars = Array.from({ length: 8 }, (_, idx) => {
+      const a = Math.PI / 8 + (idx / 8) * Math.PI * 2;
+      return [Math.cos(a) * pillarR, 0.155, Math.sin(a) * pillarR] as [
+        number,
+        number,
+        number,
+      ];
     });
-    wGeo.rotateX(-Math.PI * 0.5);
 
-    const copeShape = new THREE.Shape();
-    copeShape.absarc(0, 0, radius + 0.04, 0, Math.PI * 2, false);
-    const copeHole = new THREE.Path();
-    copeHole.absarc(0, 0, innerR - 0.02, 0, Math.PI * 2, true);
-    copeShape.holes.push(copeHole);
-    const cGeo = new THREE.ExtrudeGeometry(copeShape, {
-      depth: 0.06,
-      bevelEnabled: false,
-      curveSegments: 24,
-    });
-    cGeo.rotateX(-Math.PI * 0.5);
+    return { rimWallGeo: wGeo, copingGeo: cGeo, cornerPillars: pillars };
+  }, [radius, wallOuterR, innerR, rimHeight]);
 
-    return { rimWallGeo: wGeo, copingGeo: cGeo };
-  }, [radius, innerR, rimHeight]);
-
-  useFrame(({ clock }) => {
-    const t = clock.getElapsedTime();
-    const now = performance.now() * 0.001;
+  useFrame((_, delta) => {
+    elapsedRef.current += Math.min(delta, 0.05);
+    const t = elapsedRef.current;
+    const now =
+      typeof performance !== 'undefined' ? performance.now() * 0.001 : t;
 
     if (waterSurfaceRef.current) {
-      const s = 1 + Math.sin(t * 2.4) * 0.012;
+      const s = 1 + Math.sin(t * 2.5) * 0.01;
       waterSurfaceRef.current.scale.set(s, 1, s);
     }
 
-    if (plumeGroupRef.current) {
-      const children = plumeGroupRef.current.children;
+    if (upperPlumeRef.current) {
+      const children = upperPlumeRef.current.children;
       for (let i = 0; i < children.length; i++) {
         const drop = children[i];
-        const u = (t * 1.25 + i / PLUME_COUNT) % 1.0;
-        const ang = (i / PLUME_COUNT) * Math.PI * 2;
-        const upper = i % 2 === 0;
-        const startY = upper ? 0.96 : 0.6;
-        const spread = upper ? u * 0.65 : 0.36 + u * 0.88;
-        drop.position.set(
-          Math.cos(ang) * spread,
-          startY + Math.sin(u * Math.PI) * 0.56 - u * 0.45,
-          Math.sin(ang) * spread
-        );
-        drop.scale.setScalar(0.068 + Math.sin(u * Math.PI) * 0.055);
+        const u = (t * 1.35 + i / UPPER_PLUME_COUNT) % 1.0;
+        const ang = (i / UPPER_PLUME_COUNT) * Math.PI * 2;
+        const r = 0.04 + u * 0.42;
+        const y = 1.36 + Math.sin(u * Math.PI) * 0.26 - u * 0.5;
+        drop.position.set(Math.cos(ang) * r, y, Math.sin(ang) * r);
+        drop.scale.setScalar(0.036 + Math.sin(u * Math.PI) * 0.028);
+      }
+    }
+
+    if (lowerPlumeRef.current) {
+      const children = lowerPlumeRef.current.children;
+      for (let i = 0; i < children.length; i++) {
+        const drop = children[i];
+        const u = (t * 1.2 + i / LOWER_PLUME_COUNT) % 1.0;
+        const ang = (i / LOWER_PLUME_COUNT) * Math.PI * 2 + 0.18;
+        const r = 0.48 + u * (innerR * 0.8 - 0.48);
+        const y = 0.82 + Math.sin(u * Math.PI) * 0.22 - u * 0.62;
+        drop.position.set(Math.cos(ang) * r, y, Math.sin(ang) * r);
+        drop.scale.setScalar(0.044 + Math.sin(u * Math.PI) * 0.032);
       }
     }
 
     const dtSplash = now - lastSplashAt;
-    const splashActive = dtSplash >= 0 && dtSplash < 0.6;
+    const splashActive = dtSplash >= 0 && dtSplash < 0.65;
     if (splashRingRef.current) {
       splashRingRef.current.visible = splashActive;
       if (splashActive) {
-        const s = 0.45 + (dtSplash / 0.6) * 1.85;
-        splashRingRef.current.scale.set(s, s, 1);
+        const p = dtSplash / 0.65;
+        splashRingRef.current.scale.setScalar(0.4 + p * 1.45);
       }
     }
     if (splashGroupRef.current) {
@@ -104,14 +147,12 @@ export function FountainHazardProp({
       if (splashActive) {
         const children = splashGroupRef.current.children;
         for (let i = 0; i < children.length; i++) {
-          const ang = (i / SPLASH_DROP_COUNT) * Math.PI * 2;
-          const d = children[i];
-          d.position.set(
-            Math.cos(ang) * (0.3 + dtSplash * 1.8),
-            0.24 + 2.7 * dtSplash - 5.4 * dtSplash * dtSplash,
-            Math.sin(ang) * (0.3 + dtSplash * 1.8)
-          );
-          d.scale.setScalar(0.12 * (1 - dtSplash / 0.6));
+          const drop = children[i];
+          const a = (i / SPLASH_DROP_COUNT) * Math.PI * 2;
+          const dist = dtSplash * 1.65;
+          const h = dtSplash * 2.6 - 4.9 * dtSplash * dtSplash;
+          drop.position.set(Math.cos(a) * dist, 0.22 + h, Math.sin(a) * dist);
+          drop.scale.setScalar(Math.max(0.01, 0.07 * (1 - dtSplash / 0.65)));
         }
       }
     }
@@ -119,126 +160,219 @@ export function FountainHazardProp({
 
   return (
     <group name="fountain-hazard-prop" position={position}>
-      {/* Deep Turquoise Basin Floor */}
+      {/* Octagonal Limestone Basin Floor Slab Seated Flush at y = 0 */}
       <mesh
         receiveShadow
-        position={[0, 0.04, 0]}
-        material={TOYBOX_MATERIALS.turquoiseWaterDeep}
+        position={[0, 0.025, 0]}
+        rotation={[0, Math.PI / 8, 0]}
+        material={TOYBOX_MATERIALS.poolWallLimestone}
       >
-        <cylinderGeometry args={[innerR, innerR, 0.08, 24]} />
+        <cylinderGeometry args={[wallOuterR, wallOuterR, 0.05, 8]} />
       </mesh>
 
-      {/* Watertight Extruded Limestone Basin Wall (bottom flush at y = 0) */}
+      {/* Octagonal Carved Limestone Basin Wall (y: 0.00 -> 0.28) */}
       <mesh
         castShadow
         receiveShadow
         geometry={rimWallGeo}
-        material={TOYBOX_MATERIALS.limestoneCurb}
+        material={TOYBOX_MATERIALS.poolWallLimestone}
       />
-      {/* Top Limestone Coping Ring */}
+
+      {/* Beveled Overhanging Coping Cap (y: 0.25 -> 0.30) */}
       <mesh
         castShadow
         receiveShadow
-        position={[0, rimHeight, 0]}
+        position={[0, rimHeight - 0.03, 0]}
         geometry={copingGeo}
         material={TOYBOX_MATERIALS.limestoneTrim}
       />
 
-      {/* Shimmering Turquoise Water Pool */}
+      {/* Carved Corner Quoins on Octagon Vertices */}
+      {cornerPillars.map(([px, py, pz], idx) => (
+        <mesh
+          key={`pillar-${idx}`}
+          castShadow
+          receiveShadow
+          position={[px, py, pz]}
+          rotation={[0, (idx * Math.PI) / 4, 0]}
+          material={TOYBOX_MATERIALS.limestoneTrim}
+        >
+          <boxGeometry args={[0.14, 0.31, 0.14]} />
+        </mesh>
+      ))}
+
+      {/* Shimmering Turquoise Water Pool (surface at exact y = +0.18m) */}
       <mesh
         ref={waterSurfaceRef}
-        position={[0, 0.18, 0]}
+        receiveShadow
+        position={[0, waterLevelY, 0]}
+        rotation={[0, Math.PI / 8, 0]}
         material={TOYBOX_MATERIALS.turquoiseWater}
       >
-        <cylinderGeometry args={[innerR - 0.02, innerR - 0.02, 0.04, 24]} />
+        <cylinderGeometry args={[innerR + 0.01, innerR + 0.01, 0.02, 8]} />
+      </mesh>
+      {/* Deeper Turquoise Inner Pool Shading Ring */}
+      <mesh
+        position={[0, waterLevelY - 0.015, 0]}
+        rotation={[0, Math.PI / 8, 0]}
+        material={TOYBOX_MATERIALS.turquoiseWaterDeep}
+      >
+        <cylinderGeometry args={[innerR * 0.72, innerR * 0.72, 0.02, 8]} />
       </mesh>
 
-      {/* Central Pedestal & Lower Bowl */}
+      {/* Subtle Venice Lily Pad Accent */}
+      <group position={[innerR * 0.56, waterLevelY + 0.016, innerR * 0.38]}>
+        <mesh
+          rotation={[0, 0.5, 0]}
+          material={TOYBOX_MATERIALS.lilyPadGreen}
+        >
+          <cylinderGeometry args={[0.14, 0.14, 0.014, 8]} />
+        </mesh>
+        <mesh
+          position={[0.02, 0.025, 0]}
+          material={TOYBOX_MATERIALS.lilyBlossomPink}
+        >
+          <dodecahedronGeometry args={[0.045, 0]} />
+        </mesh>
+      </group>
+
+      {/* Central Octagonal Tiered Pedestal & Twin Bowls (total height 1.42m) */}
       <mesh
         castShadow
         receiveShadow
-        position={[0, 0.34, 0]}
-        material={TOYBOX_MATERIALS.limestoneSidewalk}
+        position={[0, 0.12, 0]}
+        rotation={[0, Math.PI / 8, 0]}
+        material={TOYBOX_MATERIALS.limestoneTrim}
       >
-        <cylinderGeometry args={[0.32, 0.44, 0.62, 12]} />
+        <cylinderGeometry args={[0.3, 0.38, 0.18, 8]} />
       </mesh>
       <mesh
         castShadow
-        position={[0, 0.68, 0]}
+        receiveShadow
+        position={[0, 0.45, 0]}
+        rotation={[0, Math.PI / 8, 0]}
+        material={TOYBOX_MATERIALS.poolWallLimestone}
+      >
+        <cylinderGeometry args={[0.16, 0.22, 0.52, 8]} />
+      </mesh>
+      {/* Lower Tier Octagonal Scalloped Basin Bowl */}
+      <mesh
+        castShadow
+        receiveShadow
+        position={[0, 0.78, 0]}
+        rotation={[0, Math.PI / 8, 0]}
         material={TOYBOX_MATERIALS.limestoneTrim}
       >
-        <cylinderGeometry args={[0.92, 0.34, 0.16, 16]} />
+        <cylinderGeometry args={[0.56, 0.26, 0.18, 8]} />
       </mesh>
-      <mesh position={[0, 0.76, 0]} material={TOYBOX_MATERIALS.turquoiseWater}>
-        <cylinderGeometry args={[0.8, 0.8, 0.03, 16]} />
+      <mesh
+        position={[0, 0.875, 0]}
+        rotation={[0, Math.PI / 8, 0]}
+        material={TOYBOX_MATERIALS.turquoiseWater}
+      >
+        <cylinderGeometry args={[0.48, 0.48, 0.018, 8]} />
       </mesh>
 
-      {/* Upper Column, Crown Bowl & Brass Spout Finial */}
+      {/* Upper Tier Column & Top Finial Bowl */}
       <mesh
         castShadow
-        position={[0, 0.96, 0]}
-        material={TOYBOX_MATERIALS.limestoneSidewalk}
+        position={[0, 0.99, 0]}
+        rotation={[0, Math.PI / 8, 0]}
+        material={TOYBOX_MATERIALS.poolWallLimestone}
       >
-        <cylinderGeometry args={[0.18, 0.24, 0.42, 10]} />
+        <cylinderGeometry args={[0.1, 0.14, 0.24, 8]} />
       </mesh>
       <mesh
         castShadow
-        position={[0, 1.18, 0]}
+        position={[0, 1.13, 0]}
+        rotation={[0, Math.PI / 8, 0]}
         material={TOYBOX_MATERIALS.limestoneTrim}
       >
-        <cylinderGeometry args={[0.48, 0.2, 0.13, 12]} />
+        <cylinderGeometry args={[0.28, 0.13, 0.12, 8]} />
       </mesh>
       <mesh
+        position={[0, 1.195, 0]}
+        rotation={[0, Math.PI / 8, 0]}
+        material={TOYBOX_MATERIALS.turquoiseWater}
+      >
+        <cylinderGeometry args={[0.23, 0.23, 0.016, 8]} />
+      </mesh>
+
+      {/* Brass Finial & Jet Nozzle Tip (top at exact 1.42m) */}
+      <mesh
         castShadow
-        position={[0, 1.36, 0]}
+        position={[0, 1.29, 0]}
         material={TOYBOX_MATERIALS.brassAccent}
       >
-        <sphereGeometry args={[0.13, 12, 10]} />
+        <cylinderGeometry args={[0.042, 0.08, 0.18, 8]} />
+      </mesh>
+      <mesh
+        castShadow
+        position={[0, 1.39, 0]}
+        material={TOYBOX_MATERIALS.brassAccent}
+      >
+        <coneGeometry args={[0.045, 0.06, 8]} />
       </mesh>
 
-      {/* Cascading Water Beads */}
-      <group ref={plumeGroupRef} position={[0, 0.36, 0]}>
-        {Array.from({ length: PLUME_COUNT }, (_, idx) => (
-          <mesh key={idx} material={TOYBOX_MATERIALS.waterBeadCyan}>
+      {/* Animated Arching Water Plumes */}
+      <group ref={upperPlumeRef}>
+        {Array.from({ length: UPPER_PLUME_COUNT }, (_, idx) => (
+          <mesh
+            key={`uplume-${idx}`}
+            material={
+              idx % 2 === 0
+                ? TOYBOX_MATERIALS.waterBeadCyan
+                : TOYBOX_MATERIALS.waterFoamWhite
+            }
+          >
+            <icosahedronGeometry args={[1, 0]} />
+          </mesh>
+        ))}
+      </group>
+      <group ref={lowerPlumeRef}>
+        {Array.from({ length: LOWER_PLUME_COUNT }, (_, idx) => (
+          <mesh
+            key={`lplume-${idx}`}
+            material={
+              idx % 3 === 0
+                ? TOYBOX_MATERIALS.waterFoamWhite
+                : TOYBOX_MATERIALS.waterBeadCyan
+            }
+          >
             <icosahedronGeometry args={[1, 0]} />
           </mesh>
         ))}
       </group>
 
-      {/* Splash Ring & Droplets */}
+      {/* Ball-In-Water Splash Ripple & Burst */}
       <mesh
         ref={splashRingRef}
         visible={false}
-        position={[0, 0.21, 0]}
+        position={[0, waterLevelY + 0.015, 0]}
         rotation={[-Math.PI * 0.5, 0, 0]}
         material={TOYBOX_MATERIALS.waterFoamWhite}
       >
-        <ringGeometry args={[0.45, 0.78, 20]} />
+        <ringGeometry args={[0.22, 0.34, 16]} />
       </mesh>
       <group ref={splashGroupRef} visible={false}>
         {Array.from({ length: SPLASH_DROP_COUNT }, (_, idx) => (
-          <mesh key={idx} material={TOYBOX_MATERIALS.waterBeadCyan}>
+          <mesh
+            key={`splash-${idx}`}
+            material={TOYBOX_MATERIALS.waterBeadCyan}
+          >
             <icosahedronGeometry args={[1, 0]} />
           </mesh>
         ))}
       </group>
 
-      {/* QA Collider & Water Sensor Wireframes */}
+      {/* QA Outer Bounds Cylinder */}
       {showWireframe && (
-        <group>
-          <mesh
-            position={[0, 0.65, 0]}
-            material={TOYBOX_MATERIALS.qaColliderWireframe}
-          >
-            <cylinderGeometry args={[0.44, 0.44, 1.3, 12]} />
-          </mesh>
-          <mesh
-            position={[0, 0.22, 0]}
-            material={TOYBOX_MATERIALS.qaSensorWireframe}
-          >
-            <cylinderGeometry args={[innerR, innerR, 0.36, 18]} />
-          </mesh>
-        </group>
+        <mesh
+          position={[0, 0.71, 0]}
+          material={TOYBOX_MATERIALS.qaSensorWireframe}
+        >
+          <cylinderGeometry args={[radius, radius, 1.42, 8]} />
+        </mesh>
       )}
     </group>
   );

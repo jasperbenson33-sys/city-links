@@ -4,12 +4,14 @@ import React, { useMemo, useRef } from 'react';
 import { useFrame } from '@react-three/fiber';
 import * as THREE from 'three';
 import { TOYBOX_MATERIALS } from '@/materials';
+import { useCurbsideStore } from '@/store/useCurbsideStore';
+import { PROP_ACCENT_MATERIALS } from './propMaterials';
 
 export interface PigeonFlockPropProps {
   /** Base center [x, y, z] where y is the host sidewalk/plaza elevation. */
   position?: [number, number, number];
   rotationY?: number;
-  /** Live ball position [x, y, z] in world space for smooth scatter reaction. */
+  /** Optional explicit ball position override (QA preview); world uses store.getState().ballPosition. */
   ballPosition?: [number, number, number];
   /** Number of birds in the flock (default 5). */
   count?: number;
@@ -35,9 +37,10 @@ const SCATTER_TRIGGER_DIST = 3.2;
 const RETURN_CLEAR_DIST = 5.2;
 
 /**
- * Charming low-poly urban pigeon flock seated cleanly at y = 0.
- * Uses an anti-loop state machine ('ground' -> 'taking-off' -> 'hovering' -> 'returning')
- * so birds scatter cleanly when a shot approaches and return smoothly after play passes.
+ * Walkabout: Venice-inspired Low-Poly Urban Pigeon Flock seated flush at y = 0.
+ * - Sleek folded wings tucked along torso sides when grounded/idle (zero T-pose wings).
+ * - Extends & flaps wings smoothly during scatter flight, reading live ballPosition
+ *   from useCurbsideStore.getState() inside useFrame for zero React re-renders.
  */
 export function PigeonFlockProp({
   position = [0, 0, 0],
@@ -51,19 +54,20 @@ export function PigeonFlockProp({
   const leftWingsRef = useRef<Array<THREE.Mesh | null>>([]);
   const rightWingsRef = useRef<Array<THREE.Mesh | null>>([]);
   const headsRef = useRef<Array<THREE.Group | null>>([]);
+  const elapsedRef = useRef(0);
 
   const birdLayouts = useMemo(() => {
     const spots: Array<[number, number]> = [
-      [-0.55, 0.35],
-      [0.42, 0.28],
-      [-0.18, -0.42],
-      [0.62, -0.35],
-      [-0.78, -0.15],
-      [0.12, 0.68],
+      [-0.48, 0.34],
+      [0.38, 0.25],
+      [-0.16, -0.38],
+      [0.52, -0.32],
+      [-0.62, -0.14],
+      [0.12, 0.56],
     ];
     return Array.from({ length: Math.min(count, spots.length) }, (_, idx) => {
       const [hx, hz] = spots[idx];
-      const ang = (idx / count) * Math.PI * 2 + 0.5;
+      const ang = (idx / Math.max(1, count)) * Math.PI * 2 + 0.5;
       return {
         localHome: [hx, hz] as [number, number],
         localRoost: [
@@ -86,7 +90,6 @@ export function PigeonFlockProp({
     }))
   );
 
-  // Keep statesRef synchronized if count changes in QA
   if (statesRef.current.length !== birdLayouts.length) {
     statesRef.current = birdLayouts.map((layout) => ({
       phase: 'ground',
@@ -97,116 +100,130 @@ export function PigeonFlockProp({
     }));
   }
 
-  useFrame(({ clock }) => {
-    const t = clock.getElapsedTime();
-    const group = birdsGroupRef.current;
-    if (!group) return;
+  useFrame((_, delta) => {
+    elapsedRef.current += Math.min(delta, 0.05);
+    const t = elapsedRef.current;
+    if (!birdsGroupRef.current) return;
 
-    const children = group.children;
+    const liveBallPos = ballPosition ?? useCurbsideStore.getState().ballPosition;
     const cosR = Math.cos(rotationY);
     const sinR = Math.sin(rotationY);
 
-    // Convert world ballPosition into local flock coordinates (inverse Y-rotation)
-    let localBallX = 999;
-    let localBallY = 999;
-    let localBallZ = 999;
-    if (ballPosition) {
-      const dx = ballPosition[0] - position[0];
-      const dy = ballPosition[1] - position[1];
-      const dz = ballPosition[2] - position[2];
-      localBallX = dx * cosR - dz * sinR;
-      localBallZ = dx * sinR + dz * cosR;
-      localBallY = dy;
-    }
-
-    for (let i = 0; i < statesRef.current.length; i++) {
+    const children = birdsGroupRef.current.children;
+    for (let i = 0; i < children.length && i < statesRef.current.length; i++) {
+      const birdGroup = children[i];
       const st = statesRef.current[i];
-      const bird = children[i];
-      if (!bird) continue;
 
-      const lWing = leftWingsRef.current[i];
-      const rWing = rightWingsRef.current[i];
-      const head = headsRef.current[i];
+      const worldHomeX =
+        position[0] + st.localHome[0] * cosR + st.localHome[1] * sinR;
+      const worldHomeZ =
+        position[2] - st.localHome[0] * sinR + st.localHome[1] * cosR;
+      const ballDist = liveBallPos
+        ? Math.hypot(liveBallPos[0] - worldHomeX, liveBallPos[2] - worldHomeZ)
+        : 999;
 
-      const [hx, hz] = st.localHome;
-      const [rx, ry, rz] = st.localRoost;
-      const distToHome = Math.hypot(localBallX - hx, localBallY - 0.15, localBallZ - hz);
-      const nearTrigger = forceScatter || distToHome < SCATTER_TRIGGER_DIST;
+      const wantScatter = forceScatter || ballDist < SCATTER_TRIGGER_DIST;
+      const elapsed = t - st.phaseStart;
 
       if (st.phase === 'ground') {
-        if (nearTrigger) {
+        if (wantScatter) {
           st.phase = 'taking-off';
-          st.phaseStart = t;
-        } else {
-          bird.position.set(hx, 0, hz);
-          bird.rotation.y = st.idleYaw + Math.sin(t * 0.8 + i * 2.1) * 0.3;
-          if (lWing) lWing.rotation.z = 0.08;
-          if (rWing) rWing.rotation.z = -0.08;
-          if (head) {
-            const peck = Math.max(0, Math.sin(t * 4.4 + i * 1.8));
-            head.rotation.x = peck > 0.72 ? (peck - 0.72) * 2.2 : 0;
-          }
+          st.phaseStart = t - (i % 3) * 0.06;
         }
-      }
-
-      if (st.phase === 'taking-off') {
-        const u = Math.min(1, (t - st.phaseStart) / TAKEOFF_DUR);
-        const ease = 1 - Math.pow(1 - u, 2.2);
-        const px = THREE.MathUtils.lerp(hx, rx, ease);
-        const pz = THREE.MathUtils.lerp(hz, rz, ease);
-        const py = THREE.MathUtils.lerp(0, ry, ease) + Math.sin(u * Math.PI) * 0.55;
-        bird.position.set(px, py, pz);
-        bird.rotation.y = Math.atan2(rx - hx, rz - hz);
-
-        const flap = Math.sin(t * 40.0 + i) * 0.82;
-        if (lWing) lWing.rotation.z = flap;
-        if (rWing) rWing.rotation.z = -flap;
-        if (head) head.rotation.x = -0.15;
-
-        if (u >= 1) {
+      } else if (st.phase === 'taking-off') {
+        if (elapsed >= TAKEOFF_DUR) {
           st.phase = 'hovering';
           st.phaseStart = t;
         }
       } else if (st.phase === 'hovering') {
-        const orbitAngle = t * 1.4 + i * 1.3;
-        bird.position.set(
-          rx + Math.cos(orbitAngle) * 0.45,
-          ry + Math.sin(t * 2.6 + i) * 0.16,
-          rz + Math.sin(orbitAngle) * 0.45
-        );
-        bird.rotation.y = -orbitAngle;
-        const flap = Math.sin(t * 24.0 + i) * 0.52;
-        if (lWing) lWing.rotation.z = flap;
-        if (rWing) rWing.rotation.z = -flap;
-        if (head) head.rotation.x = 0.1;
-
-        const hoveredLongEnough = t - st.phaseStart >= HOVER_MIN_DUR;
-        if (!forceScatter && hoveredLongEnough && distToHome >= RETURN_CLEAR_DIST) {
+        if (!wantScatter && ballDist > RETURN_CLEAR_DIST && elapsed >= HOVER_MIN_DUR) {
           st.phase = 'returning';
           st.phaseStart = t;
         }
       } else if (st.phase === 'returning') {
-        if (nearTrigger) {
+        if (wantScatter) {
           st.phase = 'taking-off';
           st.phaseStart = t;
-        } else {
-          const u = Math.min(1, (t - st.phaseStart) / RETURN_DUR);
-          const ease = u * u * (3 - 2 * u);
-          bird.position.set(
-            THREE.MathUtils.lerp(rx, hx, ease),
-            THREE.MathUtils.lerp(ry, 0, ease) + Math.sin(u * Math.PI) * 0.35,
-            THREE.MathUtils.lerp(rz, hz, ease)
-          );
-          bird.rotation.y = Math.atan2(hx - rx, hz - rz);
-          const glide = Math.sin(t * 22.0 + i) * 0.42;
-          if (lWing) lWing.rotation.z = glide;
-          if (rWing) rWing.rotation.z = -glide;
-          if (head) head.rotation.x = 0.1;
+        } else if (elapsed >= RETURN_DUR) {
+          st.phase = 'ground';
+          st.phaseStart = t;
+        }
+      }
 
-          if (u >= 1) {
-            st.phase = 'ground';
-            st.phaseStart = t;
-          }
+      const phaseElapsed = Math.max(0, t - st.phaseStart);
+      let px = st.localHome[0];
+      let py = 0;
+      let pz = st.localHome[1];
+      let yaw = st.idleYaw;
+      let pitch = 0;
+      let flapSpeed = 0;
+
+      if (st.phase === 'ground') {
+        const peckPhase = (t * 1.45 + i * 1.1) % 3.4;
+        const headGroup = headsRef.current[i];
+        if (headGroup) {
+          headGroup.rotation.x =
+            peckPhase < 0.45 ? Math.sin((peckPhase / 0.45) * Math.PI) * 0.48 : 0;
+        }
+        yaw = st.idleYaw + Math.sin(t * 0.7 + i) * 0.14;
+      } else if (st.phase === 'taking-off') {
+        const u = Math.min(1, phaseElapsed / TAKEOFF_DUR);
+        const ease = 1 - Math.pow(1 - u, 3);
+        px = THREE.MathUtils.lerp(st.localHome[0], st.localRoost[0], ease);
+        py =
+          THREE.MathUtils.lerp(0, st.localRoost[1], ease) +
+          Math.sin(u * Math.PI) * 0.4;
+        pz = THREE.MathUtils.lerp(st.localHome[1], st.localRoost[2], ease);
+        yaw = Math.atan2(
+          st.localRoost[0] - st.localHome[0],
+          st.localRoost[2] - st.localHome[1]
+        );
+        pitch = -0.34 * (1 - u);
+        flapSpeed = 28;
+      } else if (st.phase === 'hovering') {
+        const orbit = t * 1.45 + i * 1.3;
+        px = st.localRoost[0] + Math.cos(orbit) * 0.58;
+        py = st.localRoost[1] + Math.sin(t * 2.4 + i) * 0.2;
+        pz = st.localRoost[2] + Math.sin(orbit) * 0.58;
+        yaw = -orbit + Math.PI * 0.5;
+        pitch = 0.08;
+        flapSpeed = 20;
+      } else if (st.phase === 'returning') {
+        const u = Math.min(1, phaseElapsed / RETURN_DUR);
+        const ease = u * u * (3 - 2 * u);
+        px = THREE.MathUtils.lerp(st.localRoost[0], st.localHome[0], ease);
+        py = THREE.MathUtils.lerp(st.localRoost[1], 0, ease);
+        pz = THREE.MathUtils.lerp(st.localRoost[2], st.localHome[1], ease);
+        yaw = Math.atan2(
+          st.localHome[0] - st.localRoost[0],
+          st.localHome[1] - st.localRoost[2]
+        );
+        pitch = 0.22 * (1 - u);
+        flapSpeed = 16;
+      }
+
+      birdGroup.position.set(px, py, pz);
+      birdGroup.rotation.set(pitch, yaw, 0);
+
+      const lw = leftWingsRef.current[i];
+      const rw = rightWingsRef.current[i];
+      if (lw && rw) {
+        if (flapSpeed > 0) {
+          const flap = Math.sin(t * flapSpeed + i) * 0.85;
+          lw.position.set(-0.072, 0.12, -0.015);
+          rw.position.set(0.072, 0.12, -0.015);
+          lw.rotation.set(0, 0, flap + 0.35);
+          rw.rotation.set(0, 0, -flap - 0.35);
+          lw.scale.set(1.6, 0.7, 1.0);
+          rw.scale.set(1.6, 0.7, 1.0);
+        } else {
+          // Folded flush and tapered snugly along the rounded torso flanks
+          lw.position.set(-0.044, 0.1, -0.022);
+          rw.position.set(0.044, 0.1, -0.022);
+          lw.rotation.set(-0.22, -0.14, -0.26);
+          rw.rotation.set(-0.22, 0.14, 0.26);
+          lw.scale.set(0.6, 0.9, 1.0);
+          rw.scale.set(0.6, 0.9, 1.0);
         }
       }
     }
@@ -221,113 +238,128 @@ export function PigeonFlockProp({
       <group ref={birdsGroupRef}>
         {birdLayouts.map((layout, idx) => (
           <group
-            key={idx}
+            key={`pigeon-${idx}`}
             position={[layout.localHome[0], 0, layout.localHome[1]]}
             rotation={[0, layout.idleYaw, 0]}
           >
-            {/* Left & Right Orange Feet Flush at y = 0 */}
+            {/* Webbed Coral Feet Planted Flush at y = 0.00m */}
             <mesh
-              position={[-0.042, 0.008, 0.02]}
+              position={[-0.024, 0.006, 0.015]}
               material={TOYBOX_MATERIALS.pigeonBeakFeet}
             >
-              <boxGeometry args={[0.032, 0.016, 0.068]} />
+              <boxGeometry args={[0.02, 0.012, 0.036]} />
             </mesh>
             <mesh
-              position={[0.042, 0.008, 0.02]}
+              position={[0.024, 0.006, 0.015]}
               material={TOYBOX_MATERIALS.pigeonBeakFeet}
             >
-              <boxGeometry args={[0.032, 0.016, 0.068]} />
-            </mesh>
-            {/* Legs */}
-            <mesh
-              position={[-0.042, 0.048, 0]}
-              material={TOYBOX_MATERIALS.pigeonBeakFeet}
-            >
-              <cylinderGeometry args={[0.009, 0.009, 0.08, 6]} />
-            </mesh>
-            <mesh
-              position={[0.042, 0.048, 0]}
-              material={TOYBOX_MATERIALS.pigeonBeakFeet}
-            >
-              <cylinderGeometry args={[0.009, 0.009, 0.08, 6]} />
+              <boxGeometry args={[0.02, 0.012, 0.036]} />
             </mesh>
 
-            {/* Plump Low-Poly Body */}
+            {/* Twin Slender Legs */}
+            <mesh
+              position={[-0.024, 0.038, 0]}
+              material={TOYBOX_MATERIALS.pigeonBeakFeet}
+            >
+              <cylinderGeometry args={[0.006, 0.006, 0.056, 5]} />
+            </mesh>
+            <mesh
+              position={[0.024, 0.038, 0]}
+              material={TOYBOX_MATERIALS.pigeonBeakFeet}
+            >
+              <cylinderGeometry args={[0.006, 0.006, 0.056, 5]} />
+            </mesh>
+
+            {/* Plump Faceted Grey Body */}
             <mesh
               castShadow
-              position={[0, 0.145, 0]}
-              scale={[0.92, 0.9, 1.15]}
+              position={[0, 0.095, -0.01]}
+              scale={[0.82, 0.85, 1.32]}
               material={TOYBOX_MATERIALS.pigeonBody}
             >
-              <dodecahedronGeometry args={[0.135, 0]} />
+              <dodecahedronGeometry args={[0.072, 0]} />
             </mesh>
 
-            {/* Tail Fan */}
+            {/* Iridescent Teal Neck Collar & Berry Chest Highlight */}
             <mesh
-              position={[0, 0.125, -0.15]}
-              rotation={[-0.35, 0, 0]}
-              material={TOYBOX_MATERIALS.pigeonWing}
+              castShadow
+              position={[0, 0.145, 0.048]}
+              material={TOYBOX_MATERIALS.pigeonNeck}
             >
-              <boxGeometry args={[0.12, 0.035, 0.14]} />
+              <cylinderGeometry args={[0.036, 0.048, 0.052, 7]} />
+            </mesh>
+            <mesh
+              position={[0, 0.105, 0.052]}
+              scale={[0.8, 0.7, 0.62]}
+              material={PROP_ACCENT_MATERIALS.pigeonChestBerry}
+            >
+              <dodecahedronGeometry args={[0.044, 0]} />
             </mesh>
 
-            {/* Articulated Left & Right Wings */}
+            {/* Faceted Head & Coral Beak */}
+            <group
+              ref={(el) => {
+                headsRef.current[idx] = el;
+              }}
+              position={[0, 0.178, 0.06]}
+            >
+              <mesh castShadow material={TOYBOX_MATERIALS.pigeonBody}>
+                <dodecahedronGeometry args={[0.036, 0]} />
+              </mesh>
+              <mesh
+                position={[0, -0.004, 0.042]}
+                rotation={[Math.PI * 0.5, 0, 0]}
+                material={TOYBOX_MATERIALS.pigeonBeakFeet}
+              >
+                <coneGeometry args={[0.012, 0.032, 5]} />
+              </mesh>
+            </group>
+
+            {/* Sleek Folded Left & Right Wings (extending cleanly only during flight) */}
             <mesh
               ref={(el) => {
                 leftWingsRef.current[idx] = el;
               }}
               castShadow
-              position={[-0.115, 0.165, -0.01]}
+              position={[-0.044, 0.1, -0.022]}
+              rotation={[-0.22, -0.14, -0.26]}
+              scale={[0.6, 0.9, 1.0]}
               material={TOYBOX_MATERIALS.pigeonWing}
             >
-              <boxGeometry args={[0.15, 0.035, 0.16]} />
+              <boxGeometry args={[0.022, 0.052, 0.128]} />
             </mesh>
             <mesh
               ref={(el) => {
                 rightWingsRef.current[idx] = el;
               }}
               castShadow
-              position={[0.115, 0.165, -0.01]}
+              position={[0.044, 0.1, -0.022]}
+              rotation={[-0.22, 0.14, 0.26]}
+              scale={[0.6, 0.9, 1.0]}
               material={TOYBOX_MATERIALS.pigeonWing}
             >
-              <boxGeometry args={[0.15, 0.035, 0.16]} />
+              <boxGeometry args={[0.022, 0.052, 0.128]} />
             </mesh>
 
-            {/* Neck Collar, Head & Beak */}
-            <group
-              ref={(el) => {
-                headsRef.current[idx] = el;
-              }}
-              position={[0, 0.22, 0.085]}
+            {/* Charcoal Tail Fan */}
+            <mesh
+              castShadow
+              position={[0, 0.088, -0.118]}
+              rotation={[-0.3, 0, 0]}
+              material={PROP_ACCENT_MATERIALS.pigeonWingBar}
             >
-              <mesh material={TOYBOX_MATERIALS.pigeonNeck}>
-                <cylinderGeometry args={[0.06, 0.075, 0.055, 8]} />
-              </mesh>
-              <mesh
-                castShadow
-                position={[0, 0.065, 0.02]}
-                material={TOYBOX_MATERIALS.pigeonBody}
-              >
-                <dodecahedronGeometry args={[0.078, 0]} />
-              </mesh>
-              <mesh
-                position={[0, 0.06, 0.11]}
-                rotation={[Math.PI * 0.5, 0, 0]}
-                material={TOYBOX_MATERIALS.pigeonBeakFeet}
-              >
-                <coneGeometry args={[0.028, 0.08, 5]} />
-              </mesh>
-            </group>
+              <boxGeometry args={[0.062, 0.016, 0.088]} />
+            </mesh>
           </group>
         ))}
       </group>
 
       {showWireframe && (
         <mesh
-          position={[0, 0.35, 0]}
+          position={[0, 0.2, 0]}
           material={TOYBOX_MATERIALS.qaSensorWireframe}
         >
-          <cylinderGeometry args={[1.35, 1.35, 0.7, 16]} />
+          <boxGeometry args={[1.4, 0.4, 1.4]} />
         </mesh>
       )}
     </group>

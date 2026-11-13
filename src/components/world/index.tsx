@@ -1,13 +1,33 @@
-'use client';
-
-export { CityIslandWorld } from './CityIslandWorld';
-export type { CityIslandWorldProps } from './CityIslandWorld';
-
-export { LightingAndSky } from './LightingAndSky';
-export type { LightingAndSkyProps } from './LightingAndSky';
-
-export { BeveledCutawayPlinth } from './BeveledCutawayPlinth';
-export type { BeveledCutawayPlinthProps } from './BeveledCutawayPlinth';
-
-export * from './tiles';
+export {
+  VeniceStreetWorld,
+  type VeniceStreetWorldProps,
+} from './VeniceStreetWorld';
+export {
+  CityIslandWorld,
+  type CityIslandWorldProps,
+} from './CityIslandWorld';
+export {
+  LightingAndSky,
+  type LightingAndSkyProps,
+} from './LightingAndSky';
+export {
+  BuildingFacadeModule,
+  QA_FACADE_SAMPLES,
+  PerimeterEnclosure,
+  ArchitecturalWallsGroup,
+  CourtyardPergolaMesh,
+  StringLightSpansGroup,
+  SkylineAndHorizonSkirt,
+  type BuildingFacadeModuleProps,
+  type PerimeterEnclosureProps,
+  type QaFacadeSample,
+} from './architecture';
+export {
+  StreetSurfaceWorld,
+  type StreetSurfaceWorldProps,
+} from './street';
+export {
+  CupFlagAssembly,
+  type CupFlagAssemblyProps,
+} from './tiles';
 export * from './props';

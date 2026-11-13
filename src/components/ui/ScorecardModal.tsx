@@ -1,131 +1,200 @@
 'use client';
 
-import React, { useEffect, useRef, useState } from 'react';
-import { FLAG_COLOR_META } from '@/types';
+import React, { useEffect, useRef } from 'react';
 import { useCurbsideStore } from '@/store';
-import { soundEngine } from '@/audio/soundEngine';
+import { soundEngine } from '@/lib/sound';
 
 export interface ScorecardModalProps {
-  /** Daily best strokes prior to completing this round (for New Best comparison) */
-  previousDailyBest: number | null;
+  /** Personal best strokes prior to completing this hole (for New Personal Best comparison) */
+  previousBest?: number | null;
+  /** Legacy prop alias kept harmlessly compatible */
+  previousDailyBest?: number | null;
 }
 
-function buildShareText(
-  seed: string,
-  roundMode: 'daily' | 'random',
-  totalStrokes: number,
-  sunkOrder: ReadonlyArray<{ color: keyof typeof FLAG_COLOR_META; strokes: number }>
-): string {
-  const headerSeed = roundMode === 'daily' ? seed : `Random (${seed})`;
-  const emojiLine = sunkOrder
-    .map((entry) => `${FLAG_COLOR_META[entry.color].emoji}${entry.strokes}`)
-    .join(' ');
-  const strokeWord = totalStrokes === 1 ? 'Stroke' : 'Strokes';
-  return `Curbside Links 🏙️⛳ ${headerSeed}\n${totalStrokes} ${strokeWord}: ${emojiLine}`;
+interface StoreCompat {
+  holeNumber?: number;
+  holeName?: string;
+  par?: number;
+  holeDistanceMeters?: number;
+  strokes?: number;
+  totalStrokes?: number;
+  penaltyStrokes?: number;
+  personalBest?: number | null;
+  dailyBest?: { bestStrokes?: number } | null;
+  isHoleComplete?: boolean;
+  isRoundComplete?: boolean;
+  shotPhase?: string;
+  replayHole?: () => void;
+  resetHole?: () => void;
+  restartRound?: () => void;
 }
 
-async function copyTextWithFallback(text: string): Promise<boolean> {
-  if (typeof navigator !== 'undefined' && navigator.clipboard?.writeText) {
-    try {
-      await navigator.clipboard.writeText(text);
-      return true;
-    } catch {
-      // Fall through to legacy execCommand fallback
-    }
+interface ScoreBadgeMeta {
+  headline: string;
+  deltaLabel: string;
+  pillBg: string;
+  pillText: string;
+  pillBorder: string;
+  celebrate: boolean;
+}
+
+function getScoreRelativeToPar(strokes: number, par: number): ScoreBadgeMeta {
+  const diff = strokes - par;
+  if (strokes === 1) {
+    return {
+      headline: 'HOLE-IN-ONE!',
+      deltaLabel: `-${par - 1}`,
+      pillBg: '#FEF08A',
+      pillText: '#422006',
+      pillBorder: '#D99B26',
+      celebrate: true,
+    };
   }
-  if (typeof document === 'undefined') return false;
-  try {
-    const textarea = document.createElement('textarea');
-    textarea.value = text;
-    textarea.setAttribute('readonly', '');
-    textarea.style.position = 'fixed';
-    textarea.style.top = '-9999px';
-    textarea.style.left = '-9999px';
-    document.body.appendChild(textarea);
-    textarea.select();
-    const ok = document.execCommand('copy');
-    document.body.removeChild(textarea);
-    return ok;
-  } catch {
-    return false;
+  if (diff <= -3) {
+    return {
+      headline: `ALBATROSS! ${diff}`,
+      deltaLabel: `${diff}`,
+      pillBg: '#FEF08A',
+      pillText: '#422006',
+      pillBorder: '#D99B26',
+      celebrate: true,
+    };
   }
+  if (diff === -2) {
+    return {
+      headline: 'EAGLE! -2',
+      deltaLabel: '-2',
+      pillBg: '#FEF08A',
+      pillText: '#422006',
+      pillBorder: '#D99B26',
+      celebrate: true,
+    };
+  }
+  if (diff === -1) {
+    return {
+      headline: 'BIRDIE! -1',
+      deltaLabel: '-1',
+      pillBg: '#DCFCE7',
+      pillText: '#14532D',
+      pillBorder: '#22C55E',
+      celebrate: true,
+    };
+  }
+  if (diff === 0) {
+    return {
+      headline: 'PAR',
+      deltaLabel: 'E',
+      pillBg: '#FFF8EB',
+      pillText: '#231914',
+      pillBorder: '#D9B684',
+      celebrate: false,
+    };
+  }
+  if (diff === 1) {
+    return {
+      headline: 'BOGEY +1',
+      deltaLabel: '+1',
+      pillBg: '#FFEDD5',
+      pillText: '#7C2D12',
+      pillBorder: '#FB923C',
+      celebrate: false,
+    };
+  }
+  if (diff === 2) {
+    return {
+      headline: 'DOUBLE BOGEY +2',
+      deltaLabel: '+2',
+      pillBg: '#FEE2E2',
+      pillText: '#7F1D1D',
+      pillBorder: '#F87171',
+      celebrate: false,
+    };
+  }
+  return {
+    headline: `+${diff} OVER PAR`,
+    deltaLabel: `+${diff}`,
+    pillBg: '#FEE2E2',
+    pillText: '#7F1D1D',
+    pillBorder: '#F87171',
+    celebrate: false,
+  };
 }
 
-export function ScorecardModal({ previousDailyBest }: ScorecardModalProps) {
-  const isRoundComplete = useCurbsideStore((s) => s.isRoundComplete);
-  const seed = useCurbsideStore((s) => s.seed);
-  const roundMode = useCurbsideStore((s) => s.roundMode);
-  const totalStrokes = useCurbsideStore((s) => s.totalStrokes);
-  const sunkOrder = useCurbsideStore((s) => s.sunkOrder);
-  const dailyBest = useCurbsideStore((s) => s.dailyBest);
-  const restartRound = useCurbsideStore((s) => s.restartRound);
-  const loadRandomCity = useCurbsideStore((s) => s.loadRandomCity);
-  const notifyScorecardCopied = useCurbsideStore((s) => s.notifyScorecardCopied);
+const CONFETTI_PIECES = [
+  { left: '10%', delay: '0ms', color: '#EF4444' },
+  { left: '22%', delay: '90ms', color: '#FACC15' },
+  { left: '35%', delay: '40ms', color: '#22C55E' },
+  { left: '49%', delay: '140ms', color: '#38BDF8' },
+  { left: '63%', delay: '60ms', color: '#F97316' },
+  { left: '76%', delay: '120ms', color: '#A855F7' },
+  { left: '88%', delay: '20ms', color: '#EF4444' },
+];
 
-  const [copied, setCopied] = useState(false);
-  const copyTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+export function ScorecardModal({
+  previousBest,
+  previousDailyBest,
+}: ScorecardModalProps) {
+  const isHoleComplete = useCurbsideStore((s) => {
+    const st = s as unknown as StoreCompat;
+    return Boolean(
+      st.isHoleComplete || st.isRoundComplete || st.shotPhase === 'holed_out',
+    );
+  });
+
+  const holeNumber = useCurbsideStore(
+    (s) => (s as unknown as StoreCompat).holeNumber ?? 1,
+  );
+  const holeName = useCurbsideStore(
+    (s) => (s as unknown as StoreCompat).holeName ?? '5th & Mercer',
+  );
+  const par = useCurbsideStore((s) => (s as unknown as StoreCompat).par ?? 4);
+  const holeDistanceMeters = useCurbsideStore(
+    (s) => (s as unknown as StoreCompat).holeDistanceMeters ?? 72,
+  );
+  const strokes = useCurbsideStore((s) => {
+    const st = s as unknown as StoreCompat;
+    return st.strokes ?? st.totalStrokes ?? 0;
+  });
+  const penaltyStrokes = useCurbsideStore(
+    (s) => (s as unknown as StoreCompat).penaltyStrokes ?? 0,
+  );
+  const personalBest = useCurbsideStore((s) => {
+    const st = s as unknown as StoreCompat;
+    if (st.personalBest !== undefined) return st.personalBest;
+    return st.dailyBest?.bestStrokes ?? null;
+  });
+
   const cardRef = useRef<HTMLElement | null>(null);
 
   useEffect(() => {
-    if (isRoundComplete) {
-      setCopied(false);
+    if (isHoleComplete) {
       cardRef.current?.focus({ preventScroll: true });
     }
-    return () => {
-      if (copyTimerRef.current !== null) {
-        clearTimeout(copyTimerRef.current);
-        copyTimerRef.current = null;
-      }
-    };
-  }, [isRoundComplete, seed]);
+  }, [isHoleComplete]);
 
-  if (!isRoundComplete) return null;
+  if (!isHoleComplete) return null;
 
-  const shareText = buildShareText(seed, roundMode, totalStrokes, sunkOrder);
-  const isDaily = roundMode === 'daily';
-  const isNewDailyBest =
-    isDaily &&
-    (previousDailyBest === null || totalStrokes < previousDailyBest);
-  const matchedDailyBest =
-    isDaily &&
-    previousDailyBest !== null &&
-    totalStrokes === previousDailyBest;
+  const priorBest = previousBest ?? previousDailyBest ?? null;
+  const isNewPersonalBest =
+    strokes > 0 && (priorBest === null || strokes < priorBest);
+  const effectiveBest =
+    personalBest !== null
+      ? Math.min(personalBest, strokes || personalBest)
+      : strokes;
 
-  const handleShare = async () => {
+  const scoreMeta = getScoreRelativeToPar(Math.max(1, strokes), par);
+  const showConfetti = scoreMeta.celebrate || isNewPersonalBest;
+
+  const handleReplay = () => {
     soundEngine.unlock();
-    let didShareOrCopy = false;
-
-    if (typeof navigator !== 'undefined' && typeof navigator.share === 'function') {
-      try {
-        await navigator.share({
-          title: 'Curbside Links',
-          text: shareText,
-        });
-        didShareOrCopy = true;
-      } catch (err) {
-        if (err instanceof Error && err.name === 'AbortError') {
-          return;
-        }
-      }
-    }
-
-    if (!didShareOrCopy) {
-      didShareOrCopy = await copyTextWithFallback(shareText);
+    soundEngine.playUiClick(0.95);
+    const st = useCurbsideStore.getState() as unknown as StoreCompat;
+    if (st.replayHole) {
+      st.replayHole();
+    } else if (st.resetHole) {
+      st.resetHole();
     } else {
-      // Also copy to clipboard quietly when native share succeeds if possible
-      void copyTextWithFallback(shareText);
-    }
-
-    if (didShareOrCopy) {
-      setCopied(true);
-      notifyScorecardCopied();
-      if (copyTimerRef.current !== null) {
-        clearTimeout(copyTimerRef.current);
-      }
-      copyTimerRef.current = setTimeout(() => {
-        copyTimerRef.current = null;
-        setCopied(false);
-      }, 2200);
+      st.restartRound?.();
     }
   };
 
@@ -133,127 +202,130 @@ export function ScorecardModal({ previousDailyBest }: ScorecardModalProps) {
     <div
       data-hud-interactive="true"
       onPointerDown={(e) => e.stopPropagation()}
-      className="pointer-events-auto fixed inset-0 z-40 flex items-center justify-center bg-[#231914]/35 px-4 py-4 backdrop-blur-[3px]"
+      className="pointer-events-auto fixed inset-0 z-40 flex items-center justify-center bg-[#231914]/38 px-4 py-4 backdrop-blur-[3px]"
     >
       <section
         ref={cardRef}
         tabIndex={-1}
         role="dialog"
         aria-modal="true"
-        aria-label="5-Flag Scorecard"
-        className="animate-modal-pop max-h-[calc(100dvh-2rem)] w-full max-w-[21.5rem] overflow-y-auto overscroll-contain rounded-[1.85rem] border-2 border-[#E7C99E] bg-gradient-to-b from-[#FFFDF9] to-[#FFF4DF] p-5 text-center text-[#231914] shadow-[0_24px_54px_-12px_rgba(35,25,20,0.42)] focus:outline-none [@media(max-height:560px)]:p-3.5"
+        aria-label={`Hole ${holeNumber} Scorecard`}
+        className="animate-modal-pop relative max-h-[calc(100dvh-2rem)] w-full max-w-[21.5rem] overflow-hidden overflow-y-auto overscroll-contain rounded-[1.85rem] border-2 border-[#E7C99E] bg-gradient-to-b from-[#FFFDF9] to-[#FFF3DD] p-5 text-center text-[#231914] shadow-[0_24px_54px_-12px_rgba(35,25,20,0.42)] focus:outline-none [@media(max-height:560px)]:p-3.5"
       >
-        {/* City Mode Pill */}
-        <div className="inline-flex items-center gap-1.5 rounded-full border border-[#E5C89E] bg-[#FFF8EB] px-3 py-1 text-[11.5px] font-extrabold tracking-tight text-[#543E32]">
-          <span aria-hidden="true">🏙️</span>
-          <span>{isDaily ? `Daily • ${seed}` : `Random City • ${seed}`}</span>
-        </div>
-
-        {/* Daily Best Badge */}
-        {isDaily && dailyBest && (
-          <div className="mt-2 flex justify-center">
-            {isNewDailyBest ? (
-              <span className="inline-flex items-center gap-1 rounded-full border border-[#D99B26] bg-[#FEF08A] px-3 py-0.5 text-[11.5px] font-extrabold text-[#422006]">
-                <span aria-hidden="true">🏆</span>
-                <span>
-                  {previousDailyBest === null
-                    ? 'Daily Score Set!'
-                    : `New Daily Best! (was ${previousDailyBest})`}
-                </span>
-              </span>
-            ) : (
-              <span className="inline-flex items-center gap-1 rounded-full border border-[#E5C89E] bg-[#FFF7E2] px-3 py-0.5 text-[11.5px] font-bold text-[#543E32]">
-                <span>
-                  {matchedDailyBest
-                    ? `Matched Daily Best: ${dailyBest.bestStrokes}`
-                    : `Daily Best: ${dailyBest.bestStrokes}`}
-                </span>
-              </span>
-            )}
+        {/* Sunlit Confetti Flourish */}
+        {showConfetti && (
+          <div
+            aria-hidden="true"
+            className="pointer-events-none absolute inset-x-0 top-0 h-28 overflow-hidden"
+          >
+            {CONFETTI_PIECES.map((piece, idx) => (
+              <span
+                key={idx}
+                className="animate-confetti-flutter absolute top-0 h-2.5 w-1.5 rounded-full"
+                style={{
+                  left: piece.left,
+                  animationDelay: piece.delay,
+                  backgroundColor: piece.color,
+                }}
+              />
+            ))}
           </div>
         )}
 
-        {/* Total Strokes */}
-        <div className="mt-3 [@media(max-height:560px)]:mt-2">
-          <div className="text-[42px] leading-none font-black tracking-tight text-[#231914] tabular-nums [@media(max-height:560px)]:text-[34px]">
-            {totalStrokes}
+        {/* Hole Header Pill */}
+        <div className="relative inline-flex items-center gap-1.5 rounded-full border border-[#E5C89E] bg-[#FFF8EB] px-3 py-1 text-[11px] font-black tracking-tight text-[#543E32] uppercase">
+          <span aria-hidden="true">⛳</span>
+          <span>
+            Hole {holeNumber}: {holeName} • Par {par} • {holeDistanceMeters}m
+          </span>
+        </div>
+
+        {/* Relative-to-Par Celebration Banner */}
+        <div className="relative mt-3 flex justify-center">
+          <span
+            className="inline-flex items-center rounded-full border px-4 py-1 text-[15px] font-black tracking-tight shadow-xs"
+            style={{
+              backgroundColor: scoreMeta.pillBg,
+              color: scoreMeta.pillText,
+              borderColor: scoreMeta.pillBorder,
+            }}
+          >
+            {scoreMeta.headline}
+          </span>
+        </div>
+
+        {/* Big Stroke Hero Counter */}
+        <div className="relative mt-3 [@media(max-height:560px)]:mt-2">
+          <div className="text-[48px] leading-none font-black tracking-tight text-[#231914] tabular-nums [@media(max-height:560px)]:text-[38px]">
+            {strokes}
           </div>
-          <div className="mt-0.5 text-[13px] font-extrabold tracking-wide text-[#543E32] uppercase">
-            {totalStrokes === 1 ? 'Total Stroke' : 'Total Strokes'}
+          <div className="mt-0.5 text-[12.5px] font-extrabold tracking-wider text-[#543E32] uppercase">
+            {strokes === 1 ? 'Total Stroke' : 'Total Strokes'}
           </div>
         </div>
 
-        {/* 5 Flags in Exact Player Sink Order */}
-        <div
-          aria-label="Flags sunk in order"
-          className="mt-4 grid grid-cols-5 gap-1.5 rounded-2xl border border-[#EAD2AF] bg-[#FFF8EB]/90 p-2.5 [@media(max-height:560px)]:mt-2.5 [@media(max-height:560px)]:p-2"
-        >
-          {sunkOrder.map((entry) => {
-            const meta = FLAG_COLOR_META[entry.color];
-            return (
-              <div
-                key={entry.color}
-                className="flex flex-col items-center gap-1 rounded-xl bg-white/85 px-1 py-1.5 shadow-[0_1px_3px_rgba(35,25,20,0.06)]"
-              >
-                <span
-                  aria-label={`${meta.label} flag`}
-                  className="text-[20px] leading-none"
-                >
-                  {meta.emoji}
-                </span>
-                <span className="text-[13px] leading-none font-black text-[#231914] tabular-nums">
-                  {entry.strokes}
-                </span>
-                <span className="text-[9.5px] leading-none font-bold text-[#543E32]">
-                  #{entry.orderIndex + 1}
-                </span>
-              </div>
-            );
-          })}
+        {/* New Personal Best Badge */}
+        <div className="relative mt-2.5 flex justify-center">
+          {isNewPersonalBest ? (
+            <span className="inline-flex items-center gap-1.5 rounded-full border border-[#D99B26] bg-[#FEF08A] px-3 py-1 text-[11.5px] font-black text-[#422006] shadow-xs">
+              <span aria-hidden="true">🏆</span>
+              <span>
+                {priorBest === null
+                  ? 'NEW PERSONAL BEST!'
+                  : `NEW PERSONAL BEST! (was ${priorBest})`}
+              </span>
+            </span>
+          ) : (
+            <span className="inline-flex items-center gap-1 rounded-full border border-[#E5C89E] bg-[#FFF7E2] px-3 py-0.5 text-[11.5px] font-bold text-[#543E32]">
+              <span>Personal Best: {effectiveBest}</span>
+            </span>
+          )}
         </div>
 
-        {/* Copy/Share Preview Strip */}
-        <p className="mt-2.5 rounded-xl bg-[#F5E7CE]/65 px-3 py-1.5 font-mono text-[11px] leading-snug font-semibold text-[#3D2B21] select-all">
-          {totalStrokes} Strokes:{' '}
-          {sunkOrder
-            .map((e) => `${FLAG_COLOR_META[e.color].emoji}${e.strokes}`)
-            .join(' ')}
-        </p>
+        {/* Stats Breakdown Grid */}
+        <div className="relative mt-4 grid grid-cols-3 gap-2 rounded-2xl border border-[#EAD2AF] bg-[#FFF8EB]/90 p-2.5 text-center [@media(max-height:560px)]:mt-2.5">
+          <div className="flex flex-col items-center rounded-xl bg-white/85 px-1.5 py-2 shadow-[0_1px_2px_rgba(35,25,20,0.05)]">
+            <span className="text-[9.5px] font-extrabold tracking-wider text-[#6B5142] uppercase">
+              Strokes
+            </span>
+            <span className="mt-0.5 text-[16px] leading-none font-black text-[#231914] tabular-nums">
+              {strokes}
+            </span>
+          </div>
 
-        {/* Action Buttons (>= 48px tall) */}
-        <div className="mt-4 flex flex-col gap-2 [@media(max-height:560px)]:mt-2.5">
+          <div className="flex flex-col items-center rounded-xl bg-white/85 px-1.5 py-2 shadow-[0_1px_2px_rgba(35,25,20,0.05)]">
+            <span className="text-[9.5px] font-extrabold tracking-wider text-[#6B5142] uppercase">
+              Penalties
+            </span>
+            <span
+              className={`mt-0.5 text-[16px] leading-none font-black tabular-nums ${
+                penaltyStrokes > 0 ? 'text-[#B93815]' : 'text-[#231914]'
+              }`}
+            >
+              {penaltyStrokes > 0 ? `+${penaltyStrokes}` : '0'}
+            </span>
+          </div>
+
+          <div className="flex flex-col items-center rounded-xl bg-white/85 px-1.5 py-2 shadow-[0_1px_2px_rgba(35,25,20,0.05)]">
+            <span className="text-[9.5px] font-extrabold tracking-wider text-[#6B5142] uppercase">
+              Best
+            </span>
+            <span className="mt-0.5 text-[16px] leading-none font-black text-[#1B7340] tabular-nums">
+              {effectiveBest}
+            </span>
+          </div>
+        </div>
+
+        {/* 1-Tap Replay Button */}
+        <div className="relative mt-4 [@media(max-height:560px)]:mt-3">
           <button
             type="button"
-            onClick={handleShare}
-            className={`flex min-h-[48px] w-full items-center justify-center gap-2 rounded-2xl px-4 py-3 text-[15px] font-black tracking-tight text-white shadow-[0_8px_20px_-6px_rgba(25,95,55,0.45)] transition-[transform,background-color] duration-150 active:scale-[0.97] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#231914] ${
-              copied
-                ? 'bg-[#166534]'
-                : 'bg-[#1B7340] hover:bg-[#166136]'
-            }`}
+            onClick={handleReplay}
+            className="flex min-h-[52px] w-full items-center justify-center gap-2 rounded-2xl bg-[#C23914] px-4 py-3 text-[15.5px] font-black tracking-tight text-white shadow-[0_10px_24px_-6px_rgba(194,57,20,0.48)] transition-[transform,background-color] duration-150 hover:bg-[#AB3110] active:scale-[0.97] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#231914]"
           >
-            <span aria-hidden="true">{copied ? '✓' : '📤'}</span>
-            <span>{copied ? 'Copied!' : 'Share Scorecard'}</span>
+            <span aria-hidden="true">↺</span>
+            <span>Tee It Up Again</span>
           </button>
-
-          <div className="grid grid-cols-2 gap-2">
-            <button
-              type="button"
-              onClick={restartRound}
-              className="flex min-h-[48px] items-center justify-center gap-1.5 rounded-2xl bg-[#C23914] px-3 py-2.5 text-[14px] font-black tracking-tight text-white shadow-[0_6px_16px_-6px_rgba(194,57,20,0.45)] transition-[transform,background-color] duration-150 hover:bg-[#AB3110] active:scale-[0.97] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#231914]"
-            >
-              <span aria-hidden="true">↺</span>
-              <span>Play Again</span>
-            </button>
-
-            <button
-              type="button"
-              onClick={loadRandomCity}
-              className="flex min-h-[48px] items-center justify-center gap-1.5 rounded-2xl border border-[#D8B98C] bg-[#FFF6E5] px-3 py-2.5 text-[13.5px] font-black tracking-tight text-[#231914] transition-[transform,background-color] duration-150 hover:bg-[#FCEBD0] active:scale-[0.97] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#231914]"
-            >
-              <span aria-hidden="true">🎲</span>
-              <span>New City</span>
-            </button>
-          </div>
         </div>
       </section>
     </div>

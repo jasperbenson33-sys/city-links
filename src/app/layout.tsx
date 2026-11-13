@@ -2,10 +2,10 @@ import type { Metadata, Viewport } from 'next';
 import './globals.css';
 
 export const metadata: Metadata = {
-  title: 'Curbside Links',
+  title: 'Curbside Links — 5th & Mercer',
   description:
-    'Sunlit 3D urban mini-golf across a procedural city island. Sink all 5 flags in any order.',
-  applicationName: 'Curbside Links',
+    'Hole 1: 5th & Mercer (Par 4 • 72m). Sunlit Walkabout-warm urban street golf — instant tee-off, zero menus.',
+  applicationName: 'Curbside Links — 5th & Mercer',
   appleWebApp: {
     capable: true,
     statusBarStyle: 'black-translucent',
@@ -22,7 +22,7 @@ export const viewport: Viewport = {
   maximumScale: 1,
   userScalable: false,
   viewportFit: 'cover',
-  themeColor: '#FFD89C',
+  themeColor: '#FFE7BA',
 };
 
 export default function RootLayout({

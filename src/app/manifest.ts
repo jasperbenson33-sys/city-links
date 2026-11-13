@@ -2,15 +2,15 @@ import type { MetadataRoute } from 'next';
 
 export default function manifest(): MetadataRoute.Manifest {
   return {
-    name: 'Curbside Links',
+    name: 'Curbside Links — 5th & Mercer',
     short_name: 'Curbside Links',
     description:
-      'Sunlit 3D urban mini-golf across a procedural city island. Sink all 5 flags in any order.',
+      'Hole 1: 5th & Mercer (Par 4 • 72m). Sunlit urban street golf with Walkabout warmth and Coffee Golf clarity.',
     start_url: '/',
     display: 'standalone',
     orientation: 'portrait',
     background_color: '#FFE7BA',
-    theme_color: '#FFD89C',
+    theme_color: '#FFE7BA',
     icons: [
       {
         src: '/icon',

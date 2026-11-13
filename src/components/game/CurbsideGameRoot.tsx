@@ -1,141 +1,159 @@
 'use client';
 
 import './suppressThirdPartyWarnings';
-import React, { Suspense, useEffect, useRef, useState } from 'react';
+import React, { Suspense, useEffect, useRef } from 'react';
 import * as THREE from 'three';
 import { Canvas } from '@react-three/fiber';
 import { Physics } from '@react-three/rapier';
-import { BALL_RADIUS, WORLD_GRAVITY_Y, type PlacedProp } from '@/types';
+import {
+  BALL_RADIUS,
+  WORLD_GRAVITY_Y,
+  type ClubId,
+  type Vec3Tuple,
+} from '@/types';
+import { COURSE_MASTER_PLAN } from '@/config/courseMasterPlan';
+import { soundEngine } from '@/lib/sound';
 import { useCurbsideStore } from '@/store';
 import { CityIslandWorld } from '@/components/world';
+import { GolfBall } from '@/components/canvas/GolfBall';
+import { CameraRig, type CameraRigControl } from '@/components/canvas/CameraRig';
+import { AimControlsAndArc } from '@/components/canvas/AimControlsAndArc';
 import { PhysicsWorld } from './PhysicsWorld';
-import { GolfBallPhysicsController } from './GolfBallPhysicsController';
-import { DioramaCameraRig, type CameraRigControl } from './DioramaCameraRig';
-import { AimControlsAndArc } from './AimControlsAndArc';
 
-export interface CurbsideGameRootProps {
-  /** Optional HUD overlay rendered cleanly above the interactive 3D canvas */
-  children?: React.ReactNode;
-  className?: string;
+export interface CurbsideDebugBridge {
+  getState: () => ReturnType<typeof useCurbsideStore.getState>;
+  teleportBall: (position: Vec3Tuple) => void;
+  setAuditStation: (stationId: string | null) => void;
+  setOrbitYaw: (yawRad: number) => void;
+  fireShot: (opts: {
+    clubId?: ClubId;
+    aimYaw?: number;
+    power: number;
+    forceSteamActive?: boolean | null;
+  }) => void;
+  resetHole: () => void;
 }
 
-export function CurbsideGameRoot({
-  children,
-  className = '',
-}: CurbsideGameRootProps) {
-  const [mounted, setMounted] = useState(false);
+declare global {
+  interface Window {
+    __CURBSIDE_DEBUG__?: CurbsideDebugBridge;
+  }
+}
 
-  const course = useCurbsideStore((s) => s.course);
-  const courseVersion = useCurbsideStore((s) => s.courseVersion);
-  const sunkFlags = useCurbsideStore((s) => s.sunkFlags);
+export interface CurbsideGameRootProps {
+  children?: React.ReactNode;
+}
+
+export function CurbsideGameRoot({ children }: CurbsideGameRootProps) {
+  const isHoleComplete = useCurbsideStore((s) => s.isHoleComplete);
   const selectedClub = useCurbsideStore((s) => s.selectedClub);
-  const ballPosition = useCurbsideStore((s) => s.ballPosition);
   const propHitTimestamps = useCurbsideStore((s) => s.propHitTimestamps);
+  const forceSteamActive = useCurbsideStore((s) => s.forceSteamActive);
+  const hydratePersonalBest = useCurbsideStore((s) => s.hydratePersonalBest);
 
-  const ballWorldPositionRef = useRef<THREE.Vector3>(
+  const ballWorldPositionRef = useRef(
     new THREE.Vector3(
-      course.startTeePosition[0],
-      course.startTeePosition[1] + BALL_RADIUS,
-      course.startTeePosition[2],
+      COURSE_MASTER_PLAN.teePosition[0],
+      COURSE_MASTER_PLAN.teePosition[1] + BALL_RADIUS,
+      COURSE_MASTER_PLAN.teePosition[2],
     ),
   );
   const cameraControlRef = useRef<CameraRigControl | null>(null);
-  const waterTriggerRef = useRef<((sourcePropId?: string) => void) | null>(null);
-  const deflectorTriggerRef = useRef<((prop: PlacedProp) => void) | null>(null);
 
   useEffect(() => {
-    setMounted(true);
-    useCurbsideStore.getState().hydrateDailyBest();
+    hydratePersonalBest();
+    soundEngine.init();
+  }, [hydratePersonalBest]);
+
+  useEffect(() => {
+    const bridge: CurbsideDebugBridge = {
+      getState: () => useCurbsideStore.getState(),
+      teleportBall: (pos) => {
+        ballWorldPositionRef.current.set(pos[0], pos[1], pos[2]);
+        useCurbsideStore.getState().teleportBall(pos);
+      },
+      setAuditStation: (stationId) => {
+        useCurbsideStore.getState().setCameraAuditStation(stationId);
+      },
+      setOrbitYaw: (yawRad) => {
+        useCurbsideStore.getState().setAimYaw(yawRad);
+      },
+      fireShot: (opts) => {
+        useCurbsideStore.getState().launchShot({
+          clubId: opts.clubId,
+          aimYaw: opts.aimYaw,
+          power: opts.power,
+          forceSteamActive:
+            opts.forceSteamActive !== undefined ? opts.forceSteamActive : null,
+        });
+      },
+      resetHole: () => {
+        ballWorldPositionRef.current.set(
+          COURSE_MASTER_PLAN.teePosition[0],
+          COURSE_MASTER_PLAN.teePosition[1] + BALL_RADIUS,
+          COURSE_MASTER_PLAN.teePosition[2],
+        );
+        useCurbsideStore.getState().replayHole();
+      },
+    };
+    window.__CURBSIDE_DEBUG__ = bridge;
+    return () => {
+      if (window.__CURBSIDE_DEBUG__ === bridge) {
+        delete window.__CURBSIDE_DEBUG__;
+      }
+    };
   }, []);
-
-  useEffect(() => {
-    ballWorldPositionRef.current.set(
-      course.startTeePosition[0],
-      course.startTeePosition[1] + BALL_RADIUS,
-      course.startTeePosition[2],
-    );
-  }, [course.seed, course.startTeePosition]);
 
   return (
     <div
-      className={`relative h-[100dvh] w-full overflow-hidden select-none bg-gradient-to-b from-[#6BBDF7] via-[#BFE8FD] to-[#FFE8CC] ${className}`}
+      className="relative h-[100dvh] w-full overflow-hidden select-none bg-[#8AD1FC]"
       style={{ touchAction: 'none' }}
     >
-      {mounted && (
-        <Canvas
-          shadows={{ type: THREE.PCFShadowMap }}
-          dpr={[1, 2]}
-          gl={{
-            antialias: true,
-            powerPreference: 'high-performance',
-            toneMapping: THREE.ACESFilmicToneMapping,
-            toneMappingExposure: 1.04,
-          }}
-          camera={{
-            fov: 44,
-            near: 0.4,
-            far: 950,
-            position: [45, 110, 120],
-          }}
-          style={{
-            width: '100%',
-            height: '100%',
-            display: 'block',
-            touchAction: 'none',
-          }}
-        >
-          <Suspense fallback={null}>
-            <CityIslandWorld
-              course={course}
-              sunkFlags={sunkFlags}
-              selectedClub={selectedClub}
-              ballPosition={ballPosition}
-              propHitTimestamps={propHitTimestamps}
-              includeLighting
-              showHorizon
-              showCornerBuildings
-            />
+      <Canvas
+        shadows={{ type: THREE.PCFShadowMap }}
+        dpr={[1, 2]}
+        camera={{
+          fov: 52,
+          near: 0.12,
+          far: 420,
+          position: [
+            COURSE_MASTER_PLAN.teePosition[0],
+            COURSE_MASTER_PLAN.teePosition[1] + BALL_RADIUS + 2.08,
+            COURSE_MASTER_PLAN.teePosition[2] + 4.7,
+          ],
+        }}
+        gl={{
+          antialias: true,
+          powerPreference: 'high-performance',
+          toneMapping: THREE.ACESFilmicToneMapping,
+          toneMappingExposure: 1.06,
+        }}
+        className="h-full w-full touch-none"
+      >
+        <Suspense fallback={null}>
+          <CityIslandWorld
+            plan={COURSE_MASTER_PLAN}
+            isHoleSunk={isHoleComplete}
+            selectedClub={selectedClub}
+            propHitTimestamps={propHitTimestamps}
+            forceAction={Boolean(forceSteamActive)}
+          />
 
-            <Physics
-              key={`rapier-${course.seed}-${courseVersion}`}
-              gravity={[0, WORLD_GRAVITY_Y, 0]}
-              timeStep={1 / 60}
-            >
-              <PhysicsWorld
-                course={course}
-                courseVersion={courseVersion}
-                clubId={selectedClub}
-                onWaterSensorHit={(sourcePropId) =>
-                  waterTriggerRef.current?.(sourcePropId)
-                }
-                onDeflectorHit={(prop) => deflectorTriggerRef.current?.(prop)}
-              />
+          <Physics gravity={[0, WORLD_GRAVITY_Y, 0]} timeStep={1 / 60}>
+            <PhysicsWorld />
+            <GolfBall ballWorldPositionRef={ballWorldPositionRef} />
+          </Physics>
 
-              <GolfBallPhysicsController
-                course={course}
-                ballWorldPositionRef={ballWorldPositionRef}
-                registerWaterTrigger={(fn) => {
-                  waterTriggerRef.current = fn;
-                }}
-                registerDeflectorTrigger={(fn) => {
-                  deflectorTriggerRef.current = fn;
-                }}
-              />
-            </Physics>
-
-            <DioramaCameraRig
-              ballWorldPositionRef={ballWorldPositionRef}
-              controlRef={cameraControlRef}
-            />
-
-            <AimControlsAndArc
-              course={course}
-              ballWorldPositionRef={ballWorldPositionRef}
-              cameraControlRef={cameraControlRef}
-            />
-          </Suspense>
-        </Canvas>
-      )}
+          <CameraRig
+            ballWorldPositionRef={ballWorldPositionRef}
+            controlRef={cameraControlRef}
+          />
+          <AimControlsAndArc
+            ballWorldPositionRef={ballWorldPositionRef}
+            cameraControlRef={cameraControlRef}
+          />
+        </Suspense>
+      </Canvas>
 
       {children}
     </div>

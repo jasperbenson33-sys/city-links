@@ -7,8 +7,6 @@ export const size = {
 
 export const contentType = 'image/png';
 
-const FLAG_COLORS = ['#EF4444', '#FACC15', '#3B82F6', '#A855F7', '#22C55E'];
-
 export default function AppleIcon() {
   return new ImageResponse(
     (
@@ -80,34 +78,41 @@ export default function AppleIcon() {
           }}
         />
 
-        {/* 5 Color-Coded Flag Dots */}
+        {/* Hole 1 Par 4 Pill */}
         <div
           style={{
             display: 'flex',
             position: 'absolute',
             top: 16,
             left: 16,
-            gap: 4,
-            padding: '4px 6px',
+            alignItems: 'center',
+            gap: 5,
+            padding: '4px 8px',
             borderRadius: 999,
-            background: 'rgba(255, 253, 248, 0.88)',
+            background: 'rgba(255, 253, 248, 0.92)',
           }}
         >
-          {FLAG_COLORS.map((color) => (
-            <div
-              key={color}
-              style={{
-                display: 'flex',
-                width: 8,
-                height: 8,
-                borderRadius: 4,
-                background: color,
-              }}
-            />
-          ))}
+          <div
+            style={{
+              display: 'flex',
+              width: 7,
+              height: 7,
+              borderRadius: 4,
+              background: '#D95D39',
+            }}
+          />
+          <span
+            style={{
+              fontSize: 10,
+              fontWeight: 900,
+              color: '#231914',
+            }}
+          >
+            H1 • P4
+          </span>
         </div>
 
-        {/* Lush Mint Parklet Turf Hill */}
+        {/* Lush Mint Courtyard Turf Hill */}
         <div
           style={{
             display: 'flex',
@@ -193,6 +198,6 @@ export default function AppleIcon() {
     ),
     {
       ...size,
-    }
+    },
   );
 }

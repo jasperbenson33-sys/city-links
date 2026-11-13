@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useMemo, useRef } from 'react';
+import React, { useEffect, useMemo, useRef } from 'react';
 import { useFrame } from '@react-three/fiber';
 import * as THREE from 'three';
 import { TOYBOX_MATERIALS } from '@/materials';
@@ -15,26 +15,54 @@ interface CloudSpec {
 }
 
 const CLOUD_SPECS: CloudSpec[] = [
-  { x: -148, y: 18, z: -136, scale: 1.7, speed: 0.48, bobOffset: 0.0 },
-  { x: -112, y: 22, z: -118, scale: 1.55, speed: 0.36, bobOffset: 1.3 },
-  { x: 112, y: 17, z: -114, scale: 1.6, speed: 0.54, bobOffset: 2.4 },
-  { x: 146, y: 21, z: -98, scale: 1.8, speed: 0.42, bobOffset: 3.1 },
-  { x: 162, y: 15, z: -38, scale: 1.55, speed: 0.46, bobOffset: 4.2 },
-  { x: -162, y: 16, z: -52, scale: 1.65, speed: 0.4, bobOffset: 5.0 },
+  { x: -135, y: 32, z: -128, scale: 1.75, speed: 0.44, bobOffset: 0.0 },
+  { x: -95, y: 38, z: -115, scale: 1.5, speed: 0.34, bobOffset: 1.3 },
+  { x: 118, y: 30, z: -112, scale: 1.65, speed: 0.5, bobOffset: 2.4 },
+  { x: 148, y: 35, z: -82, scale: 1.8, speed: 0.4, bobOffset: 3.1 },
+  { x: 156, y: 28, z: 32, scale: 1.55, speed: 0.46, bobOffset: 4.2 },
+  { x: -148, y: 30, z: 48, scale: 1.65, speed: 0.38, bobOffset: 5.0 },
 ];
 
 export interface LightingAndSkyProps {
-  /** Show pastel sky dome and flanking clouds. False for isolated QA studio. */
+  /** Show golden-hour sky dome, atmospheric perspective, and drifting clouds. False for isolated QA studio. */
   showHorizon?: boolean;
-  /** Sun shadow frustum half-extent (30 for full 48x48 island, 10 for isolated prop QA). */
+  /** Sun shadow frustum half-extent (44 for full 72m street + courtyard, 12 for isolated QA turntable). */
   shadowSpan?: number;
+  /** World-space focus point for the directional sun shadow frustum. */
+  shadowTarget?: [number, number, number];
 }
 
-export function LightingAndSky({
+export const LightingAndSky = React.memo(function LightingAndSky({
   showHorizon = true,
-  shadowSpan = 30,
+  shadowSpan,
+  shadowTarget,
 }: LightingAndSkyProps) {
   const cloudsGroupRef = useRef<THREE.Group>(null);
+  const elapsedRef = useRef(0);
+
+  const resolvedSpan = shadowSpan ?? (showHorizon ? 44 : 12);
+  const resolvedTarget: [number, number, number] =
+    shadowTarget ?? (showHorizon ? [9, 0, 2] : [0, 0, 0]);
+
+  const sunOffset: [number, number, number] = showHorizon
+    ? [-16, 46, 14]
+    : [-10, 22, 12];
+
+  const sunPos: [number, number, number] = [
+    resolvedTarget[0] + sunOffset[0],
+    resolvedTarget[1] + sunOffset[1],
+    resolvedTarget[2] + sunOffset[2],
+  ];
+
+  const lightTargetObj = useMemo(() => new THREE.Object3D(), []);
+  useEffect(() => {
+    lightTargetObj.position.set(
+      resolvedTarget[0],
+      resolvedTarget[1],
+      resolvedTarget[2],
+    );
+    lightTargetObj.updateMatrixWorld();
+  }, [lightTargetObj, resolvedTarget[0], resolvedTarget[1], resolvedTarget[2]]);
 
   const skyDomeMaterial = useMemo(() => {
     return new THREE.ShaderMaterial({
@@ -42,20 +70,18 @@ export function LightingAndSky({
       depthWrite: false,
       fog: false,
       uniforms: {
-        uTopColor: { value: new THREE.Color('#66B8F6') },
-        uMidColor: { value: new THREE.Color('#A0DDFD') },
-        uHorizonColor: { value: new THREE.Color('#D8EFFD') },
-        uWarmMistColor: { value: new THREE.Color('#FFF2DF') },
-        uBottomColor: { value: new THREE.Color('#FDE2C2') },
-        uSunDir: { value: new THREE.Vector3(-0.42, 0.56, 0.45).normalize() },
-        uSunGlowColor: { value: new THREE.Color('#FFF7DC') },
+        uTopColor: { value: new THREE.Color('#53A6E5') },
+        uMidColor: { value: new THREE.Color('#9ED4F4') },
+        uHorizonColor: { value: new THREE.Color('#FBE3BD') },
+        uWarmMistColor: { value: new THREE.Color('#F5CFA0') },
+        uBottomColor: { value: new THREE.Color('#E6BA8B') },
+        uSunDir: { value: new THREE.Vector3(-0.48, 0.42, 0.42).normalize() },
+        uSunGlowColor: { value: new THREE.Color('#FFE9B8') },
       },
       vertexShader: /* glsl */ `
         varying vec3 vWorldDir;
         void main() {
           vec4 worldPos = modelMatrix * vec4(position, 1.0);
-          // View-relative ray keeps sunlit blue at the top of 3/4 portrait/desktop cameras
-          // and warm apricot studio mist below the museum plinth.
           vWorldDir = normalize(worldPos.xyz - cameraPosition);
           gl_Position = projectionMatrix * viewMatrix * worldPos;
         }
@@ -73,19 +99,19 @@ export function LightingAndSky({
         void main() {
           float h = vWorldDir.y;
           vec3 col;
-          if (h >= 0.08) {
-            col = mix(uMidColor, uTopColor, smoothstep(0.08, 0.68, h));
-          } else if (h >= -0.44) {
-            col = mix(uHorizonColor, uMidColor, smoothstep(-0.44, 0.08, h));
-          } else if (h >= -0.60) {
-            col = mix(uHorizonColor, uWarmMistColor, smoothstep(-0.44, -0.60, h));
+          if (h >= 0.16) {
+            col = mix(uMidColor, uTopColor, smoothstep(0.16, 0.72, h));
+          } else if (h >= -0.02) {
+            col = mix(uHorizonColor, uMidColor, smoothstep(-0.02, 0.16, h));
+          } else if (h >= -0.22) {
+            col = mix(uHorizonColor, uWarmMistColor, smoothstep(-0.02, -0.22, h));
           } else {
-            col = mix(uWarmMistColor, uBottomColor, smoothstep(-0.60, -0.84, h));
+            col = mix(uWarmMistColor, uBottomColor, smoothstep(-0.22, -0.65, h));
           }
 
           float sunAmt = max(dot(normalize(vWorldDir), uSunDir), 0.0);
-          col += uSunGlowColor * pow(sunAmt, 14.0) * 0.22;
-          col += uSunGlowColor * pow(sunAmt, 84.0) * 0.28;
+          col += uSunGlowColor * pow(sunAmt, 10.0) * 0.24;
+          col += uSunGlowColor * pow(sunAmt, 72.0) * 0.34;
 
           gl_FragColor = vec4(col, 1.0);
         }
@@ -93,71 +119,89 @@ export function LightingAndSky({
     });
   }, []);
 
-  useFrame(({ clock }) => {
+  useFrame((_, delta) => {
     const group = cloudsGroupRef.current;
     if (!group || !showHorizon) return;
-    const t = clock.getElapsedTime();
+    elapsedRef.current += Math.min(delta, 0.1);
+    const t = elapsedRef.current;
     const children = group.children;
     for (let i = 0; i < children.length; i++) {
       const spec = CLOUD_SPECS[i];
       if (!spec) continue;
       const cloud = children[i];
-      cloud.position.x = spec.x + Math.sin(t * 0.08 * spec.speed + spec.bobOffset) * 10;
-      cloud.position.y = spec.y + Math.sin(t * 0.5 + spec.bobOffset) * 0.35;
+      cloud.position.x =
+        spec.x + Math.sin(t * 0.08 * spec.speed + spec.bobOffset) * 9;
+      cloud.position.y = spec.y + Math.sin(t * 0.45 + spec.bobOffset) * 0.35;
     }
   });
 
   return (
     <group name="curbside-lighting-and-sky">
-      <color attach="background" args={[showHorizon ? '#BEE4FA' : '#F4EFE6']} />
-      {showHorizon && <fog attach="fog" args={['#FCEAD4', 290, 520]} />}
+      <color attach="background" args={[showHorizon ? '#EED7BA' : '#F4EFE6']} />
+      {showHorizon && <fog attach="fog" args={['#F5DEC2', 110, 320]} />}
 
-      {/* Sunlit Tabletop Key Light */}
+      <primitive object={lightTargetObj} />
+
+      {/* Late-Afternoon Walkabout: Venice Golden-Hour Directional Sun */}
       <directionalLight
         castShadow
-        position={[-22, 54, 30]}
-        intensity={2.15}
-        color="#FFF3D9"
+        position={sunPos}
+        target={lightTargetObj}
+        intensity={2.35}
+        color="#FFE5BA"
         shadow-mapSize={[2048, 2048]}
-        shadow-camera-left={-shadowSpan}
-        shadow-camera-right={shadowSpan}
-        shadow-camera-top={shadowSpan}
-        shadow-camera-bottom={-shadowSpan}
+        shadow-camera-left={-resolvedSpan}
+        shadow-camera-right={resolvedSpan}
+        shadow-camera-top={resolvedSpan}
+        shadow-camera-bottom={-resolvedSpan}
         shadow-camera-near={4}
-        shadow-camera-far={140}
-        shadow-bias={-0.0005}
-        shadow-normalBias={0.05}
+        shadow-camera-far={135}
+        shadow-bias={-0.00035}
+        shadow-normalBias={0.03}
       />
 
-      {/* Crisp Sky / Warm Limestone Bounce */}
-      <hemisphereLight args={['#D0EEFF', '#F3B88C', 1.05]} />
+      {/* Crisp Azure Sky / Warm Venetian Terracotta Ground Bounce */}
+      <hemisphereLight args={['#C8E4FF', '#EFAF7B', 0.96]} />
 
-      {/* Warm Ambient Fill */}
-      <ambientLight intensity={0.42} color="#FFF8EC" />
+      {/* Soft Warm Ambient Fill for Legible Interior Shadows */}
+      <ambientLight intensity={0.34} color="#FFF6E6" />
 
-      {/* Gentle NE Rim Fill for Crisp Architectural Edge Separation */}
-      <directionalLight position={[28, 22, -26]} intensity={0.42} color="#FFE0BD" />
+      {/* Cool North-East Sky Rim Fill for Faceted Architectural Edge Separation */}
+      <directionalLight
+        position={[resolvedTarget[0] + 34, 24, resolvedTarget[2] - 28]}
+        intensity={0.46}
+        color="#C9DFFF"
+      />
 
       {showHorizon && (
         <>
           <mesh material={skyDomeMaterial}>
-            <sphereGeometry args={[440, 28, 18]} />
+            <sphereGeometry args={[380, 28, 18]} />
           </mesh>
 
           <group ref={cloudsGroupRef} name="drifting-clouds">
             {CLOUD_SPECS.map((c, idx) => (
               <group key={idx} position={[c.x, c.y, c.z]} scale={c.scale}>
                 <mesh position={[0, 0, 0]} material={TOYBOX_MATERIALS.cloudSoft}>
-                  <icosahedronGeometry args={[2.2, 1]} />
+                  <icosahedronGeometry args={[2.3, 1]} />
                 </mesh>
-                <mesh position={[-1.9, -0.35, 0.2]} material={TOYBOX_MATERIALS.cloudSoft}>
-                  <icosahedronGeometry args={[1.6, 1]} />
+                <mesh
+                  position={[-2.0, -0.35, 0.2]}
+                  material={TOYBOX_MATERIALS.cloudSoft}
+                >
+                  <icosahedronGeometry args={[1.65, 1]} />
                 </mesh>
-                <mesh position={[1.95, -0.25, -0.15]} material={TOYBOX_MATERIALS.cloudSoft}>
-                  <icosahedronGeometry args={[1.7, 1]} />
+                <mesh
+                  position={[2.0, -0.25, -0.15]}
+                  material={TOYBOX_MATERIALS.cloudSoft}
+                >
+                  <icosahedronGeometry args={[1.75, 1]} />
                 </mesh>
-                <mesh position={[0.6, 0.75, 0.35]} material={TOYBOX_MATERIALS.cloudSoft}>
-                  <icosahedronGeometry args={[1.45, 1]} />
+                <mesh
+                  position={[0.6, 0.78, 0.35]}
+                  material={TOYBOX_MATERIALS.cloudSoft}
+                >
+                  <icosahedronGeometry args={[1.5, 1]} />
                 </mesh>
               </group>
             ))}
@@ -166,4 +210,4 @@ export function LightingAndSky({
       )}
     </group>
   );
-}
+});

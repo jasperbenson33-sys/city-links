@@ -3,9 +3,11 @@ import {
   CUP_APRON_RADIUS,
   CUP_DEPTH,
   CUP_RADIUS,
+  WORLD_GRAVITY_Y,
 } from '../types/clubs';
 import {
   ELEVATIONS,
+  type AABB3D,
   type AllowedGroundDatum,
   type ArchitecturalWallSpec,
   type AuditCameraStationSpec,
@@ -32,6 +34,7 @@ import {
 } from '../types/course';
 import {
   computeAABBFromBoundsXZ,
+  computeAwningBounceVelocity,
   computeCenteredBoxAABB,
   computePitchedAwningNormal,
   computeRotatedAABB,
@@ -142,7 +145,7 @@ export const GROUND_ZONES: GroundSurfaceZoneSpec[] = [
     id: 'zone-south-subway-plaza',
     label: 'South Recessed Brick Subway Entrance Plaza',
     surfaceTag: 'subway_brick_plaza',
-    boundsXZ: { minX: -7.25, maxX: 7.25, minZ: 28.2, maxZ: 36.5 },
+    boundsXZ: { minX: -7.25, maxX: 7.25, minZ: 28.2, maxZ: 38.2 },
     topY: ELEVATIONS.SIDEWALK_Y,
     slabThickness: 0.8,
     friction: 0.62,
@@ -202,6 +205,25 @@ export const GROUND_ZONES: GroundSurfaceZoneSpec[] = [
     rollDamping: 1.05,
   }),
 
+  // 5b. SE 5th & Mercer Intersection Roadway Spandrel outside r = 2.65m curved storm gutter (y = 0.00m)
+  makeGroundZone({
+    id: 'zone-se-corner-road-spandrel',
+    label: 'SE 5th & Mercer Corner Roadway Asphalt Spandrel',
+    surfaceTag: 'loading_zone_asphalt',
+    boundsXZ: { minX: 3.55, maxX: 6.2, minZ: -18.45, maxZ: -15.8 },
+    arcClip: {
+      pivotXZ: [6.2, -15.8],
+      radius: 2.65,
+      keepSide: 'outside',
+      quadrant: 'sw',
+    },
+    topY: ELEVATIONS.ROAD_ASPHALT_Y,
+    slabThickness: 0.65,
+    friction: 0.52,
+    restitution: 0.48,
+    rollDamping: 1.05,
+  }),
+
   // 6. West 5th Ave Sidewalk (y = +0.15m, hosting the Flush Scaffolding Shed)
   makeGroundZone({
     id: 'zone-west-5th-sidewalk',
@@ -241,12 +263,18 @@ export const GROUND_ZONES: GroundSurfaceZoneSpec[] = [
     rollDamping: 0.98,
   }),
 
-  // 9. Wide SE Corner Vendor Plaza Sidewalk Apron (y = +0.15m, hosting Hydrant, Hotdog Cart, Bench, Menu & Bin)
+  // 9. Wide SE Corner Vendor Plaza Sidewalk Apron (y = +0.15m, clipped cleanly at r <= 2.20m inside curved gutter)
   makeGroundZone({
     id: 'zone-se-vendor-corner-apron',
     label: 'SE Corner Hotdog Vendor Plaza Apron',
     surfaceTag: 'sidewalk_paver',
     boundsXZ: { minX: 4.0, maxX: 19.0, minZ: -18.0, maxZ: -14.75 },
+    arcClip: {
+      pivotXZ: [6.2, -15.8],
+      radius: 2.2,
+      keepSide: 'inside',
+      quadrant: 'sw',
+    },
     topY: ELEVATIONS.SIDEWALK_Y,
     slabThickness: 0.8,
     friction: 0.5,
@@ -522,17 +550,24 @@ export const STONE_CURBS: StoneCurbSegmentSpec[] = [
   ),
   makeCurb(
     'curb-corner-se-bevel-45',
-    'SE 45-Degree Beveled Stone Corner Curb',
-    'beveled_45',
-    [5.1, -16.9],
-    [0.32, 3.15],
+    'SE 90-Degree Curved Beveled Stone Corner Curb',
+    'curved_90',
+    [4.7328, -17.2672],
+    [0.25, 0.25],
     Math.PI * 0.25,
     {
       bevelAngleDeg: 45,
       arcPivotXZ: [6.2, -15.8],
-      arcRadius: 2.2,
+      arcRadius: 2.075,
+      arcInnerRadius: 1.95,
+      arcOuterRadius: 2.2,
       startAngleRad: Math.PI,
       endAngleRad: Math.PI * 1.5,
+      aabb: computeAABBFromBoundsXZ(
+        { minX: 4.0, maxX: 6.2, minZ: -18.0, maxZ: -15.8 },
+        ELEVATIONS.GUTTER_CHANNEL_Y,
+        ELEVATIONS.SIDEWALK_Y,
+      ),
     },
   ),
   makeCurb(
@@ -650,13 +685,13 @@ function makeBuilding(
  * sealing 100% of the L-shaped street corridor, South Subway Plaza, and East Pocket-Park Courtyard.
  */
 export const PERIMETER_BUILDINGS: PerimeterBuildingSpec[] = [
-  // --- SOUTH SUBWAY PLAZA BACKSTOP (z: +36.50 .. +45.00, x: -15.50 .. +15.50) ---
+  // --- SOUTH SUBWAY PLAZA BACKSTOP (z: +38.20 .. +45.00, x: -15.50 .. +15.50) ---
   makeBuilding({
     id: 'bld-south-1',
     name: 'Mercer Transit Exchange',
     ring: 'primary_facade',
     corridorSector: 'south_subway_backstop',
-    boundsXZ: { minX: -15.5, maxX: 0.0, minZ: 36.5, maxZ: 45.0 },
+    boundsXZ: { minX: -15.5, maxX: 0.0, minZ: 38.2, maxZ: 45.0 },
     height: 14.2,
     stories: 4,
     palette: 'cream_limestone',
@@ -676,7 +711,7 @@ export const PERIMETER_BUILDINGS: PerimeterBuildingSpec[] = [
     name: '5th Ave Clockhouse Brownstone',
     ring: 'primary_facade',
     corridorSector: 'south_subway_backstop',
-    boundsXZ: { minX: 0.0, maxX: 15.5, minZ: 36.5, maxZ: 45.0 },
+    boundsXZ: { minX: 0.0, maxX: 15.5, minZ: 38.2, maxZ: 45.0 },
     height: 15.0,
     stories: 4,
     palette: 'warm_brick',
@@ -692,13 +727,13 @@ export const PERIMETER_BUILDINGS: PerimeterBuildingSpec[] = [
     shopfrontAwningHex: '#F04438',
   }),
 
-  // --- WEST SIDE OF 5TH AVENUE (x: -15.50 .. -7.25, z: -37.50 .. +36.50) ---
+  // --- WEST SIDE OF 5TH AVENUE (x: -15.50 .. -7.25, z: -37.50 .. +38.20) ---
   makeBuilding({
     id: 'bld-west-1a',
     name: 'Subway Corner Espresso & News',
     ring: 'primary_facade',
     corridorSector: 'west_5th_ave',
-    boundsXZ: { minX: -15.5, maxX: -7.25, minZ: 26.0, maxZ: 36.5 },
+    boundsXZ: { minX: -15.5, maxX: -7.25, minZ: 26.0, maxZ: 38.2 },
     height: 11.4,
     stories: 3,
     palette: 'ochre',
@@ -1009,7 +1044,7 @@ export const PERIMETER_BUILDINGS: PerimeterBuildingSpec[] = [
     name: 'Stazione Sud Brownstone',
     ring: 'primary_facade',
     corridorSector: 'east_5th_ave',
-    boundsXZ: { minX: 7.25, maxX: 15.5, minZ: 18.0, maxZ: 36.5 },
+    boundsXZ: { minX: 7.25, maxX: 15.5, minZ: 18.0, maxZ: 38.2 },
     height: 12.8,
     stories: 3,
     palette: 'warm_brick',
@@ -1027,8 +1062,8 @@ export const PERIMETER_BUILDINGS: PerimeterBuildingSpec[] = [
 ];
 
 /**
- * Second ring of layered background city skyline silhouettes (18.5m - 26.0m, including a Venice Campanile Belltower)
- * sealing elevated camera angles & skyline horizons across 360 degrees.
+ * Second ring of contiguous, zero-gap, zero-overlap background city skyline silhouettes (19.5m - 26.5m,
+ * including a Venice Campanile Belltower) sealing all corners, alleys, and elevated camera pitches across 360°.
  */
 export const SKYLINE_BACKDROPS: PerimeterBuildingSpec[] = [
   makeBuilding({
@@ -1036,8 +1071,8 @@ export const SKYLINE_BACKDROPS: PerimeterBuildingSpec[] = [
     name: 'San Mercer Belltower Campanile',
     ring: 'skyline_backdrop',
     corridorSector: 'north_courtyard',
-    boundsXZ: { minX: 12.0, maxX: 18.5, minZ: -47.0, maxZ: -39.5 },
-    height: 26.0,
+    boundsXZ: { minX: 12.0, maxX: 19.5, minZ: -48.0, maxZ: -38.5 },
+    height: 26.5,
     stories: 6,
     palette: 'terracotta',
     trimPalette: 'cream_limestone',
@@ -1055,8 +1090,8 @@ export const SKYLINE_BACKDROPS: PerimeterBuildingSpec[] = [
     name: 'North-West Venetian Rooftops',
     ring: 'skyline_backdrop',
     corridorSector: 'north_mercer_bend',
-    boundsXZ: { minX: -14.0, maxX: 11.5, minZ: -48.0, maxZ: -38.5 },
-    height: 19.5,
+    boundsXZ: { minX: -26.0, maxX: 12.0, minZ: -48.0, maxZ: -38.5 },
+    height: 21.5,
     stories: 5,
     palette: 'ochre',
     trimPalette: 'terracotta',
@@ -1074,8 +1109,8 @@ export const SKYLINE_BACKDROPS: PerimeterBuildingSpec[] = [
     name: 'North-East Courtyard Skyline Block',
     ring: 'skyline_backdrop',
     corridorSector: 'north_courtyard',
-    boundsXZ: { minX: 19.5, maxX: 44.0, minZ: -48.0, maxZ: -39.0 },
-    height: 21.0,
+    boundsXZ: { minX: 19.5, maxX: 52.0, minZ: -48.0, maxZ: -38.5 },
+    height: 22.0,
     stories: 5,
     palette: 'cream_limestone',
     trimPalette: 'terracotta',
@@ -1093,8 +1128,8 @@ export const SKYLINE_BACKDROPS: PerimeterBuildingSpec[] = [
     name: 'East Piazza Backdrop Tower',
     ring: 'skyline_backdrop',
     corridorSector: 'east_courtyard_backstop',
-    boundsXZ: { minX: 42.0, maxX: 52.0, minZ: -36.0, maxZ: -8.0 },
-    height: 22.5,
+    boundsXZ: { minX: 41.5, maxX: 52.0, minZ: -38.5, maxZ: 0.0 },
+    height: 23.0,
     stories: 6,
     palette: 'warm_brick',
     trimPalette: 'cream_limestone',
@@ -1108,12 +1143,33 @@ export const SKYLINE_BACKDROPS: PerimeterBuildingSpec[] = [
     hasFireEscape: false,
   }),
   makeBuilding({
+    id: 'skyline-se-courtyard-infill',
+    name: 'South-East Courtyard Rear Midrise',
+    ring: 'skyline_backdrop',
+    corridorSector: 'south_courtyard',
+    // Flush east of bld-se-corner-bodega (maxX=19.0) & south of bld-south-courtyard-1 (maxZ=-5.5) -> zero overlap!
+    boundsXZ: { minX: 19.0, maxX: 41.5, minZ: -5.5, maxZ: 0.0 },
+    height: 19.8,
+    stories: 5,
+    palette: 'terracotta',
+    trimPalette: 'cream_limestone',
+    roofStyle: 'cornice_parapet',
+    frontFace: 'north',
+    shopfrontBayCount: 0,
+    windowColumns: 5,
+    hasShutters: false,
+    shutterHex: '#334155',
+    julietBalconyCount: 0,
+    hasFireEscape: false,
+  }),
+  makeBuilding({
     id: 'skyline-west-corridor-midrise',
     name: 'West 5th Ave Midrise Backdrop',
     ring: 'skyline_backdrop',
     corridorSector: 'west_5th_ave',
-    boundsXZ: { minX: -26.0, maxX: -16.0, minZ: -30.0, maxZ: 34.0 },
-    height: 20.5,
+    // Flush at x = -15.5 from z = -38.5 to +45.0, sealing NW & SW corners cleanly!
+    boundsXZ: { minX: -26.0, maxX: -15.5, minZ: -38.5, maxZ: 45.0 },
+    height: 21.5,
     stories: 5,
     palette: 'warm_brick',
     trimPalette: 'cream_limestone',
@@ -1131,8 +1187,8 @@ export const SKYLINE_BACKDROPS: PerimeterBuildingSpec[] = [
     name: 'South Station Skyline Tower',
     ring: 'skyline_backdrop',
     corridorSector: 'south_subway_backstop',
-    boundsXZ: { minX: -18.0, maxX: 18.0, minZ: 45.5, maxZ: 55.0 },
-    height: 22.0,
+    boundsXZ: { minX: -26.0, maxX: 52.0, minZ: 45.0, maxZ: 55.0 },
+    height: 22.5,
     stories: 6,
     palette: 'cream_limestone',
     trimPalette: 'warm_brick',
@@ -1150,8 +1206,9 @@ export const SKYLINE_BACKDROPS: PerimeterBuildingSpec[] = [
     name: 'Mercer Inner-Block Midrise',
     ring: 'skyline_backdrop',
     corridorSector: 'east_5th_ave',
-    boundsXZ: { minX: 16.0, maxX: 38.0, minZ: -5.0, maxZ: 32.0 },
-    height: 19.0,
+    // Starts at exact x = 15.5, z = 0.0 (zero 0.5m alley, zero overlap with bld-se-corner-bodega)!
+    boundsXZ: { minX: 15.5, maxX: 52.0, minZ: 0.0, maxZ: 45.0 },
+    height: 20.5,
     stories: 5,
     palette: 'ochre',
     trimPalette: 'warm_brick',
@@ -1166,6 +1223,11 @@ export const SKYLINE_BACKDROPS: PerimeterBuildingSpec[] = [
   }),
 ];
 
+export const OUTER_CITY_GROUND_SKIRT = {
+  boundsXZ: { minX: -178.0, maxX: 202.0, minZ: -190.0, maxZ: 190.0 },
+  topY: -0.35,
+} as const;
+
 // ============================================================================
 // ARCHITECTURAL RETAINING WALLS, PLANTER LOW WALL, PERGOLA & STRING LIGHTS
 // ============================================================================
@@ -1178,27 +1240,69 @@ export const ARCHITECTURAL_WALLS: ArchitecturalWallSpec[] = [
     kind: 'stone_retaining_wall',
     groundY: ELEVATIONS.SIDEWALK_Y,
     topY: 1.35,
-    center: [0.0, 0.75, 36.25],
+    center: [0.0, 0.75, 37.9],
     size: [14.5, 1.2, 0.5],
     rotationY: 0,
     surfaceTag: 'masonry_wall',
     restitution: 0.5,
-    aabb: computeCenteredBoxAABB([0.0, 0.75, 36.25], [14.5, 1.2, 0.5], 0),
+    aabb: computeCenteredBoxAABB([0.0, 0.75, 37.9], [14.5, 1.2, 0.5], 0),
   },
-  // 2. Wrought-Iron & Limestone Planter Low Wall between SE Vendor Plaza Apron and +0.60m Courtyard Green
-  // Positioned at z = -17.80, x: [19.00 .. 24.50], topY = +1.02m so Hotdog Awning bounce sails softly over onto Green!
+  // 2. Wrought-Iron & Limestone Planter Low Wall on +0.60m Courtyard Terrace (Awning Lob Target)
+  // Grounded flush at +0.60m (0.52m visible height, topY = +1.12m so Hotdog Awning bounce sails cleanly over onto Green)
   {
     id: 'wall-courtyard-wrought-iron-planter',
     label: 'Courtyard Wrought-Iron Planter Low Wall (Awning Lob Target)',
     kind: 'wrought_iron_planter_wall',
-    groundY: ELEVATIONS.SIDEWALK_Y,
-    topY: 1.02,
-    center: [21.75, (0.15 + 1.02) * 0.5, -17.8],
-    size: [5.5, 0.87, 0.32],
+    groundY: ELEVATIONS.COURTYARD_GREEN_Y,
+    topY: 1.12,
+    center: [21.775, (ELEVATIONS.COURTYARD_GREEN_Y + 1.12) * 0.5, -17.8],
+    size: [5.45, 0.52, 0.3],
     rotationY: 0,
     surfaceTag: 'masonry_wall',
     restitution: 0.42,
-    aabb: computeCenteredBoxAABB([21.75, 0.585, -17.8], [5.5, 0.87, 0.32], 0),
+    aabb: computeCenteredBoxAABB([21.775, 0.86, -17.8], [5.45, 0.52, 0.3], 0),
+  },
+  // 3. South Courtyard Ramp Cheek Retaining Wall (seals z = -18.0 step between 0.00..0.60m ramp & +0.15m vendor apron)
+  {
+    id: 'wall-ramp-south-cheek',
+    label: 'Courtyard Entrance Ramp South Stone Cheek Wall',
+    kind: 'stone_retaining_wall',
+    groundY: ELEVATIONS.ROAD_ASPHALT_Y,
+    topY: 0.65,
+    center: [16.67, 0.325, -17.94],
+    size: [4.34, 0.65, 0.16],
+    rotationY: 0,
+    surfaceTag: 'masonry_wall',
+    restitution: 0.48,
+    aabb: computeCenteredBoxAABB([16.67, 0.325, -17.94], [4.34, 0.65, 0.16], 0),
+  },
+  // 4. North Courtyard Ramp Cheek Retaining Wall (seals z = -26.0 wedge face between main ramp & north sidewalk ramp)
+  {
+    id: 'wall-ramp-north-cheek',
+    label: 'Courtyard Entrance Ramp North Stone Cheek Wall',
+    kind: 'stone_retaining_wall',
+    groundY: ELEVATIONS.ROAD_ASPHALT_Y,
+    topY: 0.64,
+    center: [16.75, 0.32, -26.06],
+    size: [4.5, 0.64, 0.16],
+    rotationY: 0,
+    surfaceTag: 'masonry_wall',
+    restitution: 0.48,
+    aabb: computeCenteredBoxAABB([16.75, 0.32, -26.06], [4.5, 0.64, 0.16], 0),
+  },
+  // 5. West Courtyard Terrace Retaining Step Wall (seals x = 19.0 cliff between +0.15m vendor apron & +0.60m courtyard slab)
+  {
+    id: 'wall-courtyard-west-step',
+    label: 'Courtyard Terrace West Limestone Retaining Step',
+    kind: 'courtyard_boundary_wall',
+    groundY: ELEVATIONS.SIDEWALK_Y,
+    topY: 0.65,
+    center: [18.92, 0.4, -16.365],
+    size: [0.16, 0.5, 3.23],
+    rotationY: 0,
+    surfaceTag: 'masonry_wall',
+    restitution: 0.46,
+    aabb: computeCenteredBoxAABB([18.92, 0.4, -16.365], [0.16, 0.5, 3.23], 0),
   },
 ];
 
@@ -1273,8 +1377,29 @@ export const STRING_LIGHT_SPANS: StringLightSpanSpec[] = [
 // DIEGETIC PROP ZONING & MULTI-ROUTE STRATEGIC SHOT MATRIX
 // ============================================================================
 
-const HOTDOG_CART_YAW = -2.68344; // -153.75 deg: orients 28-deg awning normal cleanly from A-Position toward Cup!
+const HOTDOG_CART_YAW = -2.654; // -152.06 deg: keeps cart 0.303m clear of x=19.0 terrace step & funnels 28° bounce <=2m of Cup!
 const HOTDOG_AWNING_NORMAL_INFO = computePitchedAwningNormal(28, HOTDOG_CART_YAW);
+const HOTDOG_AWNING_CENTER: Vec3Tuple = [17.5, ELEVATIONS.SIDEWALK_Y + 2.15, -16.35];
+const HOTDOG_DIST_FROM_A = distance2D(A_POSITION_CROSSWALK.center, HOTDOG_AWNING_CENTER);
+const HOTDOG_FLIGHT_T = Math.sqrt(
+  (BALL_RADIUS + HOTDOG_DIST_FROM_A * Math.tan((50 * Math.PI) / 180) - HOTDOG_AWNING_CENTER[1]) /
+    (-0.5 * WORLD_GRAVITY_Y),
+);
+const HOTDOG_DESIGN_V_IN: Vec3Tuple = [
+  Number(((HOTDOG_AWNING_CENTER[0] - A_POSITION_CROSSWALK.center[0]) / HOTDOG_FLIGHT_T).toFixed(3)),
+  Number(
+    (
+      (HOTDOG_DIST_FROM_A / HOTDOG_FLIGHT_T) * Math.tan((50 * Math.PI) / 180) +
+      WORLD_GRAVITY_Y * HOTDOG_FLIGHT_T
+    ).toFixed(3),
+  ),
+  Number(((HOTDOG_AWNING_CENTER[2] - A_POSITION_CROSSWALK.center[2]) / HOTDOG_FLIGHT_T).toFixed(3)),
+];
+const HOTDOG_DESIGN_V_OUT = computeAwningBounceVelocity(
+  HOTDOG_DESIGN_V_IN,
+  HOTDOG_AWNING_NORMAL_INFO.worldNormal,
+  0.28,
+);
 
 export const COURSE_PROPS: CoursePropSpec[] = [
   // --------------------------------------------------------------------------
@@ -1331,15 +1456,28 @@ export const COURSE_PROPS: CoursePropSpec[] = [
     rotationY: Math.PI, // Cab facing North (-Z) toward corner, lowered ramp facing South (+Z) toward Tee!
     localSize: [2.04, 2.26, 7.0],
     aabb: computeRotatedAABB([2.28, ELEVATIONS.ROAD_ASPHALT_Y, -6.9], [2.04, 2.26, 7.0], Math.PI),
+    // Split solidColliders leaving z: [-3.4 -> -6.0] rear ramp completely open,
+    // z: [-6.0 -> -7.8] center roof-access kicker channel open above y = 1.08m,
+    // and z: [-7.8 -> -10.4] flat roof launch deck open at y = 2.24m!
     solidColliders: [
-      computeRotatedAABB([2.28, ELEVATIONS.ROAD_ASPHALT_Y, -6.9], [2.04, 2.26, 7.0], Math.PI),
+      // Left cargo side wall along roof-access kicker (x: 1.26..1.44, z: -7.8..-6.0)
+      { min: [1.26, 0.0, -7.8], max: [1.44, 2.24, -6.0] },
+      // Right cargo side wall along roof-access kicker (x: 3.12..3.30, z: -7.8..-6.0)
+      { min: [3.12, 0.0, -7.8], max: [3.3, 2.24, -6.0] },
+      // Lower cargo chassis underfloor recessed beneath ramp/kicker bevel (zero vertical lip snag!)
+      { min: [1.44, 0.0, -7.8], max: [3.12, 0.96, -6.2] },
+      // Recessed shoulder under kicker crest (z: -7.98..-7.80) so ball crests smoothly onto y = 2.24m roof
+      { min: [1.26, 0.0, -7.98], max: [3.3, 2.08, -7.8] },
+      // Forward van body & cab supporting flat roof launch deck (y: 0.0..2.24, z: -10.4..-7.98)
+      { min: [1.26, 0.0, -10.4], max: [3.3, 2.24, -7.98] },
     ],
     surfaceTag: 'van_roof_deck',
-    blocksGroundRoll: true,
+    blocksGroundRoll: false,
     reactive: {
       kind: 'van_ramp_and_roof_launch',
-      zoneCenter: [2.28, 2.18, -8.2],
-      zoneHalfExtents: [0.95, 0.2, 2.1],
+      // Launch deck strictly at z: [-10.35 .. -7.35] (<= -7.3m, completely clear of tree canopy at z >= -5.95!)
+      zoneCenter: [2.28, 2.24, -8.85],
+      zoneHalfExtents: [0.95, 0.22, 1.5],
       restitution: 0.62,
       boostVelocity: [-0.8, 5.6, -13.4],
     },
@@ -1353,6 +1491,35 @@ export const COURSE_PROPS: CoursePropSpec[] = [
       rampLaunchAngleDeg: Number(((Math.atan2(1.08, 2.6) * 180) / Math.PI).toFixed(2)), // 22.56 deg
       roofDeckTopY: 2.24,
       roofRestitution: 0.62,
+      slopedRampSpec: {
+        id: 'van-rear-loading-ramp',
+        label: 'Delivery Van Lowered Rear Loading Ramp (0.00m -> 1.08m)',
+        surfaceTag: 'van_roof_deck',
+        boundsXZ: { minX: 1.44, maxX: 3.12, minZ: -6.0, maxZ: -3.4 },
+        bottomY: ELEVATIONS.ROAD_ASPHALT_Y,
+        topY: 1.08,
+        climbDirection: 'north',
+        slopeAngleDeg: Number(((Math.atan2(1.08, 2.6) * 180) / Math.PI).toFixed(2)),
+        slabThickness: 0.08,
+        friction: 0.42,
+        restitution: 0.48,
+        aabb: computeAABBFromBoundsXZ({ minX: 1.44, maxX: 3.12, minZ: -6.0, maxZ: -3.4 }, 0.0, 1.08),
+      },
+      roofAccessKickerSpec: {
+        id: 'van-roof-access-kicker',
+        label: 'Delivery Van Interior Roof-Access Kicker (1.08m -> 2.24m)',
+        surfaceTag: 'van_roof_deck',
+        boundsXZ: { minX: 1.44, maxX: 3.12, minZ: -7.8, maxZ: -6.0 },
+        bottomY: 1.08,
+        topY: 2.24,
+        climbDirection: 'north',
+        slopeAngleDeg: Number(((Math.atan2(1.16, 1.8) * 180) / Math.PI).toFixed(2)),
+        slabThickness: 0.08,
+        friction: 0.4,
+        restitution: 0.52,
+        aabb: computeAABBFromBoundsXZ({ minX: 1.44, maxX: 3.12, minZ: -7.8, maxZ: -6.0 }, 1.08, 2.24),
+      },
+      roofLaunchDeckBoundsXZ: { minX: 1.36, maxX: 3.2, minZ: -10.4, maxZ: -7.8 },
     },
   },
   {
@@ -1397,21 +1564,21 @@ export const COURSE_PROPS: CoursePropSpec[] = [
     rotationY: 0,
     localSize: [1.2, 5.45, 1.2],
     aabb: {
-      min: [1.1, ELEVATIONS.SIDEWALK_Y, -7.1],
+      min: [1.1, ELEVATIONS.SIDEWALK_Y, -5.95],
       max: [6.95, 5.6, -1.9],
     },
     solidColliders: [
       // Sidewalk tree pit & trunk (strictly on East sidewalk [4.90..6.10])
       { min: [4.9, ELEVATIONS.SIDEWALK_Y, -5.1], max: [6.1, 2.65, -3.9] },
-      // Elevated overhanging foliage canopy (y = 2.65..5.60, 0.39m above Van roof!)
-      { min: [1.1, 2.65, -7.1], max: [6.95, 5.6, -1.9] },
+      // Elevated overhanging foliage canopy (minZ = -5.95 >= -6.0, leaving 1.40m open sky north of van roof launch!)
+      { min: [1.1, 2.65, -5.95], max: [6.95, 5.6, -1.9] },
     ],
     surfaceTag: 'patio_rough',
     blocksGroundRoll: true,
     treeOverhangMeta: {
       pitCenter: [5.5, ELEVATIONS.SIDEWALK_Y, -4.5],
       trunkAabb: { min: [4.9, ELEVATIONS.SIDEWALK_Y, -5.1], max: [6.1, 2.65, -3.9] },
-      canopyAabb: { min: [1.1, 2.65, -7.1], max: [6.95, 5.6, -1.9] },
+      canopyAabb: { min: [1.1, 2.65, -5.95], max: [6.95, 5.6, -1.9] },
       blocksRightAerialXRange: [1.1, 6.95],
       leavesLeftCrosswalkOpenXRange: [-3.55, 0.85],
     },
@@ -1425,19 +1592,19 @@ export const COURSE_PROPS: CoursePropSpec[] = [
     name: 'Corner Plaza Hotdog Vendor Cart (28° Striped Awning Bank)',
     type: 'hotdog_cart_umbrella',
     zone: 'sidewalk',
-    position: [17.8, ELEVATIONS.SIDEWALK_Y, -16.35],
+    position: [17.5, ELEVATIONS.SIDEWALK_Y, -16.35],
     groundY: ELEVATIONS.SIDEWALK_Y,
     rotationY: HOTDOG_CART_YAW,
     localSize: [1.65, 2.5, 2.0],
-    aabb: computeRotatedAABB([17.8, ELEVATIONS.SIDEWALK_Y, -16.35], [1.65, 2.5, 2.0], HOTDOG_CART_YAW),
+    aabb: computeRotatedAABB([17.5, ELEVATIONS.SIDEWALK_Y, -16.35], [1.65, 2.5, 2.0], HOTDOG_CART_YAW),
     solidColliders: [
-      computeRotatedAABB([17.8, ELEVATIONS.SIDEWALK_Y, -16.35], [1.65, 2.5, 2.0], HOTDOG_CART_YAW),
+      computeRotatedAABB([17.5, ELEVATIONS.SIDEWALK_Y, -16.35], [1.65, 2.5, 2.0], HOTDOG_CART_YAW),
     ],
     surfaceTag: 'awning_cushion',
     blocksGroundRoll: true,
     reactive: {
       kind: 'awning_cushion_bank',
-      zoneCenter: [17.8, ELEVATIONS.SIDEWALK_Y + 2.15, -16.35],
+      zoneCenter: HOTDOG_AWNING_CENTER,
       zoneHalfExtents: [1.1, 0.35, 0.95],
       restitution: 0.28,
       underpassClearHeight: 0.56,
@@ -1446,13 +1613,13 @@ export const COURSE_PROPS: CoursePropSpec[] = [
     hotdogAwningMeta: {
       pitchDeg: 28,
       restitution: 0.28,
-      awningCenter: [17.8, ELEVATIONS.SIDEWALK_Y + 2.15, -16.35],
+      awningCenter: HOTDOG_AWNING_CENTER,
       awningSize: [2.1, 0.06, 1.65],
       worldNormal: HOTDOG_AWNING_NORMAL_INFO.worldNormal,
-      designIncomingVelocity: [12.393, -12.711, 0.098],
-      designReflectedVelocity: [9.016, 2.974, -7.131],
-      predictedGreenLandingXZ: [23.28, -20.69],
-      predictedStopXZ: [24.15, -21.37],
+      designIncomingVelocity: HOTDOG_DESIGN_V_IN,
+      designReflectedVelocity: HOTDOG_DESIGN_V_OUT,
+      predictedGreenLandingXZ: [22.89, -20.72],
+      predictedStopXZ: [24.18, -21.74],
     },
   },
   {
@@ -1788,13 +1955,14 @@ export const COURSE_PROPS: CoursePropSpec[] = [
     name: '5th Ave Brick & Wrought-Iron Subway Entrance Portal',
     type: 'subway_entrance_portal',
     zone: 'subway_plaza',
-    position: [0.0, ELEVATIONS.SIDEWALK_Y, 32.6],
+    // Placed at z = +35.80 (AABB z: 34.10..37.50), cleanly south of Default Tee Camera (z = 32.72)!
+    position: [0.0, ELEVATIONS.SIDEWALK_Y, 35.8],
     groundY: ELEVATIONS.SIDEWALK_Y,
     rotationY: Math.PI, // Facing North (-Z) toward Tee
     localSize: [4.2, 3.1, 3.4],
-    aabb: computeRotatedAABB([0.0, ELEVATIONS.SIDEWALK_Y, 32.6], [4.2, 3.1, 3.4], Math.PI),
+    aabb: computeRotatedAABB([0.0, ELEVATIONS.SIDEWALK_Y, 35.8], [4.2, 3.1, 3.4], Math.PI),
     solidColliders: [
-      computeRotatedAABB([0.0, ELEVATIONS.SIDEWALK_Y, 32.6], [4.2, 3.1, 3.4], Math.PI),
+      computeRotatedAABB([0.0, ELEVATIONS.SIDEWALK_Y, 35.8], [4.2, 3.1, 3.4], Math.PI),
     ],
     surfaceTag: 'masonry_wall',
     blocksGroundRoll: true,
@@ -1868,13 +2036,13 @@ export const COURSE_PROPS: CoursePropSpec[] = [
     name: 'Subway Plaza West Pit Street Tree',
     type: 'street_tree',
     zone: 'subway_plaza',
-    position: [-5.3, ELEVATIONS.SIDEWALK_Y, 31.8],
+    position: [-5.3, ELEVATIONS.SIDEWALK_Y, 33.4],
     groundY: ELEVATIONS.SIDEWALK_Y,
     rotationY: 0,
     localSize: [1.2, 2.85, 1.2],
-    aabb: computeRotatedAABB([-5.3, ELEVATIONS.SIDEWALK_Y, 31.8], [1.2, 2.85, 1.2], 0),
+    aabb: computeRotatedAABB([-5.3, ELEVATIONS.SIDEWALK_Y, 33.4], [1.2, 2.85, 1.2], 0),
     solidColliders: [
-      computeRotatedAABB([-5.3, ELEVATIONS.SIDEWALK_Y, 31.8], [1.0, 2.85, 1.0], 0),
+      computeRotatedAABB([-5.3, ELEVATIONS.SIDEWALK_Y, 33.4], [1.0, 2.85, 1.0], 0),
     ],
     surfaceTag: 'patio_rough',
     blocksGroundRoll: true,
@@ -1884,13 +2052,13 @@ export const COURSE_PROPS: CoursePropSpec[] = [
     name: 'Subway Plaza East Pit Street Tree',
     type: 'street_tree',
     zone: 'subway_plaza',
-    position: [5.3, ELEVATIONS.SIDEWALK_Y, 31.8],
+    position: [5.3, ELEVATIONS.SIDEWALK_Y, 33.4],
     groundY: ELEVATIONS.SIDEWALK_Y,
     rotationY: 0,
     localSize: [1.2, 2.85, 1.2],
-    aabb: computeRotatedAABB([5.3, ELEVATIONS.SIDEWALK_Y, 31.8], [1.2, 2.85, 1.2], 0),
+    aabb: computeRotatedAABB([5.3, ELEVATIONS.SIDEWALK_Y, 33.4], [1.2, 2.85, 1.2], 0),
     solidColliders: [
-      computeRotatedAABB([5.3, ELEVATIONS.SIDEWALK_Y, 31.8], [1.0, 2.85, 1.0], 0),
+      computeRotatedAABB([5.3, ELEVATIONS.SIDEWALK_Y, 33.4], [1.0, 2.85, 1.0], 0),
     ],
     surfaceTag: 'patio_rough',
     blocksGroundRoll: true,
@@ -2113,8 +2281,8 @@ export const AUDIT_CAMERA_STATIONS: AuditCameraStationSpec[] = [
     label: 'Station 2: Tee Looking 180° Backward at Subway Entrance Plaza',
     groundY: ELEVATIONS.ROAD_ASPHALT_Y,
     position: [0.0, 1.65, 27.52],
-    lookAt: [0.0, 1.85, 35.0],
-    fovDeg: 52,
+    lookAt: [0.0, 2.05, 36.2],
+    fovDeg: 54,
     expectedLandmarks: [
       'bollard-subway-2',
       'bollard-subway-3',
@@ -2157,9 +2325,10 @@ export const AUDIT_CAMERA_STATIONS: AuditCameraStationSpec[] = [
     id: 'courtyard_green_out',
     label: 'Station 5: Elevated +0.60m Courtyard Green Looking Out Toward Mercer St',
     groundY: ELEVATIONS.COURTYARD_GREEN_Y,
-    position: [26.8, ELEVATIONS.COURTYARD_GREEN_Y + 1.65, -21.6],
-    lookAt: [2.0, 1.3, -21.6],
-    fovDeg: 50,
+    // Offset South to z = -19.8 so the cup flagpole sits gracefully off-center instead of bisecting the frame!
+    position: [29.2, ELEVATIONS.COURTYARD_GREEN_Y + 1.65, -19.8],
+    lookAt: [2.0, 1.3, -24.2],
+    fovDeg: 54,
     expectedLandmarks: [
       'cup-hole-1-mercer-courtyard',
       'fountain-courtyard-front',
@@ -2172,11 +2341,11 @@ export const AUDIT_CAMERA_STATIONS: AuditCameraStationSpec[] = [
 
 export const STREET_SCOUT_CAMERA_PRESET: StreetScoutCameraSpec = {
   id: 'street_scout_peek',
-  label: 'Street Scout Elevated Canyon Peek (No Isometric Slab View)',
-  // Stays strictly inside the [-7.25, +7.25] street corridor below 11m cornices!
-  position: [-5.1, 9.4, 8.5],
-  lookAt: [16.5, 0.85, -21.2],
-  fovDeg: 46,
+  label: 'Street Scout Elevated Corner Canyon Vantage (Unobstructed Green Sightline)',
+  // Elevated above the 5th & Mercer dogleg intersection below 10.5m cornices with 100% clear sightline to HOLE_1_CUP!
+  position: [7.8, 9.6, -24.8],
+  lookAt: [23.4, 1.35, -21.4],
+  fovDeg: 52,
   maxAllowedHeightY: 10.5,
 };
 
@@ -2209,6 +2378,7 @@ export const COURSE_MASTER_PLAN: CourseMasterPlan = {
   ramps: WALKABLE_RAMPS,
   perimeterBuildings: PERIMETER_BUILDINGS,
   skylineBackdrops: SKYLINE_BACKDROPS,
+  outerGroundSkirt: OUTER_CITY_GROUND_SKIRT,
   architecturalWalls: ARCHITECTURAL_WALLS,
   courtyardPergola: COURTYARD_PERGOLA,
   stringLightSpans: STRING_LIGHT_SPANS,
@@ -2221,6 +2391,144 @@ export const COURSE_MASTER_PLAN: CourseMasterPlan = {
 // ============================================================================
 // ANALYTICAL ELEVATION, SURFACE & RAYCAST CLOSURE HELPERS
 // ============================================================================
+
+/**
+ * Tests whether `(x, z)` lies inside `zone`, honoring any circular corner `arcClip`.
+ */
+export function isPointInGroundZone(x: number, z: number, zone: GroundSurfaceZoneSpec): boolean {
+  const b = zone.boundsXZ;
+  if (x < b.minX || x > b.maxX || z < b.minZ || z > b.maxZ) {
+    return false;
+  }
+  const clip = zone.arcClip;
+  if (!clip) {
+    return true;
+  }
+  const [px, pz] = clip.pivotXZ;
+  const inQuadrant =
+    (clip.quadrant === 'sw' && x <= px && z <= pz) ||
+    (clip.quadrant === 'se' && x >= px && z <= pz) ||
+    (clip.quadrant === 'nw' && x <= px && z >= pz) ||
+    (clip.quadrant === 'ne' && x >= px && z >= pz);
+  if (!inQuadrant) {
+    return true;
+  }
+  const r = Math.hypot(x - px, z - pz);
+  return clip.keepSide === 'inside' ? r <= clip.radius + 1e-6 : r >= clip.radius - 1e-6;
+}
+
+function isPointOnCurb(x: number, z: number, curb: StoneCurbSegmentSpec): boolean {
+  if (
+    (curb.kind === 'curved_90' || curb.kind === 'beveled_45') &&
+    curb.arcPivotXZ &&
+    curb.arcInnerRadius !== undefined &&
+    curb.arcOuterRadius !== undefined
+  ) {
+    const dx = x - curb.arcPivotXZ[0];
+    const dz = z - curb.arcPivotXZ[1];
+    if (dx <= 1e-5 && dz <= 1e-5) {
+      const r = Math.hypot(dx, dz);
+      return r >= curb.arcInnerRadius - 1e-5 && r <= curb.arcOuterRadius + 1e-5;
+    }
+    return false;
+  }
+  if (curb.kind === 'straight') {
+    return (
+      x >= curb.aabb.min[0] - 1e-6 &&
+      x <= curb.aabb.max[0] + 1e-6 &&
+      z >= curb.aabb.min[2] - 1e-6 &&
+      z <= curb.aabb.max[2] + 1e-6
+    );
+  }
+  return false;
+}
+
+function isPointInGutter(x: number, z: number, gutter: StormGutterTrackSpec): boolean {
+  const halfW = gutter.width * 0.5;
+  if (gutter.kind === 'straight' && gutter.start && gutter.end) {
+    const minX = Math.min(gutter.start[0], gutter.end[0]) - halfW;
+    const maxX = Math.max(gutter.start[0], gutter.end[0]) + halfW;
+    const minZ = Math.min(gutter.start[2], gutter.end[2]) - halfW;
+    const maxZ = Math.max(gutter.start[2], gutter.end[2]) + halfW;
+    return x >= minX && x <= maxX && z >= minZ && z <= maxZ;
+  }
+  if (
+    gutter.kind === 'corner_90' &&
+    gutter.arcPivot &&
+    gutter.arcRadius !== undefined &&
+    gutter.startAngleRad !== undefined &&
+    gutter.endAngleRad !== undefined
+  ) {
+    const dx = x - gutter.arcPivot[0];
+    const dz = z - gutter.arcPivot[2];
+    const r = Math.hypot(dx, dz);
+    if (Math.abs(r - gutter.arcRadius) <= halfW + 1e-6) {
+      let ang = Math.atan2(dz, dx);
+      if (ang < 0) ang += Math.PI * 2;
+      return ang >= gutter.startAngleRad - 1e-4 && ang <= gutter.endAngleRad + 1e-4;
+    }
+  }
+  return false;
+}
+
+/**
+ * Returns `true` iff `(x, z)` is explicitly covered by a walkable ramp, storm gutter,
+ * stone curb, or `GroundSurfaceZoneSpec` (without relying on any fallback datum).
+ */
+export function isWalkablePointExplicitlyCovered(
+  x: number,
+  z: number,
+  plan: CourseMasterPlan = COURSE_MASTER_PLAN,
+): boolean {
+  for (const ramp of plan.ramps) {
+    const b = ramp.boundsXZ;
+    if (x >= b.minX && x <= b.maxX && z >= b.minZ && z <= b.maxZ) return true;
+  }
+  for (const gutter of plan.gutters) {
+    if (isPointInGutter(x, z, gutter)) return true;
+  }
+  for (const curb of plan.curbs) {
+    if (isPointOnCurb(x, z, curb)) return true;
+  }
+  for (const zone of plan.groundZones) {
+    if (isPointInGroundZone(x, z, zone)) return true;
+  }
+  return false;
+}
+
+/**
+ * Evaluates the Delivery Box Van's continuous ramp -> roof-access kicker -> flat roof launch deck
+ * surface elevation at `(x, z)` (`null` when outside the van ramp/roof corridor).
+ */
+export function getVanRampOrRoofElevationAt(
+  x: number,
+  z: number,
+  plan: CourseMasterPlan = COURSE_MASTER_PLAN,
+): number | null {
+  const van = plan.props.find((p) => p.id === 'delivery-van-east');
+  const meta = van?.vanRampMeta;
+  if (!meta) return null;
+
+  for (const ramp of [meta.slopedRampSpec, meta.roofAccessKickerSpec]) {
+    if (!ramp) continue;
+    const b = ramp.boundsXZ;
+    if (x >= b.minX && x <= b.maxX && z >= b.minZ && z <= b.maxZ) {
+      const t =
+        ramp.climbDirection === 'north'
+          ? (b.maxZ - z) / Math.max(1e-6, b.maxZ - b.minZ)
+          : (z - b.minZ) / Math.max(1e-6, b.maxZ - b.minZ);
+      const clamped = Math.max(0, Math.min(1, t));
+      return ramp.bottomY + (ramp.topY - ramp.bottomY) * clamped;
+    }
+  }
+
+  const deck = meta.roofLaunchDeckBoundsXZ;
+  if (deck && x >= deck.minX && x <= deck.maxX && z >= deck.minZ && z <= deck.maxZ) {
+    return meta.roofDeckTopY;
+  }
+
+  return null;
+}
 
 /**
  * Evaluates exact walkable/playable ground elevation `y` at world `(x, z)` across
@@ -2253,40 +2561,22 @@ export function getMasterPlanGroundElevationAt(
 
   // 2. Check recessed storm-drain gutters (-0.02m)
   for (const gutter of plan.gutters) {
-    const halfW = gutter.width * 0.5;
-    if (gutter.kind === 'straight' && gutter.start && gutter.end) {
-      const minX = Math.min(gutter.start[0], gutter.end[0]) - halfW;
-      const maxX = Math.max(gutter.start[0], gutter.end[0]) + halfW;
-      const minZ = Math.min(gutter.start[2], gutter.end[2]) - halfW;
-      const maxZ = Math.max(gutter.start[2], gutter.end[2]) + halfW;
-      if (x >= minX && x <= maxX && z >= minZ && z <= maxZ) {
-        return gutter.channelY;
-      }
-    } else if (
-      gutter.kind === 'corner_90' &&
-      gutter.arcPivot &&
-      gutter.arcRadius !== undefined &&
-      gutter.startAngleRad !== undefined &&
-      gutter.endAngleRad !== undefined
-    ) {
-      const dx = x - gutter.arcPivot[0];
-      const dz = z - gutter.arcPivot[2];
-      const r = Math.hypot(dx, dz);
-      if (Math.abs(r - gutter.arcRadius) <= halfW) {
-        let ang = Math.atan2(dz, dx);
-        if (ang < 0) ang += Math.PI * 2;
-        if (ang >= gutter.startAngleRad - 0.05 && ang <= gutter.endAngleRad + 0.05) {
-          return gutter.channelY;
-        }
-      }
+    if (isPointInGutter(x, z, gutter)) {
+      return gutter.channelY;
     }
   }
 
-  // 3. Check flat ground zones (highest matching topY wins when overlays like green sit on courtyard slab)
+  // 3. Check continuous 15cm stone curbs (including curved 90-degree SE corner curb)
+  for (const curb of plan.curbs) {
+    if (isPointOnCurb(x, z, curb)) {
+      return curb.topY;
+    }
+  }
+
+  // 4. Check flat & arc-clipped ground zones (highest matching topY wins for overlays)
   let bestY: number | null = null;
   for (const zone of plan.groundZones) {
-    const b = zone.boundsXZ;
-    if (x >= b.minX && x <= b.maxX && z >= b.minZ && z <= b.maxZ) {
+    if (isPointInGroundZone(x, z, zone)) {
       if (bestY === null || zone.topY > bestY) {
         bestY = zone.topY;
       }
@@ -2313,36 +2603,24 @@ export function getMasterPlanSurfaceTagAt(
   }
 
   for (const gutter of plan.gutters) {
-    const halfW = gutter.width * 0.5;
-    if (gutter.kind === 'straight' && gutter.start && gutter.end) {
-      const minX = Math.min(gutter.start[0], gutter.end[0]) - halfW;
-      const maxX = Math.max(gutter.start[0], gutter.end[0]) + halfW;
-      const minZ = Math.min(gutter.start[2], gutter.end[2]) - halfW;
-      const maxZ = Math.max(gutter.start[2], gutter.end[2]) + halfW;
-      if (x >= minX && x <= maxX && z >= minZ && z <= maxZ) {
-        return 'storm_gutter';
-      }
-    } else if (
-      gutter.kind === 'corner_90' &&
-      gutter.arcPivot &&
-      gutter.arcRadius !== undefined
-    ) {
-      const r = distance2D([x, z], [gutter.arcPivot[0], gutter.arcPivot[2]]);
-      if (
-        Math.abs(r - gutter.arcRadius) <= halfW &&
-        x <= gutter.arcPivot[0] + 0.05 &&
-        z <= gutter.arcPivot[2] + 0.05
-      ) {
-        return 'storm_gutter';
-      }
+    if (isPointInGutter(x, z, gutter)) {
+      return 'storm_gutter';
+    }
+  }
+
+  for (const curb of plan.curbs) {
+    if (isPointOnCurb(x, z, curb)) {
+      return 'sidewalk_paver';
     }
   }
 
   // Iterate reverse so specialized overlays (green, fringe, patio_rough, crosswalk, loading zone) win over base slabs
   for (let i = plan.groundZones.length - 1; i >= 0; i--) {
     const zone = plan.groundZones[i];
-    const b = zone.boundsXZ;
-    if (x >= b.minX && x <= b.maxX && z >= b.minZ && z <= b.maxZ) {
+    if (isPointInGroundZone(x, z, zone)) {
+      if (zone.id === 'zone-se-corner-road-spandrel') {
+        return 'road_asphalt';
+      }
       return zone.surfaceTag;
     }
   }
@@ -2350,70 +2628,117 @@ export function getMasterPlanSurfaceTagAt(
   return 'road_asphalt';
 }
 
+export interface StationRaycastAuditOptions {
+  azimuthStepDeg?: number;
+  pitchAnglesDeg?: number[];
+}
+
 export interface StationRaycastAuditResult {
   stationId: string;
   totalRays: number;
   hitCount: number;
   escapedAnglesDeg: number[];
+  escapedRays: Array<{ azimuthDeg: number; pitchDeg: number }>;
   maxHitDistanceMeters: number;
 }
 
 /**
- * Casts 360 horizontal 3D rays (1° increments, `0..359`) from `origin` at eye level and checks
- * that 100% of rays hit a contiguous primary/skyline perimeter building within `maxBoundsDistance`.
+ * Casts 360° 3D rays across configurable azimuth steps (`default = 1°`) and orbit pitch angles
+ * (`default = [0°]`) from `origin` and checks that 100% of rays intersect enclosing architecture,
+ * skyline towers, corridor slabs, or the outer city ground skirt within `maxBoundsDistance`.
  */
 export function auditStation360PerimeterClosure(
   stationId: string,
   origin: Vec3Tuple,
   plan: CourseMasterPlan = COURSE_MASTER_PLAN,
   maxBoundsDistance = 120,
+  options: StationRaycastAuditOptions = {},
 ): StationRaycastAuditResult {
-  const enclosures = [...plan.perimeterBuildings, ...plan.skylineBackdrops];
+  const azimuthStepDeg = options.azimuthStepDeg ?? 1;
+  const pitchAnglesDeg = options.pitchAnglesDeg ?? [0];
+  const verticalEnclosures = [...plan.perimeterBuildings, ...plan.skylineBackdrops];
+  const downwardSlabs: AABB3D[] = [
+    ...plan.groundZones.map((z) => z.aabb),
+    ...plan.ramps.map((r) => r.aabb),
+  ];
+  if (plan.outerGroundSkirt) {
+    downwardSlabs.push(
+      computeAABBFromBoundsXZ(
+        plan.outerGroundSkirt.boundsXZ,
+        plan.outerGroundSkirt.topY - 2.0,
+        plan.outerGroundSkirt.topY,
+      ),
+    );
+  }
+
   const escapedAnglesDeg: number[] = [];
+  const escapedRays: Array<{ azimuthDeg: number; pitchDeg: number }> = [];
+  let totalRays = 0;
   let hitCount = 0;
   let maxHitDist = 0;
 
-  for (let deg = 0; deg < 360; deg++) {
-    const rad = (deg * Math.PI) / 180;
-    const dir3D: Vec3Tuple = [Math.sin(rad), 0, -Math.cos(rad)];
-    let nearestT = Infinity;
+  for (const pitchDeg of pitchAnglesDeg) {
+    const pitchRad = (pitchDeg * Math.PI) / 180;
+    const cosPitch = Math.cos(pitchRad);
+    const sinPitch = Math.sin(pitchRad);
 
-    for (const bld of enclosures) {
-      // Check both 3D eye-height intersection and 2D footprint intersection
-      const hit3D = intersectRayAABB3D(origin, dir3D, bld.aabb, maxBoundsDistance);
-      if (hit3D.hit && hit3D.tMin < nearestT) {
-        nearestT = hit3D.tMin;
-      } else {
-        const hit2D = intersectRayAABB2D(
-          [origin[0], origin[2]],
-          [dir3D[0], dir3D[2]],
-          bld.aabb,
-          maxBoundsDistance,
-        );
-        if (
-          hit2D.hit &&
-          origin[1] >= bld.aabb.min[1] &&
-          origin[1] <= bld.aabb.max[1] &&
-          hit2D.tMin < nearestT
-        ) {
-          nearestT = hit2D.tMin;
+    for (let deg = 0; deg < 360 - 1e-9; deg += azimuthStepDeg) {
+      totalRays++;
+      const azRad = (deg * Math.PI) / 180;
+      const dir3D: Vec3Tuple = [
+        Math.sin(azRad) * cosPitch,
+        sinPitch,
+        -Math.cos(azRad) * cosPitch,
+      ];
+      let nearestT = Infinity;
+
+      for (const bld of verticalEnclosures) {
+        const hit3D = intersectRayAABB3D(origin, dir3D, bld.aabb, maxBoundsDistance);
+        if (hit3D.hit && hit3D.tMin < nearestT) {
+          nearestT = hit3D.tMin;
+        } else if (pitchDeg === 0) {
+          const hit2D = intersectRayAABB2D(
+            [origin[0], origin[2]],
+            [dir3D[0], dir3D[2]],
+            bld.aabb,
+            maxBoundsDistance,
+          );
+          if (
+            hit2D.hit &&
+            origin[1] >= bld.aabb.min[1] &&
+            origin[1] <= bld.aabb.max[1] &&
+            hit2D.tMin < nearestT
+          ) {
+            nearestT = hit2D.tMin;
+          }
         }
       }
-    }
 
-    if (Number.isFinite(nearestT) && nearestT <= maxBoundsDistance) {
-      hitCount++;
-      if (nearestT > maxHitDist) maxHitDist = nearestT;
-    } else {
-      escapedAnglesDeg.push(deg);
+      if (pitchDeg < 0) {
+        for (const slab of downwardSlabs) {
+          const hitSlab = intersectRayAABB3D(origin, dir3D, slab, maxBoundsDistance);
+          if (hitSlab.hit && hitSlab.tMin < nearestT) {
+            nearestT = hitSlab.tMin;
+          }
+        }
+      }
+
+      if (Number.isFinite(nearestT) && nearestT <= maxBoundsDistance) {
+        hitCount++;
+        if (nearestT > maxHitDist) maxHitDist = nearestT;
+      } else {
+        escapedAnglesDeg.push(Number(deg.toFixed(2)));
+        escapedRays.push({ azimuthDeg: Number(deg.toFixed(2)), pitchDeg });
+      }
     }
   }
 
   return {
     stationId,
-    totalRays: 360,
+    totalRays,
     hitCount,
     escapedAnglesDeg,
+    escapedRays,
     maxHitDistanceMeters: Number(maxHitDist.toFixed(3)),
   };
 }

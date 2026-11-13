@@ -2,1107 +2,829 @@
 
 import { create } from 'zustand';
 import {
-  AUTO_PUTTER_DISTANCE,
   BALL_RADIUS,
-  FLAG_COLORS,
-  type AimPreviewSnapshot,
   type BallPhase,
   type CameraMode,
   type ClubId,
-  type DailyBestRecord,
   type FlagColor,
-  type FlagPinSpec,
   type GeneratedCityCourse,
-  type PropType,
+  type PhysicsSurfaceTag,
   type RoundMode,
   type SoundEventPayload,
   type SoundEventType,
-  type SunkFlagEntry,
-  type TrickToastEvent,
   type TrickToastKind,
   type Vec3Tuple,
 } from '@/types';
-import {
-  computeDeterministicTrajectory,
-  createRandomSeed,
-  generateCityCourse,
-  getCourseSurfaceElevationAt,
-  getTodayDailySeedUTC,
-  resolveHorizontalAim,
-} from '@/engine';
 
-const DAILY_BEST_STORAGE_KEY = 'curbside-links-daily-best-v1';
-const MAX_STORED_DAILY_RECORDS = 30;
-const DATE_SEED_RE = /^\d{4}-\d{2}-\d{2}$/;
+export interface AimPreviewState {
+  isAiming: boolean;
+  power: number;
+  clubId: ClubId;
+  aimDirection: [number, number];
+}
 
-export interface ShotCommand {
-  seq: number;
-  origin: Vec3Tuple;
+export interface ShotRecord {
   clubId: ClubId;
   power: number;
   aimDirection: [number, number];
+  launchSpeed: number;
+  timestamp: number;
+}
+
+export interface TrickToastState {
+  seq: number;
+  kind: TrickToastKind;
+  label: string;
+}
+import {
+  COURSE_MASTER_PLAN,
+  FOUNTAIN_QUICK_DROP_POSITION,
+  HOLE_1_CUP,
+  TEE_POSITION,
+  buildLegacyCourseAdapter,
+  getMasterPlanSurfaceTagAt,
+} from '@/config/courseMasterPlan';
+import { computeClubLaunchVelocity, resolveHorizontalAim } from '@/lib/aerodynamics';
+import { recommendClubForLie } from '@/lib/clubs';
+import { soundEngine } from '@/lib/sound';
+
+export type ShotPhase =
+  | 'aiming'
+  | 'pulling'
+  | 'ball_in_flight'
+  | 'settling'
+  | 'fountain_drop'
+  | 'holed_out';
+
+export interface PendingShotPayload {
+  seq: number;
+  clubId: ClubId;
+  power: number;
   aimYaw: number;
   launchVelocity: Vec3Tuple;
+  forceSteamActive: boolean | null;
 }
 
-export interface PendingBallReset {
+export interface PendingTeleportPayload {
   seq: number;
   position: Vec3Tuple;
-  reason: 'tee' | 'next_tee' | 'hazard' | 'mulligan' | 'restart';
 }
 
-export interface PropHitEvent {
-  seq: number;
-  propId: string;
-  propType: PropType;
-  timestampMs: number;
-}
-
-interface MulliganSnapshot {
-  origin: Vec3Tuple;
-  aimYaw: number;
-  clubId: ClubId;
-  totalStrokesBefore: number;
-  currentLegStrokesBefore: number;
-}
-
-export interface CurbsideStoreState {
-  // Course & seed
-  seed: string;
-  dailySeed: string;
-  roundMode: RoundMode;
+export interface CurbsideState {
+  // Master hole metadata
+  holeNumber: 1;
+  holeName: string;
+  par: 4;
+  holeDistanceMeters: number;
   course: GeneratedCityCourse;
-  courseVersion: number;
-  resetCounter: number;
-  mulliganCounter: number;
 
-  // 5-flag free-order loop
-  sunkFlags: Record<FlagColor, boolean>;
-  sunkOrder: SunkFlagEntry[];
-  currentLegStrokes: number;
+  // Player & hole state
+  strokes: number;
   totalStrokes: number;
-  isRoundComplete: boolean;
-  activeTargetFlag: FlagColor | null;
-  lastSunkFlag: SunkFlagEntry | null;
-  lastCupSunkAtMs: number;
-  dailyBest: DailyBestRecord | null;
-
-  // Ball, club & aiming
-  ballPhase: BallPhase;
-  ballPosition: Vec3Tuple;
-  lastSafeLie: Vec3Tuple;
-  lastSafeAimYaw: number;
+  penaltyStrokes: number;
+  personalBest: number | null;
+  dailyBest: { bestStrokes: number; dateKey: string } | null;
   selectedClub: ClubId;
+  manualClubOverride: boolean;
+
+  shotPhase: ShotPhase;
+  ballPhase: BallPhase;
   aimYaw: number;
   aimDirection: [number, number];
-  aimPreview: AimPreviewSnapshot;
-  hasTakenFirstStroke: boolean;
-  lastShot: ShotCommand | null;
-  pendingBallReset: PendingBallReset | null;
-  canMulligan: boolean;
-  mulliganStack: MulliganSnapshot[];
+  aimPower: number;
+  aimPreview: AimPreviewState;
 
-  // Camera & audio & UI
+  ballPosition: Vec3Tuple;
+  lastSafeBallPosition: Vec3Tuple;
+  lastSafeLie: Vec3Tuple;
+  distanceToPinMeters: number;
+  currentSurfaceTag: PhysicsSurfaceTag;
+
+  // Camera & audit state
+  isStreetScoutActive: boolean;
   cameraMode: CameraMode;
+  cameraAuditStationId: string | null;
+
+  // Audio, FX, banners & props
+  isMuted: boolean;
   muted: boolean;
+  isHoleComplete: boolean;
+  isRoundComplete: boolean;
+  lastEventBanner: string | null;
+  trickToast: TrickToastState | null;
+  propHitTimestamps: Record<string, number>;
+  forceSteamActive: boolean | null;
+
+  // Shot & sync telemetry
+  hasTakenFirstStroke: boolean;
+  lastShot: ShotRecord | null;
+  pendingShot: PendingShotPayload | null;
+  pendingTeleport: PendingTeleportPayload | null;
+  pendingBallReset: boolean;
   soundEventSeq: number;
   lastSoundEvent: SoundEventPayload | null;
-  trickToast: TrickToastEvent | null;
 
-  // Reactive prop hit tracking for @world-artist animations
-  propHitCounters: Record<string, number>;
-  propHitTimestamps: Record<string, number>;
-  lastPropHit: PropHitEvent | null;
+  // Legacy harmless fields
+  roundMode: RoundMode;
+  sunkFlags: Partial<Record<FlagColor, boolean>>;
+  sunkOrder: FlagColor[];
 
   // Actions
+  hydratePersonalBest: () => void;
   hydrateDailyBest: () => void;
-  loadDailyCity: () => void;
-  loadRandomCity: () => void;
-  loadSeed: (seed: string) => void;
-  restartRound: () => void;
-  mulligan: () => void;
-
-  setSelectedClub: (clubId: ClubId, manual?: boolean) => void;
-  toggleCameraMode: () => void;
-  setCameraMode: (mode: CameraMode) => void;
-  toggleMuted: () => void;
-  setMuted: (muted: boolean) => void;
+  selectClub: (club: ClubId, manual?: boolean) => void;
+  setSelectedClub: (club: ClubId, manual?: boolean) => void;
 
   setAimYaw: (yaw: number) => void;
-  setAimDirection: (dir: [number, number]) => void;
-  setAimPreview: (preview: AimPreviewSnapshot) => void;
+  setAimPower: (power: number) => void;
+  setShotPhase: (phase: ShotPhase) => void;
+  setAimPreview: (preview: Partial<AimPreviewState>) => void;
   clearAimPreview: () => void;
 
-  launchShot: (opts: {
-    origin: Vec3Tuple;
-    clubId: ClubId;
-    power: number;
-    aimDirection: [number, number];
-    launchVelocity?: Vec3Tuple;
-  }) => void;
-  updateBallPosition: (pos: Vec3Tuple) => void;
-  markBallResting: (pos: Vec3Tuple) => void;
-  sinkFlag: (color: FlagColor) => void;
-  triggerWaterHazard: (reason?: 'water' | 'oob') => void;
-  consumeBallReset: (seq: number) => void;
+  setStreetScout: (active: boolean) => void;
+  toggleStreetScout: () => void;
+  toggleCameraMode: () => void;
+  setCameraAuditStation: (id: string | null) => void;
 
-  recordPropHit: (
-    propId: string,
-    propType: PropType,
-    toastKind?: TrickToastKind,
-    toastLabel?: string,
-  ) => void;
+  toggleMute: () => void;
+  toggleMuted: () => void;
+
+  setForceSteamActive: (val: boolean | null) => void;
+  recordPropHit: (id: string, banner?: string) => void;
+  setEventBanner: (banner: string | null, kind?: TrickToastKind) => void;
+  showTrickToast: (kind: TrickToastKind, label: string) => void;
   emitSoundEvent: (
     type: SoundEventType,
-    opts?: { intensity?: number; flagIndex?: number },
+    intensity?: number,
+    flagIndex?: number,
   ) => void;
-  emitTrickToast: (kind: TrickToastKind, label: string) => void;
-  clearTrickToast: (seq?: number) => void;
-  notifyScorecardCopied: () => void;
+
+  updateBallTelemetry: (pos: Vec3Tuple, surface?: PhysicsSurfaceTag) => void;
+  launchShot: (opts?: {
+    clubId?: ClubId;
+    power?: number;
+    aimYaw?: number;
+    forceSteamActive?: boolean | null;
+  }) => PendingShotPayload | null;
+  markBallResting: (pos: Vec3Tuple, opts?: { autoSelectClub?: boolean }) => void;
+  teleportBall: (pos: Vec3Tuple, opts?: { keepStrokes?: boolean }) => void;
+  consumeBallReset: () => void;
+  triggerFountainHazard: (dropPos?: Vec3Tuple) => void;
+  triggerWaterHazard: () => void;
+  sinkHole: () => void;
+  sinkFlag: (color?: FlagColor) => void;
+
+  replayHole: () => void;
+  resetHole: () => void;
+  resetCourse: () => void;
+  restartRound: () => void;
 }
 
-let shotSeq = 0;
-let resetSeq = 0;
-let soundSeq = 0;
-let toastSeq = 0;
-let propHitSeq = 0;
+const BEST_STORAGE_KEY = 'curbside_links_hole1_personal_best_v2';
+const MUTE_STORAGE_KEY = 'curbside_links_muted_v2';
 
-let activeCupTransitionTimer: ReturnType<typeof setTimeout> | null = null;
-let activeHazardTimer: ReturnType<typeof setTimeout> | null = null;
-let activeToastTimer: ReturnType<typeof setTimeout> | null = null;
-let activeChimeTimer: ReturnType<typeof setTimeout> | null = null;
-let activeFanfareTimer: ReturnType<typeof setTimeout> | null = null;
+const INITIAL_BALL_POS: Vec3Tuple = [
+  TEE_POSITION[0],
+  TEE_POSITION[1] + BALL_RADIUS,
+  TEE_POSITION[2],
+];
 
-function clearRoundTimers(): void {
-  if (activeCupTransitionTimer !== null) {
-    clearTimeout(activeCupTransitionTimer);
-    activeCupTransitionTimer = null;
-  }
-  if (activeHazardTimer !== null) {
-    clearTimeout(activeHazardTimer);
-    activeHazardTimer = null;
-  }
-  if (activeChimeTimer !== null) {
-    clearTimeout(activeChimeTimer);
-    activeChimeTimer = null;
-  }
-  if (activeFanfareTimer !== null) {
-    clearTimeout(activeFanfareTimer);
-    activeFanfareTimer = null;
-  }
-}
-
-function clearToastTimer(): void {
-  if (activeToastTimer !== null) {
-    clearTimeout(activeToastTimer);
-    activeToastTimer = null;
-  }
-}
-
-function createEmptySunkFlags(): Record<FlagColor, boolean> {
-  return {
-    red: false,
-    yellow: false,
-    blue: false,
-    purple: false,
-    green: false,
-  };
-}
-
-function surfaceToBallCenter(pos: Vec3Tuple): Vec3Tuple {
-  return [pos[0], pos[1] + BALL_RADIUS, pos[2]];
-}
-
-function yawToDir(yaw: number): [number, number] {
-  return resolveHorizontalAim(undefined, yaw);
-}
-
-function dirToYaw(dir: [number, number]): number {
-  const [dx, dz] = resolveHorizontalAim(dir);
-  return Math.atan2(dx, -dz);
-}
-
-function findNearestUnsunkFlag(
-  course: GeneratedCityCourse,
-  pos: Vec3Tuple,
-  sunkFlags: Record<FlagColor, boolean>,
-): FlagPinSpec | null {
-  let best: FlagPinSpec | null = null;
-  let bestDist = Infinity;
-  for (const flag of course.flags) {
-    if (sunkFlags[flag.color]) continue;
-    const d = Math.hypot(flag.position[0] - pos[0], flag.position[2] - pos[2]);
-    if (d < bestDist) {
-      bestDist = d;
-      best = flag;
-    }
-  }
-  return best;
-}
-
-function computeAimYawToFlag(from: Vec3Tuple, flag: FlagPinSpec | null): number {
-  if (!flag) return 0;
-  return Math.atan2(flag.position[0] - from[0], -(flag.position[2] - from[2]));
-}
-
-function shouldAutoSelectPutter(
-  course: GeneratedCityCourse,
-  ballCenterPos: Vec3Tuple,
-  sunkFlags: Record<FlagColor, boolean>,
-): boolean {
-  const surfaceY = getCourseSurfaceElevationAt(
-    course,
-    ballCenterPos[0],
-    ballCenterPos[2],
-  );
-  for (const flag of course.flags) {
-    if (sunkFlags[flag.color]) continue;
-    const distXZ = Math.hypot(
-      flag.position[0] - ballCenterPos[0],
-      flag.position[2] - ballCenterPos[2],
-    );
-    const sameTier = Math.abs(surfaceY - flag.elevationY) <= 0.1;
-    if (sameTier && distXZ <= AUTO_PUTTER_DISTANCE) {
-      return true;
-    }
-  }
-  return false;
-}
-
-function createIdleAimPreview(
-  clubId: ClubId,
-  ballCenterPos: Vec3Tuple,
-  aimDirection: [number, number],
-): AimPreviewSnapshot {
-  return {
-    isAiming: false,
-    clubId,
-    power: 0,
-    aimDirection,
-    launchVelocity: [0, 0, 0],
-    arcPoints: [ballCenterPos],
-    landingPoint: [ballCenterPos[0], ballCenterPos[1] - BALL_RADIUS, ballCenterPos[2]],
-    landingRingRadius: 0.25,
-  };
-}
-
-function isValidSunkEntry(raw: unknown): raw is SunkFlagEntry {
-  if (!raw || typeof raw !== 'object') return false;
-  const obj = raw as Record<string, unknown>;
-  return (
-    typeof obj.color === 'string' &&
-    (FLAG_COLORS as readonly string[]).includes(obj.color) &&
-    typeof obj.strokes === 'number' &&
-    Number.isSafeInteger(obj.strokes) &&
-    obj.strokes >= 1 &&
-    obj.strokes <= 999 &&
-    typeof obj.orderIndex === 'number' &&
-    Number.isSafeInteger(obj.orderIndex) &&
-    obj.orderIndex >= 0 &&
-    obj.orderIndex <= 4
-  );
-}
-
-function isValidDailyBestRecord(
-  raw: unknown,
-  expectedSeed?: string,
-): raw is DailyBestRecord {
-  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return false;
-  const obj = raw as Record<string, unknown>;
-  if (typeof obj.dateSeed !== 'string' || !DATE_SEED_RE.test(obj.dateSeed)) {
-    return false;
-  }
-  if (expectedSeed && obj.dateSeed !== expectedSeed) return false;
-  if (
-    typeof obj.bestStrokes !== 'number' ||
-    !Number.isSafeInteger(obj.bestStrokes) ||
-    obj.bestStrokes < 1 ||
-    obj.bestStrokes > 999
-  ) {
-    return false;
-  }
-  if (!Array.isArray(obj.sunkOrder) || obj.sunkOrder.length !== 5) {
-    return false;
-  }
-  const seenColors = new Set<string>();
-  for (const item of obj.sunkOrder) {
-    if (!isValidSunkEntry(item)) return false;
-    if (seenColors.has(item.color)) return false;
-    seenColors.add(item.color);
-  }
-  return seenColors.size === 5;
-}
-
-function readDailyBestMap(): Record<string, DailyBestRecord> {
-  if (typeof window === 'undefined') return {};
-  try {
-    const raw = window.localStorage.getItem(DAILY_BEST_STORAGE_KEY);
-    if (!raw) return {};
-    const parsed: unknown = JSON.parse(raw);
-    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
-      window.localStorage.removeItem(DAILY_BEST_STORAGE_KEY);
-      return {};
-    }
-    const clean: Record<string, DailyBestRecord> = {};
-    let hadInvalid = false;
-    for (const [key, val] of Object.entries(parsed as Record<string, unknown>)) {
-      if (DATE_SEED_RE.test(key) && isValidDailyBestRecord(val, key)) {
-        clean[key] = {
-          dateSeed: val.dateSeed,
-          bestStrokes: val.bestStrokes,
-          sunkOrder: val.sunkOrder.map((e) => ({
-            color: e.color,
-            strokes: e.strokes,
-            orderIndex: e.orderIndex,
-          })),
-        };
-      } else {
-        hadInvalid = true;
-      }
-    }
-    if (hadInvalid) {
-      window.localStorage.setItem(DAILY_BEST_STORAGE_KEY, JSON.stringify(clean));
-    }
-    return clean;
-  } catch {
-    try {
-      window.localStorage.removeItem(DAILY_BEST_STORAGE_KEY);
-    } catch {
-      // Ignore storage access failures
-    }
-    return {};
-  }
-}
-
-function loadDailyBestForSeed(dateSeed: string): DailyBestRecord | null {
-  if (!DATE_SEED_RE.test(dateSeed)) return null;
-  const map = readDailyBestMap();
-  return map[dateSeed] ?? null;
-}
-
-function persistDailyBestForSeed(record: DailyBestRecord): DailyBestRecord | null {
-  if (!isValidDailyBestRecord(record)) return null;
-  if (typeof window === 'undefined') return record;
-  try {
-    const map = readDailyBestMap();
-    const existing = map[record.dateSeed];
-    const bestToSave =
-      existing && existing.bestStrokes <= record.bestStrokes ? existing : record;
-    map[record.dateSeed] = bestToSave;
-
-    const sortedKeys = Object.keys(map).sort().slice(-MAX_STORED_DAILY_RECORDS);
-    const trimmed: Record<string, DailyBestRecord> = {};
-    for (const k of sortedKeys) {
-      trimmed[k] = map[k]!;
-    }
-    window.localStorage.setItem(DAILY_BEST_STORAGE_KEY, JSON.stringify(trimmed));
-    return bestToSave;
-  } catch {
-    return record;
-  }
-}
-
-function buildInitialRoundFields(
-  course: GeneratedCityCourse,
-  seed: string,
-  dailySeed: string,
-  roundMode: RoundMode,
-) {
-  const sunkFlags = createEmptySunkFlags();
-  const startBallPos = surfaceToBallCenter(course.startTeePosition);
-  const nearest = findNearestUnsunkFlag(course, startBallPos, sunkFlags);
-  const aimYaw = nearest
-    ? computeAimYawToFlag(startBallPos, nearest)
-    : course.initialAimYaw;
-  const aimDirection = yawToDir(aimYaw);
-  const selectedClub: ClubId = shouldAutoSelectPutter(course, startBallPos, sunkFlags)
-    ? 'putter'
-    : 'driver';
-
-  return {
-    seed,
-    dailySeed,
-    roundMode,
-    course,
-    sunkFlags,
-    sunkOrder: [] as SunkFlagEntry[],
-    currentLegStrokes: 0,
-    totalStrokes: 0,
-    isRoundComplete: false,
-    activeTargetFlag: nearest?.color ?? null,
-    lastSunkFlag: null as SunkFlagEntry | null,
-    lastCupSunkAtMs: 0,
-    ballPhase: 'resting' as BallPhase,
-    ballPosition: startBallPos,
-    lastSafeLie: [...startBallPos] as Vec3Tuple,
-    lastSafeAimYaw: aimYaw,
-    selectedClub,
-    aimYaw,
-    aimDirection,
-    aimPreview: createIdleAimPreview(selectedClub, startBallPos, aimDirection),
-    lastShot: null as ShotCommand | null,
-    canMulligan: false,
-    mulliganStack: [] as MulliganSnapshot[],
-  };
-}
-
-const BOOT_DAILY_SEED = getTodayDailySeedUTC();
-const BOOT_COURSE = generateCityCourse(BOOT_DAILY_SEED);
-const BOOT_FIELDS = buildInitialRoundFields(
-  BOOT_COURSE,
-  BOOT_DAILY_SEED,
-  BOOT_DAILY_SEED,
-  'daily',
+const INITIAL_DIST_TO_PIN = Math.hypot(
+  HOLE_1_CUP.position[0] - INITIAL_BALL_POS[0],
+  HOLE_1_CUP.position[2] - INITIAL_BALL_POS[2],
 );
 
-export const useCurbsideStore = create<CurbsideStoreState>((set, get) => ({
-  ...BOOT_FIELDS,
-  courseVersion: 1,
-  resetCounter: 0,
-  mulliganCounter: 0,
+const LEGACY_COURSE_ADAPTER = buildLegacyCourseAdapter(COURSE_MASTER_PLAN);
+
+function computeDistance(pos: Vec3Tuple): number {
+  return Math.hypot(
+    HOLE_1_CUP.position[0] - pos[0],
+    HOLE_1_CUP.position[2] - pos[2],
+  );
+}
+
+function mapShotPhaseToBallPhase(shotPhase: ShotPhase): BallPhase {
+  switch (shotPhase) {
+    case 'pulling':
+      return 'aiming';
+    case 'ball_in_flight':
+    case 'settling':
+      return 'inflight';
+    case 'fountain_drop':
+      return 'hazard_drop';
+    case 'holed_out':
+      return 'cupped';
+    case 'aiming':
+    default:
+      return 'resting';
+  }
+}
+
+function readStoredBest(): number | null {
+  if (typeof window === 'undefined') return null;
+  try {
+    const raw = window.localStorage.getItem(BEST_STORAGE_KEY);
+    if (!raw) return null;
+    const parsed = Number(raw);
+    return Number.isFinite(parsed) && parsed >= 1 ? Math.round(parsed) : null;
+  } catch {
+    return null;
+  }
+}
+
+function writeStoredBest(val: number): void {
+  if (typeof window === 'undefined') return;
+  try {
+    window.localStorage.setItem(BEST_STORAGE_KEY, String(Math.round(val)));
+  } catch {
+    // Ignore private-mode storage errors
+  }
+}
+
+function readStoredMute(): boolean {
+  if (typeof window === 'undefined') return false;
+  try {
+    return window.localStorage.getItem(MUTE_STORAGE_KEY) === '1';
+  } catch {
+    return false;
+  }
+}
+
+function writeStoredMute(muted: boolean): void {
+  if (typeof window === 'undefined') return;
+  try {
+    window.localStorage.setItem(MUTE_STORAGE_KEY, muted ? '1' : '0');
+  } catch {
+    // Ignore storage errors
+  }
+}
+
+let trickToastCounter = 0;
+let shotSeqCounter = 0;
+let teleportSeqCounter = 0;
+
+function createInitialHoleSlice() {
+  return {
+    strokes: 0,
+    totalStrokes: 0,
+    penaltyStrokes: 0,
+    selectedClub: 'driver' as ClubId,
+    manualClubOverride: false,
+    shotPhase: 'aiming' as ShotPhase,
+    ballPhase: 'resting' as BallPhase,
+    aimYaw: COURSE_MASTER_PLAN.initialAimYaw,
+    aimDirection: resolveHorizontalAim(
+      undefined,
+      COURSE_MASTER_PLAN.initialAimYaw,
+    ),
+    aimPower: 0,
+    aimPreview: {
+      isAiming: false,
+      power: 0,
+      clubId: 'driver' as ClubId,
+      aimDirection: resolveHorizontalAim(
+        undefined,
+        COURSE_MASTER_PLAN.initialAimYaw,
+      ),
+    },
+    ballPosition: [...INITIAL_BALL_POS] as Vec3Tuple,
+    lastSafeBallPosition: [...INITIAL_BALL_POS] as Vec3Tuple,
+    lastSafeLie: [...INITIAL_BALL_POS] as Vec3Tuple,
+    distanceToPinMeters: INITIAL_DIST_TO_PIN,
+    currentSurfaceTag: getMasterPlanSurfaceTagAt(
+      INITIAL_BALL_POS[0],
+      INITIAL_BALL_POS[2],
+    ),
+    isStreetScoutActive: false,
+    cameraMode: 'follow' as CameraMode,
+    cameraAuditStationId: null,
+    isHoleComplete: false,
+    isRoundComplete: false,
+    lastEventBanner: null,
+    trickToast: null,
+    propHitTimestamps: {},
+    forceSteamActive: null,
+    hasTakenFirstStroke: false,
+    lastShot: null,
+    pendingShot: null,
+    pendingBallReset: false,
+    sunkFlags: {},
+    sunkOrder: [] as FlagColor[],
+  };
+}
+
+export const useCurbsideStore = create<CurbsideState>((set, get) => ({
+  holeNumber: 1,
+  holeName: '5th & Mercer',
+  par: 4,
+  holeDistanceMeters: COURSE_MASTER_PLAN.targetCenterlineMeters,
+  course: LEGACY_COURSE_ADAPTER,
+
+  personalBest: null,
   dailyBest: null,
-  hasTakenFirstStroke: false,
-  pendingBallReset: null,
-  cameraMode: 'overview',
+  isMuted: false,
   muted: false,
   soundEventSeq: 0,
   lastSoundEvent: null,
-  trickToast: null,
-  propHitCounters: {},
-  propHitTimestamps: {},
-  lastPropHit: null,
+  pendingTeleport: null,
+  roundMode: 'hole1',
+
+  ...createInitialHoleSlice(),
+
+  hydratePersonalBest: () => {
+    const best = readStoredBest();
+    const muted = readStoredMute();
+    soundEngine.setMuted(muted);
+    set({
+      personalBest: best,
+      dailyBest:
+        best !== null ? { bestStrokes: best, dateKey: 'hole-1' } : null,
+      isMuted: muted,
+      muted,
+    });
+  },
 
   hydrateDailyBest: () => {
-    const today = getTodayDailySeedUTC();
-    const record = loadDailyBestForSeed(today);
-    set({
-      dailySeed: today,
-      dailyBest: record,
-    });
+    get().hydratePersonalBest();
   },
 
-  loadDailyCity: () => {
-    clearRoundTimers();
-    clearToastTimer();
-    const today = getTodayDailySeedUTC();
-    const nextCourse = generateCityCourse(today);
-    const fields = buildInitialRoundFields(nextCourse, today, today, 'daily');
-    const dailyBest = loadDailyBestForSeed(today);
-    const startBallPos = fields.ballPosition;
-
-    set((state) => ({
-      ...fields,
-      dailyBest,
-      courseVersion: state.courseVersion + 1,
-      resetCounter: state.resetCounter + 1,
-      trickToast: null,
-      propHitCounters: {},
-      propHitTimestamps: {},
-      lastPropHit: null,
-      pendingBallReset: {
-        seq: ++resetSeq,
-        position: startBallPos,
-        reason: 'tee',
-      },
-    }));
-    get().emitSoundEvent('ui_tap', { intensity: 0.7 });
-  },
-
-  loadRandomCity: () => {
-    clearRoundTimers();
-    clearToastTimer();
-    const today = getTodayDailySeedUTC();
-    const randomSeed = createRandomSeed();
-    const nextCourse = generateCityCourse(randomSeed);
-    const fields = buildInitialRoundFields(nextCourse, randomSeed, today, 'random');
-    const startBallPos = fields.ballPosition;
-
-    set((state) => ({
-      ...fields,
-      courseVersion: state.courseVersion + 1,
-      resetCounter: state.resetCounter + 1,
-      trickToast: null,
-      propHitCounters: {},
-      propHitTimestamps: {},
-      lastPropHit: null,
-      pendingBallReset: {
-        seq: ++resetSeq,
-        position: startBallPos,
-        reason: 'tee',
-      },
-    }));
-    get().emitSoundEvent('ui_tap', { intensity: 0.75 });
-  },
-
-  loadSeed: (rawSeed: string) => {
-    clearRoundTimers();
-    clearToastTimer();
-    const normalized = rawSeed.trim() || getTodayDailySeedUTC();
-    const today = getTodayDailySeedUTC();
-    const mode: RoundMode = normalized === today ? 'daily' : 'random';
-    const nextCourse = generateCityCourse(normalized);
-    const fields = buildInitialRoundFields(nextCourse, normalized, today, mode);
-
-    set((state) => ({
-      ...fields,
-      dailyBest: mode === 'daily' ? loadDailyBestForSeed(today) : state.dailyBest,
-      courseVersion: state.courseVersion + 1,
-      resetCounter: state.resetCounter + 1,
-      trickToast: null,
-      propHitCounters: {},
-      propHitTimestamps: {},
-      lastPropHit: null,
-      pendingBallReset: {
-        seq: ++resetSeq,
-        position: fields.ballPosition,
-        reason: 'tee',
-      },
-    }));
-  },
-
-  restartRound: () => {
-    clearRoundTimers();
-    clearToastTimer();
-    const state = get();
-    const fields = buildInitialRoundFields(
-      state.course,
-      state.seed,
-      state.dailySeed,
-      state.roundMode,
-    );
-
-    set((s) => ({
-      ...fields,
-      resetCounter: s.resetCounter + 1,
-      trickToast: null,
-      pendingBallReset: {
-        seq: ++resetSeq,
-        position: fields.ballPosition,
-        reason: 'restart',
-      },
-    }));
-    get().emitSoundEvent('ui_tap', { intensity: 0.7 });
-  },
-
-  mulligan: () => {
-    const state = get();
-    if (state.isRoundComplete || state.ballPhase === 'cupped') return;
-    if (state.mulliganStack.length === 0) return;
-
-    clearRoundTimers();
-    const prev = state.mulliganStack[state.mulliganStack.length - 1]!;
-    const nextStack = state.mulliganStack.slice(0, -1);
-    const nextDir = yawToDir(prev.aimYaw);
-
-    set((s) => ({
-      ballPhase: 'resting',
-      ballPosition: [...prev.origin] as Vec3Tuple,
-      lastSafeLie: [...prev.origin] as Vec3Tuple,
-      lastSafeAimYaw: prev.aimYaw,
-      aimYaw: prev.aimYaw,
-      aimDirection: nextDir,
-      selectedClub: prev.clubId,
-      totalStrokes: prev.totalStrokesBefore,
-      currentLegStrokes: prev.currentLegStrokesBefore,
-      mulliganStack: nextStack,
-      canMulligan: nextStack.length > 0,
-      aimPreview: createIdleAimPreview(prev.clubId, prev.origin, nextDir),
-      mulliganCounter: s.mulliganCounter + 1,
-      pendingBallReset: {
-        seq: ++resetSeq,
-        position: [...prev.origin] as Vec3Tuple,
-        reason: 'mulligan',
-      },
-    }));
-    get().emitSoundEvent('club_switch', { intensity: 0.85 });
-  },
-
-  setSelectedClub: (clubId, manual = true) => {
-    const state = get();
-    if (state.selectedClub === clubId) return;
-
-    const preview = state.aimPreview.isAiming
-      ? (() => {
-          const traj = computeDeterministicTrajectory({
-            origin: state.ballPosition,
-            clubId,
-            power: state.aimPreview.power,
-            aimDirection: state.aimPreview.aimDirection,
-            sampleGroundY: (x, z) => getCourseSurfaceElevationAt(state.course, x, z),
-          });
-          return {
-            isAiming: true,
-            clubId,
-            power: traj.power,
-            aimDirection: traj.horizontalDirection,
-            launchVelocity: traj.launchVelocity,
-            arcPoints: traj.arcPoints,
-            landingPoint: traj.landingPoint,
-            landingRingRadius: traj.landingRingRadius,
-          } satisfies AimPreviewSnapshot;
-        })()
-      : createIdleAimPreview(clubId, state.ballPosition, state.aimDirection);
-
-    set({
-      selectedClub: clubId,
-      aimPreview: preview,
-    });
-    if (manual) {
-      get().emitSoundEvent('club_switch', { intensity: 0.8 });
+  selectClub: (club, manual = true) => {
+    const current = get().selectedClub;
+    if (current !== club) {
+      soundEngine.playUiClick(0.8);
     }
-  },
-
-  toggleCameraMode: () => {
     set((state) => ({
-      cameraMode: state.cameraMode === 'overview' ? 'focus' : 'overview',
+      selectedClub: club,
+      manualClubOverride: manual,
+      aimPreview: { ...state.aimPreview, clubId: club },
     }));
-    get().emitSoundEvent('ui_tap', { intensity: 0.6 });
   },
 
-  setCameraMode: (mode) => {
-    if (get().cameraMode === mode) return;
-    set({ cameraMode: mode });
-  },
-
-  toggleMuted: () => {
-    set((state) => ({ muted: !state.muted }));
-  },
-
-  setMuted: (muted) => {
-    set({ muted });
+  setSelectedClub: (club, manual = true) => {
+    get().selectClub(club, manual);
   },
 
   setAimYaw: (yaw) => {
-    const dir = yawToDir(yaw);
-    set({ aimYaw: yaw, aimDirection: dir });
+    const cleanYaw = Number.isFinite(yaw) ? yaw : 0;
+    const dir = resolveHorizontalAim(undefined, cleanYaw);
+    set((state) => ({
+      aimYaw: cleanYaw,
+      aimDirection: dir,
+      aimPreview: { ...state.aimPreview, aimDirection: dir },
+    }));
   },
 
-  setAimDirection: (dir) => {
-    const normalized = resolveHorizontalAim(dir);
-    const yaw = dirToYaw(normalized);
-    set({ aimYaw: yaw, aimDirection: normalized });
+  setAimPower: (power) => {
+    const p = Math.max(0, Math.min(1, Number.isFinite(power) ? power : 0));
+    set((state) => {
+      const nextPhase: ShotPhase =
+        p > 0.02 && state.shotPhase === 'aiming'
+          ? 'pulling'
+          : p <= 0.02 && state.shotPhase === 'pulling'
+            ? 'aiming'
+            : state.shotPhase;
+      return {
+        aimPower: p,
+        shotPhase: nextPhase,
+        ballPhase: mapShotPhaseToBallPhase(nextPhase),
+        aimPreview: {
+          ...state.aimPreview,
+          isAiming: p > 0.02,
+          power: p,
+          clubId: state.selectedClub,
+        },
+      };
+    });
+  },
+
+  setShotPhase: (phase) => {
+    set({
+      shotPhase: phase,
+      ballPhase: mapShotPhaseToBallPhase(phase),
+    });
   },
 
   setAimPreview: (preview) => {
-    const state = get();
-    const nextPhase: BallPhase =
-      state.ballPhase === 'inflight' ||
-      state.ballPhase === 'hazard_drop' ||
-      state.ballPhase === 'cupped'
-        ? state.ballPhase
-        : preview.isAiming
-          ? 'aiming'
-          : 'resting';
-    const nextYaw = dirToYaw(preview.aimDirection);
-    set({
-      aimPreview: preview,
-      aimDirection: resolveHorizontalAim(preview.aimDirection),
-      aimYaw: nextYaw,
-      ballPhase: nextPhase,
+    set((state) => {
+      const power = preview.power ?? state.aimPower;
+      const aimDirection = preview.aimDirection ?? state.aimDirection;
+      const aimYaw = preview.aimDirection
+        ? Math.atan2(aimDirection[0], -aimDirection[1])
+        : state.aimYaw;
+      return {
+        aimPower: power,
+        aimDirection,
+        aimYaw,
+        aimPreview: { ...state.aimPreview, ...preview },
+      };
     });
   },
 
   clearAimPreview: () => {
-    const state = get();
-    const nextPhase: BallPhase =
-      state.ballPhase === 'aiming' ? 'resting' : state.ballPhase;
-    set({
-      ballPhase: nextPhase,
-      aimPreview: createIdleAimPreview(
-        state.selectedClub,
-        state.ballPosition,
-        state.aimDirection,
-      ),
-    });
-  },
-
-  launchShot: ({ origin, clubId, power, aimDirection, launchVelocity }) => {
-    const state = get();
-    if (
-      state.ballPhase === 'inflight' ||
-      state.ballPhase === 'hazard_drop' ||
-      state.ballPhase === 'cupped' ||
-      state.isRoundComplete
-    ) {
-      return;
-    }
-
-    const dir = resolveHorizontalAim(aimDirection);
-    const yaw = dirToYaw(dir);
-    const computedVel =
-      launchVelocity ??
-      computeDeterministicTrajectory({
-        origin,
-        clubId,
-        power,
-        aimDirection: dir,
-      }).launchVelocity;
-
-    const snapshot: MulliganSnapshot = {
-      origin: [...origin] as Vec3Tuple,
-      aimYaw: yaw,
-      clubId,
-      totalStrokesBefore: state.totalStrokes,
-      currentLegStrokesBefore: state.currentLegStrokes,
-    };
-
-    const nextStack = [...state.mulliganStack, snapshot];
-    const shot: ShotCommand = {
-      seq: ++shotSeq,
-      origin: [...origin] as Vec3Tuple,
-      clubId,
-      power,
-      aimDirection: dir,
-      aimYaw: yaw,
-      launchVelocity: computedVel,
-    };
-
-    set({
-      ballPhase: 'inflight',
-      hasTakenFirstStroke: true,
-      lastSafeLie: [...origin] as Vec3Tuple,
-      lastSafeAimYaw: yaw,
-      aimYaw: yaw,
-      aimDirection: dir,
-      totalStrokes: state.totalStrokes + 1,
-      currentLegStrokes: state.currentLegStrokes + 1,
-      lastShot: shot,
-      mulliganStack: nextStack,
-      canMulligan: true,
-      aimPreview: createIdleAimPreview(clubId, origin, dir),
-    });
-
-    const soundMap: Record<ClubId, SoundEventType> = {
-      driver: 'hit_driver',
-      wedge: 'hit_wedge',
-      skimmer: 'hit_skimmer',
-      putter: 'hit_putter',
-    };
-    get().emitSoundEvent(soundMap[clubId], {
-      intensity: Math.max(0.35, Math.min(1, power)),
-    });
-  },
-
-  updateBallPosition: (pos) => {
-    set({ ballPosition: pos });
-  },
-
-  markBallResting: (pos) => {
-    const state = get();
-    if (
-      state.ballPhase === 'cupped' ||
-      state.ballPhase === 'hazard_drop' ||
-      state.isRoundComplete
-    ) {
-      return;
-    }
-
-    const nearest = findNearestUnsunkFlag(state.course, pos, state.sunkFlags);
-    const nextYaw = nearest ? computeAimYawToFlag(pos, nearest) : state.aimYaw;
-    const nextDir = yawToDir(nextYaw);
-    const autoPutter = shouldAutoSelectPutter(state.course, pos, state.sunkFlags);
-    const nextClub: ClubId = autoPutter ? 'putter' : state.selectedClub;
-
-    set({
-      ballPhase: 'resting',
-      ballPosition: [...pos] as Vec3Tuple,
-      lastSafeLie: [...pos] as Vec3Tuple,
-      lastSafeAimYaw: nextYaw,
-      aimYaw: nextYaw,
-      aimDirection: nextDir,
-      selectedClub: nextClub,
-      activeTargetFlag: nearest?.color ?? null,
-      aimPreview: createIdleAimPreview(nextClub, pos, nextDir),
-    });
-  },
-
-  sinkFlag: (color) => {
-    const state = get();
-    if (state.sunkFlags[color] || state.isRoundComplete) return;
-
-    const flag = state.course.flags.find((f) => f.color === color);
-    if (!flag) return;
-
-    clearRoundTimers();
-
-    const legStrokes = Math.max(1, state.currentLegStrokes);
-    const orderIndex = state.sunkOrder.length;
-    const nextSunkFlags: Record<FlagColor, boolean> = {
-      ...state.sunkFlags,
-      [color]: true,
-    };
-    const entry: SunkFlagEntry = {
-      color,
-      strokes: legStrokes,
-      orderIndex,
-    };
-    const nextSunkOrder = [...state.sunkOrder, entry];
-    const allDone = nextSunkOrder.length >= FLAG_COLORS.length;
-    const cupBallPos: Vec3Tuple = [
-      flag.position[0],
-      flag.position[1] - 0.06,
-      flag.position[2],
-    ];
-
-    let nextDailyBest = state.dailyBest;
-    if (allDone && state.roundMode === 'daily') {
-      const candidate: DailyBestRecord = {
-        dateSeed: state.seed,
-        bestStrokes: state.totalStrokes,
-        sunkOrder: nextSunkOrder,
-      };
-      nextDailyBest = persistDailyBestForSeed(candidate) ?? candidate;
-    }
-
-    set({
-      sunkFlags: nextSunkFlags,
-      sunkOrder: nextSunkOrder,
-      currentLegStrokes: 0,
-      isRoundComplete: allDone,
-      lastSunkFlag: entry,
-      lastCupSunkAtMs: Date.now(),
-      ballPhase: 'cupped',
-      ballPosition: cupBallPos,
-      activeTargetFlag: allDone ? null : state.activeTargetFlag,
-      dailyBest: nextDailyBest,
-      mulliganStack: [],
-      canMulligan: false,
-      aimPreview: createIdleAimPreview(
-        state.selectedClub,
-        cupBallPos,
-        state.aimDirection,
-      ),
-    });
-
-    get().emitSoundEvent('cup_rattle', { intensity: 1.0, flagIndex: orderIndex });
-
-    const expectedVersion = state.courseVersion;
-    const expectedReset = state.resetCounter;
-
-    activeChimeTimer = setTimeout(() => {
-      activeChimeTimer = null;
-      const latest = get();
-      if (
-        latest.courseVersion !== expectedVersion ||
-        latest.resetCounter !== expectedReset
-      ) {
-        return;
-      }
-      latest.emitSoundEvent('flag_chime', {
-        intensity: 1.0,
-        flagIndex: orderIndex,
-      });
-    }, 110);
-
-    if (allDone) {
-      activeFanfareTimer = setTimeout(() => {
-        activeFanfareTimer = null;
-        const latest = get();
-        if (
-          latest.courseVersion !== expectedVersion ||
-          latest.resetCounter !== expectedReset ||
-          !latest.isRoundComplete
-        ) {
-          return;
-        }
-        latest.emitSoundEvent('round_fanfare', {
-          intensity: 1.0,
-          flagIndex: orderIndex,
-        });
-      }, 360);
-      return;
-    }
-
-    // Advance cleanly onto the sunk cup's flat apron (`nextTeePosition`) ready for any remaining flag!
-    activeCupTransitionTimer = setTimeout(() => {
-      activeCupTransitionTimer = null;
-      const latest = get();
-      if (
-        latest.courseVersion !== expectedVersion ||
-        latest.resetCounter !== expectedReset ||
-        latest.isRoundComplete ||
-        latest.ballPhase !== 'cupped'
-      ) {
-        return;
-      }
-      const nextBallPos = surfaceToBallCenter(flag.nextTeePosition);
-      const nearest = findNearestUnsunkFlag(
-        latest.course,
-        nextBallPos,
-        latest.sunkFlags,
-      );
-      const nextYaw = nearest
-        ? computeAimYawToFlag(nextBallPos, nearest)
-        : latest.aimYaw;
-      const nextDir = yawToDir(nextYaw);
-      const nextClub: ClubId = shouldAutoSelectPutter(
-        latest.course,
-        nextBallPos,
-        latest.sunkFlags,
-      )
-        ? 'putter'
-        : 'driver';
-
-      set({
-        ballPhase: 'resting',
-        ballPosition: nextBallPos,
-        lastSafeLie: [...nextBallPos] as Vec3Tuple,
-        lastSafeAimYaw: nextYaw,
-        aimYaw: nextYaw,
-        aimDirection: nextDir,
-        selectedClub: nextClub,
-        activeTargetFlag: nearest?.color ?? null,
-        aimPreview: createIdleAimPreview(nextClub, nextBallPos, nextDir),
-        pendingBallReset: {
-          seq: ++resetSeq,
-          position: nextBallPos,
-          reason: 'next_tee',
-        },
-      });
-    }, 620);
-  },
-
-  triggerWaterHazard: (reason = 'water') => {
-    const state = get();
-    if (
-      state.ballPhase === 'hazard_drop' ||
-      state.ballPhase === 'cupped' ||
-      state.isRoundComplete
-    ) {
-      return;
-    }
-
-    if (activeHazardTimer !== null) {
-      clearTimeout(activeHazardTimer);
-      activeHazardTimer = null;
-    }
-
-    const safeOrigin = [...state.lastSafeLie] as Vec3Tuple;
-    const safeYaw = state.lastSafeAimYaw;
-    const expectedVersion = state.courseVersion;
-    const expectedReset = state.resetCounter;
-
-    set({
-      ballPhase: 'hazard_drop',
-      totalStrokes: state.totalStrokes + 1,
-      currentLegStrokes: state.currentLegStrokes + 1,
-    });
-
-    get().emitSoundEvent('water_plop', { intensity: 1.0 });
-    get().emitTrickToast(
-      'water_penalty',
-      reason === 'water' ? 'Water +1' : 'Out of Bounds +1',
-    );
-
-    activeHazardTimer = setTimeout(() => {
-      activeHazardTimer = null;
-      const latest = get();
-      if (
-        latest.courseVersion !== expectedVersion ||
-        latest.resetCounter !== expectedReset ||
-        latest.ballPhase !== 'hazard_drop' ||
-        latest.isRoundComplete
-      ) {
-        return;
-      }
-
-      const nextDir = yawToDir(safeYaw);
-      const autoPutter = shouldAutoSelectPutter(
-        latest.course,
-        safeOrigin,
-        latest.sunkFlags,
-      );
-      const nextClub: ClubId = autoPutter ? 'putter' : latest.selectedClub;
-
-      set({
-        ballPhase: 'resting',
-        ballPosition: safeOrigin,
-        aimYaw: safeYaw,
-        aimDirection: nextDir,
-        selectedClub: nextClub,
-        aimPreview: createIdleAimPreview(nextClub, safeOrigin, nextDir),
-        pendingBallReset: {
-          seq: ++resetSeq,
-          position: safeOrigin,
-          reason: 'hazard',
-        },
-      });
-    }, 400);
-  },
-
-  consumeBallReset: (seq) => {
-    set((state) =>
-      state.pendingBallReset?.seq === seq ? { pendingBallReset: null } : {},
-    );
-  },
-
-  recordPropHit: (propId, propType, toastKind, toastLabel) => {
-    const nowMs = Date.now();
-    const seq = ++propHitSeq;
     set((state) => ({
-      propHitCounters: {
-        ...state.propHitCounters,
-        [propId]: (state.propHitCounters[propId] ?? 0) + 1,
-        [propType]: (state.propHitCounters[propType] ?? 0) + 1,
-      },
-      propHitTimestamps: {
-        ...state.propHitTimestamps,
-        [propId]: nowMs,
-        [propType]: nowMs,
-      },
-      lastPropHit: {
-        seq,
-        propId,
-        propType,
-        timestampMs: nowMs,
+      aimPower: 0,
+      aimPreview: {
+        isAiming: false,
+        power: 0,
+        clubId: state.selectedClub,
+        aimDirection: state.aimDirection,
       },
     }));
-
-    if (toastKind && toastLabel) {
-      get().emitTrickToast(toastKind, toastLabel);
-    }
   },
 
-  emitSoundEvent: (type, opts) => {
-    const nextSeq = ++soundSeq;
+  setStreetScout: (active) => {
     set({
-      soundEventSeq: nextSeq,
-      lastSoundEvent: {
-        seq: nextSeq,
-        type,
-        intensity: opts?.intensity ?? 1.0,
-        flagIndex: opts?.flagIndex,
-      },
+      isStreetScoutActive: active,
+      cameraMode: active ? 'street_scout' : 'follow',
+      cameraAuditStationId: active ? null : get().cameraAuditStationId,
     });
   },
 
-  emitTrickToast: (kind, label) => {
-    clearToastTimer();
-    const seq = ++toastSeq;
-    set({
-      trickToast: {
-        seq,
-        kind,
-        label,
-      },
-    });
-    activeToastTimer = setTimeout(() => {
-      activeToastTimer = null;
-      set((state) => (state.trickToast?.seq === seq ? { trickToast: null } : {}));
-    }, 1350);
+  toggleStreetScout: () => {
+    const next = !get().isStreetScoutActive;
+    soundEngine.playUiClick(0.75);
+    get().setStreetScout(next);
   },
 
-  clearTrickToast: (seq) => {
-    if (seq === undefined) {
-      clearToastTimer();
-      set({ trickToast: null });
+  toggleCameraMode: () => {
+    get().toggleStreetScout();
+  },
+
+  setCameraAuditStation: (id) => {
+    set({
+      cameraAuditStationId: id,
+      isStreetScoutActive: false,
+      cameraMode: 'follow',
+    });
+  },
+
+  toggleMute: () => {
+    const next = !get().isMuted;
+    soundEngine.setMuted(next);
+    writeStoredMute(next);
+    set({ isMuted: next, muted: next });
+  },
+
+  toggleMuted: () => {
+    get().toggleMute();
+  },
+
+  setForceSteamActive: (val) => {
+    set({ forceSteamActive: val });
+  },
+
+  recordPropHit: (id, banner) => {
+    const now = Date.now();
+    set((state) => {
+      const nextTimestamps = { ...state.propHitTimestamps, [id]: now };
+      if (!banner) {
+        return { propHitTimestamps: nextTimestamps };
+      }
+      trickToastCounter += 1;
+      return {
+        propHitTimestamps: nextTimestamps,
+        lastEventBanner: banner,
+        trickToast: {
+          seq: trickToastCounter,
+          kind: 'awning_bank',
+          label: banner,
+        },
+      };
+    });
+  },
+
+  setEventBanner: (banner, kind = 'awning_bank') => {
+    if (!banner) {
+      set({ lastEventBanner: null });
       return;
     }
-    set((state) => (state.trickToast?.seq === seq ? { trickToast: null } : {}));
+    trickToastCounter += 1;
+    set({
+      lastEventBanner: banner,
+      trickToast: {
+        seq: trickToastCounter,
+        kind,
+        label: banner,
+      },
+    });
   },
 
-  notifyScorecardCopied: () => {
-    get().emitTrickToast('scorecard_copied', 'Copied Scorecard!');
-    get().emitSoundEvent('ui_tap', { intensity: 0.85 });
+  showTrickToast: (kind, label) => {
+    get().setEventBanner(label, kind);
+  },
+
+  emitSoundEvent: (type, intensity = 0.85, flagIndex) => {
+    const nextSeq = get().soundEventSeq + 1;
+    const payload: SoundEventPayload = {
+      seq: nextSeq,
+      type,
+      intensity,
+      flagIndex,
+    };
+    soundEngine.playPayload(payload);
+    set({
+      soundEventSeq: nextSeq,
+      lastSoundEvent: payload,
+    });
+  },
+
+  updateBallTelemetry: (pos, surface) => {
+    const resolvedSurface =
+      surface ?? getMasterPlanSurfaceTagAt(pos[0], pos[2]);
+    set({
+      ballPosition: pos,
+      distanceToPinMeters: computeDistance(pos),
+      currentSurfaceTag: resolvedSurface,
+    });
+  },
+
+  launchShot: (opts) => {
+    const state = get();
+    if (
+      state.isHoleComplete ||
+      state.shotPhase === 'ball_in_flight' ||
+      state.shotPhase === 'fountain_drop'
+    ) {
+      return null;
+    }
+
+    const clubId = opts?.clubId ?? state.selectedClub;
+    const rawPower = opts?.power ?? state.aimPower;
+    const power = Math.max(0, Math.min(1, rawPower));
+    if (power < 0.04) {
+      set({
+        aimPower: 0,
+        shotPhase: 'aiming',
+        ballPhase: 'resting',
+        aimPreview: {
+          ...state.aimPreview,
+          isAiming: false,
+          power: 0,
+        },
+      });
+      return null;
+    }
+
+    const aimYaw = opts?.aimYaw ?? state.aimYaw;
+    const aimDir = resolveHorizontalAim(undefined, aimYaw);
+    const launchVelocity = computeClubLaunchVelocity(clubId, power, aimDir);
+    shotSeqCounter += 1;
+    const nextSeq = shotSeqCounter;
+    const nextStrokes = state.strokes + 1;
+
+    const payload: PendingShotPayload = {
+      seq: nextSeq,
+      clubId,
+      power,
+      aimYaw,
+      launchVelocity,
+      forceSteamActive:
+        opts?.forceSteamActive !== undefined
+          ? opts.forceSteamActive
+          : state.forceSteamActive,
+    };
+
+    soundEngine.playClubStrike(clubId, power);
+
+    set({
+      strokes: nextStrokes,
+      totalStrokes: nextStrokes,
+      selectedClub: clubId,
+      shotPhase: 'ball_in_flight',
+      ballPhase: 'inflight',
+      aimYaw,
+      aimDirection: aimDir,
+      aimPower: 0,
+      hasTakenFirstStroke: true,
+      isStreetScoutActive: false,
+      cameraMode: 'follow',
+      cameraAuditStationId: null,
+      lastEventBanner: null,
+      lastSafeBallPosition: [...state.ballPosition],
+      lastSafeLie: [...state.ballPosition],
+      forceSteamActive:
+        opts?.forceSteamActive !== undefined
+          ? opts.forceSteamActive
+          : state.forceSteamActive,
+      aimPreview: {
+        isAiming: false,
+        power: 0,
+        clubId,
+        aimDirection: aimDir,
+      },
+      lastShot: {
+        clubId,
+        power,
+        aimDirection: aimDir,
+        launchSpeed: Math.hypot(...launchVelocity),
+        timestamp: Date.now(),
+      },
+      pendingShot: payload,
+    });
+
+    return payload;
+  },
+
+  markBallResting: (pos, opts) => {
+    const surface = getMasterPlanSurfaceTagAt(pos[0], pos[2]);
+    const dist = computeDistance(pos);
+    const recommended = recommendClubForLie(pos, surface);
+    const nextAimYaw = Math.atan2(
+      HOLE_1_CUP.position[0] - pos[0],
+      -(HOLE_1_CUP.position[2] - pos[2]),
+    );
+    const shouldAutoClub = opts?.autoSelectClub !== false;
+
+    set((state) => {
+      const nextClub = shouldAutoClub ? recommended : state.selectedClub;
+      // Preserve player's street aim unless they moved meaningfully onto green/courtyard
+      const yawToUse =
+        state.hasTakenFirstStroke && dist < 35 ? nextAimYaw : state.aimYaw;
+      const aimDir = resolveHorizontalAim(undefined, yawToUse);
+      return {
+        ballPosition: [...pos],
+        lastSafeBallPosition: [...pos],
+        lastSafeLie: [...pos],
+        distanceToPinMeters: dist,
+        currentSurfaceTag: surface,
+        shotPhase: 'aiming',
+        ballPhase: 'resting',
+        selectedClub: nextClub,
+        manualClubOverride: !shouldAutoClub,
+        aimYaw: yawToUse,
+        aimDirection: aimDir,
+        aimPower: 0,
+        aimPreview: {
+          isAiming: false,
+          power: 0,
+          clubId: nextClub,
+          aimDirection: aimDir,
+        },
+      };
+    });
+  },
+
+  teleportBall: (pos) => {
+    const surface = getMasterPlanSurfaceTagAt(pos[0], pos[2]);
+    const dist = computeDistance(pos);
+    teleportSeqCounter += 1;
+    const nextSeq = teleportSeqCounter;
+    const recommended = recommendClubForLie(pos, surface);
+    set((state) => ({
+      ballPosition: [...pos],
+      lastSafeBallPosition: [...pos],
+      lastSafeLie: [...pos],
+      distanceToPinMeters: dist,
+      currentSurfaceTag: surface,
+      shotPhase: 'aiming',
+      ballPhase: 'resting',
+      aimPower: 0,
+      selectedClub: recommended,
+      isHoleComplete: false,
+      isRoundComplete: false,
+      pendingTeleport: { seq: nextSeq, position: [...pos] },
+      pendingBallReset: true,
+      aimPreview: {
+        ...state.aimPreview,
+        isAiming: false,
+        power: 0,
+        clubId: recommended,
+      },
+    }));
+  },
+
+  consumeBallReset: () => {
+    set({ pendingBallReset: false });
+  },
+
+  triggerFountainHazard: (dropPos) => {
+    const state = get();
+    if (state.isHoleComplete || state.shotPhase === 'fountain_drop') return;
+    const safeDrop: Vec3Tuple = dropPos
+      ? [...dropPos]
+      : [
+          FOUNTAIN_QUICK_DROP_POSITION[0],
+          FOUNTAIN_QUICK_DROP_POSITION[1] + BALL_RADIUS,
+          FOUNTAIN_QUICK_DROP_POSITION[2],
+        ];
+    const nextStrokes = state.strokes + 1;
+    const nextPenalties = state.penaltyStrokes + 1;
+    teleportSeqCounter += 1;
+    const nextSeq = teleportSeqCounter;
+    const yawToCup = Math.atan2(
+      HOLE_1_CUP.position[0] - safeDrop[0],
+      -(HOLE_1_CUP.position[2] - safeDrop[2]),
+    );
+    const dirToCup = resolveHorizontalAim(undefined, yawToCup);
+
+    soundEngine.playFountainSplash(0.95);
+    trickToastCounter += 1;
+
+    set({
+      strokes: nextStrokes,
+      totalStrokes: nextStrokes,
+      penaltyStrokes: nextPenalties,
+      shotPhase: 'aiming',
+      ballPhase: 'resting',
+      ballPosition: safeDrop,
+      lastSafeBallPosition: safeDrop,
+      lastSafeLie: safeDrop,
+      distanceToPinMeters: computeDistance(safeDrop),
+      currentSurfaceTag: 'courtyard_paver',
+      selectedClub: 'putter',
+      aimYaw: yawToCup,
+      aimDirection: dirToCup,
+      aimPower: 0,
+      lastEventBanner: 'Fountain Hazard +1',
+      trickToast: {
+        seq: trickToastCounter,
+        kind: 'water_penalty',
+        label: 'Fountain Hazard +1',
+      },
+      pendingTeleport: { seq: nextSeq, position: safeDrop },
+      pendingBallReset: true,
+      aimPreview: {
+        isAiming: false,
+        power: 0,
+        clubId: 'putter',
+        aimDirection: dirToCup,
+      },
+    });
+  },
+
+  triggerWaterHazard: () => {
+    get().triggerFountainHazard();
+  },
+
+  sinkHole: () => {
+    const state = get();
+    if (state.isHoleComplete) return;
+    const total = Math.max(1, state.strokes);
+    const prevBest = state.personalBest;
+    const nextBest = prevBest === null ? total : Math.min(prevBest, total);
+    if (nextBest !== prevBest) {
+      writeStoredBest(nextBest);
+    }
+
+    soundEngine.playCupDrop(1.0);
+    const banner =
+      total === 1
+        ? 'Hole-in-One!'
+        : total <= 2
+          ? 'Eagle!'
+          : total === 3
+            ? 'Birdie!'
+            : total === 4
+              ? 'Par!'
+              : 'Holed Out!';
+    trickToastCounter += 1;
+
+    set({
+      strokes: total,
+      totalStrokes: total,
+      shotPhase: 'holed_out',
+      ballPhase: 'cupped',
+      isHoleComplete: true,
+      isRoundComplete: true,
+      personalBest: nextBest,
+      dailyBest: { bestStrokes: nextBest, dateKey: 'hole-1' },
+      distanceToPinMeters: 0,
+      currentSurfaceTag: 'putting_green_turf',
+      lastEventBanner: banner,
+      trickToast: {
+        seq: trickToastCounter,
+        kind: 'scorecard_copied',
+        label: banner,
+      },
+      sunkFlags: { yellow: true },
+      sunkOrder: ['yellow'],
+    });
+  },
+
+  sinkFlag: () => {
+    get().sinkHole();
+  },
+
+  replayHole: () => {
+    soundEngine.playUiClick(0.9);
+    teleportSeqCounter += 1;
+    const nextSeq = teleportSeqCounter;
+    set({
+      ...createInitialHoleSlice(),
+      pendingTeleport: { seq: nextSeq, position: [...INITIAL_BALL_POS] },
+      pendingBallReset: true,
+    });
+  },
+
+  resetHole: () => {
+    get().replayHole();
+  },
+
+  resetCourse: () => {
+    get().replayHole();
+  },
+
+  restartRound: () => {
+    get().replayHole();
   },
 }));

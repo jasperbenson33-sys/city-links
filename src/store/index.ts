@@ -2,8 +2,8 @@
 
 export {
   useCurbsideStore,
-  type CurbsideStoreState,
-  type PendingBallReset,
-  type PropHitEvent,
-  type ShotCommand,
+  type CurbsideState,
+  type ShotPhase,
+  type PendingShotPayload,
+  type PendingTeleportPayload,
 } from './useCurbsideStore';

@@ -7,8 +7,6 @@ export const size = {
 
 export const contentType = 'image/png';
 
-const FLAG_COLORS = ['#EF4444', '#FACC15', '#3B82F6', '#A855F7', '#22C55E'];
-
 export default function Icon() {
   return new ImageResponse(
     (
@@ -40,7 +38,7 @@ export default function Icon() {
           }}
         />
 
-        {/* Terracotta City Block Silhouette */}
+        {/* Terracotta Brownstone Silhouette */}
         <div
           style={{
             display: 'flex',
@@ -83,34 +81,43 @@ export default function Icon() {
           }}
         />
 
-        {/* 5 Color-Coded Flag Dots along Top-Left */}
+        {/* Hole 1: 5th & Mercer Badge along Top-Left */}
         <div
           style={{
             display: 'flex',
             position: 'absolute',
-            top: 46,
-            left: 46,
+            top: 44,
+            left: 44,
+            alignItems: 'center',
             gap: 10,
-            padding: '10px 14px',
+            padding: '10px 18px',
             borderRadius: 999,
-            background: 'rgba(255, 253, 248, 0.88)',
+            background: 'rgba(255, 253, 248, 0.92)',
+            border: '3px solid #E2C294',
           }}
         >
-          {FLAG_COLORS.map((color) => (
-            <div
-              key={color}
-              style={{
-                display: 'flex',
-                width: 22,
-                height: 22,
-                borderRadius: 11,
-                background: color,
-              }}
-            />
-          ))}
+          <div
+            style={{
+              display: 'flex',
+              width: 16,
+              height: 16,
+              borderRadius: 8,
+              background: '#D95D39',
+            }}
+          />
+          <span
+            style={{
+              fontSize: 22,
+              fontWeight: 900,
+              color: '#231914',
+              letterSpacing: '-0.02em',
+            }}
+          >
+            5TH &amp; MERCER
+          </span>
         </div>
 
-        {/* Lush Mint Parklet Turf Hill */}
+        {/* Lush Mint Courtyard Turf Hill */}
         <div
           style={{
             display: 'flex',
@@ -220,6 +227,6 @@ export default function Icon() {
     ),
     {
       ...size,
-    }
+    },
   );
 }

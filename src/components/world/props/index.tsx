@@ -1,197 +1,327 @@
 'use client';
 
 import React from 'react';
-import type { ClubId, PlacedProp, PropType } from '@/types';
-import { PROP_CATALOG } from '@/engine';
+import { COURSE_MASTER_PLAN, COURSE_PROPS } from '@/config/courseMasterPlan';
+import type { CoursePropSpec, PlacedProp, PropType } from '@/types/course';
 import { HotdogCartProp, CoaxialWheelMeshGroup } from './HotdogCartProp';
 import { FireHydrantJetProp } from './FireHydrantJetProp';
 import { SubwaySteamGrateProp } from './SubwaySteamGrateProp';
 import { ScaffoldingTunnelProp } from './ScaffoldingTunnelProp';
 import { DeliveryBoxVanProp } from './DeliveryBoxVanProp';
-import { BistroUmbrellaSetProp } from './BistroUmbrellaSetProp';
+import {
+  BistroUmbrellaSetProp,
+  type BistroUmbrellaVariant,
+} from './BistroUmbrellaSetProp';
 import { FountainHazardProp } from './FountainHazardProp';
 import { CurvedGutterCornerProp } from './CurvedGutterCornerProp';
 import { PigeonFlockProp } from './PigeonFlockProp';
 import {
   StreetBollardProp,
   StreetTreeProp,
+  OverhangingStreetTreeProp,
   StreetLampProp,
   CornerBuildingAccentProp,
 } from './StreetAccentProps';
 import { GolfBagAndTeeProp } from './GolfBagAndTeeProp';
+import {
+  HazardConeProp,
+  MenuAFrameBoardProp,
+  SubwayBenchProp,
+  TrashReceptacleProp,
+  PlanterHedgeProp,
+  SubwayPortalProp,
+} from './UrbanCornerProps';
 
+export { HotdogCartProp, CoaxialWheelMeshGroup };
+export { FireHydrantJetProp };
+export { SubwaySteamGrateProp };
+export { ScaffoldingTunnelProp };
+export { DeliveryBoxVanProp };
+export { BistroUmbrellaSetProp };
+export { FountainHazardProp };
+export { CurvedGutterCornerProp };
+export { PigeonFlockProp };
 export {
-  HotdogCartProp,
-  CoaxialWheelMeshGroup,
-  FireHydrantJetProp,
-  SubwaySteamGrateProp,
-  ScaffoldingTunnelProp,
-  DeliveryBoxVanProp,
-  BistroUmbrellaSetProp,
-  FountainHazardProp,
-  CurvedGutterCornerProp,
-  PigeonFlockProp,
   StreetBollardProp,
   StreetTreeProp,
+  OverhangingStreetTreeProp,
   StreetLampProp,
   CornerBuildingAccentProp,
-  GolfBagAndTeeProp,
+};
+export { GolfBagAndTeeProp };
+export {
+  HazardConeProp,
+  MenuAFrameBoardProp,
+  SubwayBenchProp,
+  TrashReceptacleProp,
+  PlanterHedgeProp,
+  SubwayPortalProp,
 };
 
-export interface PlacedPropRendererProps {
-  prop: PlacedProp;
-  ballPosition?: [number, number, number];
-  lastHitAt?: number;
-  showWireframe?: boolean;
-  /** QA Gallery override to preview active steam gust / bird flight scatter. */
-  forceAction?: boolean;
+export type ExtendedQaPropType =
+  | PropType
+  | 'golf_bag_tee'
+  | 'corner_building_accent';
+
+export interface MinimalQaPropSpec {
+  id: string;
+  type: ExtendedQaPropType;
+  position: [number, number, number];
+  rotationY: number;
+  localSize: [number, number, number];
 }
 
-function normalizeTimestampToPerfSeconds(ts?: number): number {
-  if (ts === undefined || !Number.isFinite(ts) || ts <= -5) return -10;
-  // Detect epoch milliseconds (Date.now()) from store and map into performance.now() * 0.001 timeline.
-  if (ts > 1e11) {
-    const timeOrigin =
-      typeof performance !== 'undefined' && typeof performance.timeOrigin === 'number'
-        ? performance.timeOrigin
-        : Date.now() - performance.now();
-    return (ts - timeOrigin) * 0.001;
+export type RenderablePropSpec =
+  | PlacedProp
+  | CoursePropSpec
+  | MinimalQaPropSpec;
+
+export interface PlacedPropRendererProps {
+  prop: RenderablePropSpec;
+  ballPosition?: [number, number, number];
+  selectedClub?: 'driver' | 'wedge' | 'skimmer' | 'putter';
+  lastUmbrellaHitAt?: number;
+  lastHydrantSurfAt?: number;
+  lastFountainSplashAt?: number;
+  lastVanRoofHitAt?: number;
+  showWireframe?: boolean;
+  /** When true (QA single-asset stage), keep hydrant puddle at y = 0 datum instead of -0.17m road grade. */
+  isStandaloneQA?: boolean;
+}
+
+function getBistroVariant(propId: string): BistroUmbrellaVariant {
+  if (propId.includes('north-1') || propId.includes('south-2')) {
+    return 'terracotta';
   }
-  return ts;
+  if (propId.includes('north-2')) {
+    return 'ochre';
+  }
+  return 'mint';
+}
+
+function getTreeVariant(propId: string): 'emerald' | 'sunny' | 'peach' {
+  if (propId.includes('east')) return 'sunny';
+  if (propId.includes('north-corner')) return 'peach';
+  return 'emerald';
 }
 
 /**
- * Renders any canonical PlacedProp produced by generateCityCourse at its exact
- * ground-seated [worldX, groundY, worldZ] and rotationY.
+ * Renders any CoursePropSpec or PlacedProp dynamically by PropType, preserving exact
+ * COURSE_MASTER_PLAN coordinates, dimensions, angles, and coaxial geometry.
  */
 export function PlacedPropRenderer({
   prop,
   ballPosition,
-  lastHitAt = -10,
+  selectedClub = 'driver',
+  lastUmbrellaHitAt = -10,
+  lastHydrantSurfAt = -10,
+  lastFountainSplashAt = -10,
+  lastVanRoofHitAt = -10,
   showWireframe = false,
-  forceAction = false,
+  isStandaloneQA = false,
 }: PlacedPropRendererProps) {
-  const perfHitSec = normalizeTimestampToPerfSeconds(lastHitAt);
+  const courseProp = prop as CoursePropSpec;
+  const pos: [number, number, number] = [
+    prop.position[0],
+    prop.position[1],
+    prop.position[2],
+  ];
+  const rotY = prop.rotationY;
+
   switch (prop.type) {
     case 'hotdog_cart_umbrella':
       return (
         <HotdogCartProp
-          position={prop.position}
-          rotationY={prop.rotationY}
-          lastHitAt={perfHitSec}
+          position={pos}
+          rotationY={rotY}
+          lastHitAt={lastUmbrellaHitAt}
+          pitchDeg={courseProp.hotdogAwningMeta?.pitchDeg ?? 28}
+          restitution={courseProp.hotdogAwningMeta?.restitution ?? 0.28}
           showWireframe={showWireframe}
         />
       );
     case 'fire_hydrant_jet':
       return (
         <FireHydrantJetProp
-          position={prop.position}
-          rotationY={prop.rotationY}
-          jetRangeMeters={
-            prop.reactive?.zoneHalfExtents
-              ? Math.max(2.4, prop.reactive.zoneHalfExtents[2] * 2)
-              : 4.6
-          }
-          lastSurfAt={perfHitSec}
+          position={pos}
+          rotationY={rotY}
+          jetRangeMeters={0.71}
+          gutterDropY={isStandaloneQA ? 0 : -0.17}
+          streamOffsetX={-0.05}
+          lastSurfAt={lastHydrantSurfAt}
           showWireframe={showWireframe}
         />
       );
-    case 'curved_gutter_corner':
-      return (
-        <CurvedGutterCornerProp
-          position={prop.position}
-          rotationY={prop.rotationY}
-          showWireframe={showWireframe}
-        />
-      );
-    case 'subway_steam_grate': {
-      const cycle = prop.reactive?.cycleSeconds ?? 3.2;
-      const duty = prop.reactive?.dutyCycle ?? 0.55;
+    case 'subway_steam_grate':
       return (
         <SubwaySteamGrateProp
-          position={prop.position}
-          rotationY={prop.rotationY}
+          position={pos}
+          rotationY={rotY}
           width={prop.localSize[0]}
           depth={prop.localSize[2]}
-          cycleSeconds={cycle}
-          gustActiveSeconds={cycle * duty}
-          forceGust={forceAction}
+          cycleSeconds={courseProp.steamLiftMeta?.cycleSeconds ?? 3.2}
+          gustActiveSeconds={courseProp.steamLiftMeta?.activeSeconds ?? 1.6}
           showWireframe={showWireframe}
         />
       );
-    }
     case 'scaffolding_tunnel':
       return (
         <ScaffoldingTunnelProp
-          position={prop.position}
-          rotationY={prop.rotationY}
+          position={pos}
+          rotationY={rotY}
           width={prop.localSize[0]}
           depth={prop.localSize[2]}
-          clearHeight={1.45}
+          clearHeight={courseProp.scaffoldingMeta?.clearHeightMeters ?? 2.35}
+          wallGapMeters={courseProp.scaffoldingMeta?.wallGapMeters ?? 0}
           showWireframe={showWireframe}
         />
       );
     case 'delivery_box_van':
       return (
         <DeliveryBoxVanProp
-          position={prop.position}
-          rotationY={prop.rotationY}
-          lastRoofHitAt={perfHitSec}
+          position={pos}
+          rotationY={rotY}
+          lastRoofHitAt={lastVanRoofHitAt}
+          propId={prop.id}
           showWireframe={showWireframe}
         />
       );
     case 'bistro_umbrella_set':
       return (
         <BistroUmbrellaSetProp
-          position={prop.position}
-          rotationY={prop.rotationY}
-          lastHitAt={perfHitSec}
+          position={pos}
+          rotationY={rotY}
+          lastHitAt={lastUmbrellaHitAt}
+          variant={getBistroVariant(prop.id)}
           showWireframe={showWireframe}
         />
       );
     case 'fountain_water_hazard':
       return (
         <FountainHazardProp
-          position={prop.position}
-          radius={1.52}
-          lastSplashAt={perfHitSec}
+          position={pos}
+          radius={prop.localSize[0] * 0.5}
+          lastSplashAt={lastFountainSplashAt}
+          showWireframe={showWireframe}
+        />
+      );
+    case 'curved_gutter_corner':
+      return (
+        <CurvedGutterCornerProp
+          position={pos}
+          rotationY={rotY}
           showWireframe={showWireframe}
         />
       );
     case 'pigeon_flock':
       return (
         <PigeonFlockProp
-          position={prop.position}
-          rotationY={prop.rotationY}
+          position={pos}
+          rotationY={rotY}
           ballPosition={ballPosition}
-          forceScatter={forceAction}
           showWireframe={showWireframe}
         />
       );
-    case 'street_tree': {
-      const variants = ['emerald', 'sunny', 'peach'] as const;
-      const variant = variants[(prop.tileCol + prop.tileRow) % variants.length]!;
-      return (
-        <StreetTreeProp
-          position={prop.position}
-          variant={variant}
-          phase={(prop.tileCol * 1.3 + prop.tileRow * 0.7) % 6.28}
-          showWireframe={showWireframe}
-        />
-      );
-    }
     case 'brass_bollard':
       return (
         <StreetBollardProp
-          position={prop.position}
+          position={pos}
+          rotationY={rotY}
+          showWireframe={showWireframe}
+        />
+      );
+    case 'street_tree':
+      return (
+        <StreetTreeProp
+          position={pos}
+          variant={getTreeVariant(prop.id)}
+          phase={prop.position[0] + prop.position[2]}
+          showWireframe={showWireframe}
+        />
+      );
+    case 'overhanging_street_tree':
+      return (
+        <OverhangingStreetTreeProp
+          position={pos}
+          rotationY={rotY}
+          phase={prop.position[0] + prop.position[2]}
           showWireframe={showWireframe}
         />
       );
     case 'street_lamp':
       return (
         <StreetLampProp
-          position={prop.position}
-          rotationY={prop.rotationY}
+          position={pos}
+          rotationY={rotY}
+          showWireframe={showWireframe}
+        />
+      );
+    case 'hazard_cone':
+      return (
+        <HazardConeProp
+          position={pos}
+          rotationY={rotY}
+          showWireframe={showWireframe}
+        />
+      );
+    case 'menu_a_frame_board':
+      return (
+        <MenuAFrameBoardProp
+          position={pos}
+          rotationY={rotY}
+          showWireframe={showWireframe}
+        />
+      );
+    case 'subway_bench':
+      return (
+        <SubwayBenchProp
+          position={pos}
+          rotationY={rotY}
+          showWireframe={showWireframe}
+        />
+      );
+    case 'trash_receptacle':
+      return (
+        <TrashReceptacleProp
+          position={pos}
+          rotationY={rotY}
+          showWireframe={showWireframe}
+        />
+      );
+    case 'planter_hedge_rough':
+      return (
+        <PlanterHedgeProp
+          position={pos}
+          rotationY={rotY}
+          width={prop.localSize[0]}
+          depth={prop.localSize[2]}
+          propId={prop.id}
+          showWireframe={showWireframe}
+        />
+      );
+    case 'subway_entrance_portal':
+      return (
+        <SubwayPortalProp
+          position={pos}
+          rotationY={rotY}
+          propId={prop.id}
+          showWireframe={showWireframe}
+        />
+      );
+    case 'golf_bag_tee':
+      return (
+        <GolfBagAndTeeProp
+          position={pos}
+          rotationY={rotY}
+          selectedClub={selectedClub}
+          showWireframe={showWireframe}
+        />
+      );
+    case 'corner_building_accent':
+      return (
+        <CornerBuildingAccentProp
+          position={pos}
+          rotationY={rotY}
           showWireframe={showWireframe}
         />
       );
@@ -200,231 +330,262 @@ export function PlacedPropRenderer({
   }
 }
 
-export type PropQaItemId = PropType | 'golf_bag_tee' | 'corner_building_accent';
-
-export interface PropQaRenderOptions {
-  showWireframe: boolean;
-  lastHitAt: number;
-  forceAction: boolean;
-  selectedClub?: ClubId;
-}
-
-export interface PropQaRegistryEntry {
-  id: PropQaItemId;
-  label: string;
-  category: 'reactive' | 'hazard' | 'accent';
-  localSize: [number, number, number];
-  summary: string;
-  render: (opts: PropQaRenderOptions) => React.ReactNode;
+export interface CoursePropsWorldProps {
+  ballPosition?: [number, number, number];
+  selectedClub?: 'driver' | 'wedge' | 'skimmer' | 'putter';
+  lastUmbrellaHitAt?: number;
+  lastHydrantSurfAt?: number;
+  lastFountainSplashAt?: number;
+  lastVanRoofHitAt?: number;
+  showWireframe?: boolean;
+  /** Render the start-tee welcome mat & miniature golf bag at COURSE_MASTER_PLAN teePosition. */
+  showTeeSet?: boolean;
 }
 
 /**
- * Registry of every isolated Curbside Links prop for /qa-gallery inspection on y = 0.
+ * Master-plan prop assembly mounting all 25 COURSE_PROPS from COURSE_MASTER_PLAN
+ * plus the start-tee welcome mat & miniature stand bag at Hole 1 Tee.
  */
-export const PROP_QA_REGISTRY: PropQaRegistryEntry[] = [
+export function CoursePropsWorld({
+  ballPosition,
+  selectedClub = 'driver',
+  lastUmbrellaHitAt = -10,
+  lastHydrantSurfAt = -10,
+  lastFountainSplashAt = -10,
+  lastVanRoofHitAt = -10,
+  showWireframe = false,
+  showTeeSet = true,
+}: CoursePropsWorldProps) {
+  const tee = COURSE_MASTER_PLAN.teePosition;
+
+  return (
+    <group name="course-props-world">
+      {COURSE_PROPS.map((prop) => (
+        <PlacedPropRenderer
+          key={prop.id}
+          prop={prop}
+          ballPosition={ballPosition}
+          selectedClub={selectedClub}
+          lastUmbrellaHitAt={lastUmbrellaHitAt}
+          lastHydrantSurfAt={lastHydrantSurfAt}
+          lastFountainSplashAt={lastFountainSplashAt}
+          lastVanRoofHitAt={lastVanRoofHitAt}
+          showWireframe={showWireframe}
+          isStandaloneQA={false}
+        />
+      ))}
+
+      {showTeeSet && (
+        <GolfBagAndTeeProp
+          position={[tee[0], tee[1], tee[2]]}
+          rotationY={0}
+          selectedClub={selectedClub}
+          showWireframe={showWireframe}
+        />
+      )}
+    </group>
+  );
+}
+
+/* ============================================================================
+ * QA GALLERY METADATA REGISTRY (Derived directly from COURSE_PROPS + extras)
+ * ============================================================================ */
+
+export interface CoaxialAxleIndicator {
+  label: string;
+  start: [number, number, number];
+  end: [number, number, number];
+}
+
+export interface PropQAGalleryEntry {
+  id: string;
+  title: string;
+  propType: ExtendedQaPropType;
+  category:
+    | 'hero-obstacle'
+    | 'dynamic-hazard'
+    | 'courtyard-furniture'
+    | 'street-architecture';
+  description: string;
+  localSize: [number, number, number];
+  localBoundsMin: [number, number, number];
+  localBoundsMax: [number, number, number];
+  coaxialAxles: CoaxialAxleIndicator[];
+  courseProp?: CoursePropSpec;
+}
+
+function getCategoryForProp(type: PropType): PropQAGalleryEntry['category'] {
+  switch (type) {
+    case 'scaffolding_tunnel':
+    case 'delivery_box_van':
+    case 'hotdog_cart_umbrella':
+    case 'overhanging_street_tree':
+      return 'hero-obstacle';
+    case 'fire_hydrant_jet':
+    case 'subway_steam_grate':
+    case 'fountain_water_hazard':
+    case 'curved_gutter_corner':
+      return 'dynamic-hazard';
+    case 'bistro_umbrella_set':
+    case 'planter_hedge_rough':
+    case 'subway_bench':
+    case 'menu_a_frame_board':
+    case 'trash_receptacle':
+      return 'courtyard-furniture';
+    default:
+      return 'street-architecture';
+  }
+}
+
+function getTitleForProp(prop: CoursePropSpec): string {
+  const labels: Record<PropType, string> = {
+    scaffolding_tunnel: 'Sidewalk Scaffolding Shed',
+    delivery_box_van: 'Bakery Delivery Box Van + Ramp',
+    hotdog_cart_umbrella: 'Hotdog Cart + 28° Awning',
+    fire_hydrant_jet: 'Spewing Fire Hydrant',
+    subway_steam_grate: 'Subway Steam Vent Grate',
+    fountain_water_hazard: 'Octagonal Stone Fountain',
+    bistro_umbrella_set: 'Venice Café Bistro Set',
+    curved_gutter_corner: 'Curved Storm Gutter Corner',
+    pigeon_flock: 'Low-Poly Pigeon Flock',
+    brass_bollard: 'Sidewalk Brass Bollard',
+    street_tree: 'Street Tree in Tree-Pit Ring',
+    overhanging_street_tree: 'Overhanging East Street Tree',
+    street_lamp: 'Venetian Streetlamp',
+    hazard_cone: 'Reflective Hazard Cone',
+    menu_a_frame_board: 'Chalkboard Menu A-Frame',
+    subway_bench: 'Slatted Wood Corner Bench',
+    trash_receptacle: 'Hooded Urban Trash Bin',
+    planter_hedge_rough: 'Limestone Boxwood Planter',
+    subway_entrance_portal: '5th & Mercer Subway Portal',
+  };
+  const suffix = prop.id
+    .replace(/^[a-z]+-/, '')
+    .split('-')
+    .map((w) => w.charAt(0).toUpperCase() + w.slice(1))
+    .join(' ');
+  return `${labels[prop.type]} (${suffix})`;
+}
+
+function getCoaxialAxlesForProp(prop: CoursePropSpec): CoaxialAxleIndicator[] {
+  switch (prop.type) {
+    case 'hotdog_cart_umbrella':
+      return [
+        { label: 'Wheel Axle (X)', start: [-0.95, 0.34, 0], end: [0.95, 0.34, 0] },
+        {
+          label: '28° Awning Ridge',
+          start: [0, 2.54, -0.73],
+          end: [0, 1.76, 0.73],
+        },
+      ];
+    case 'delivery_box_van':
+      return [
+        {
+          label: 'Rear Wheel Axle (X)',
+          start: [-1.05, 0.36, -0.22],
+          end: [1.05, 0.36, -0.22],
+        },
+        {
+          label: 'Front Wheel Axle (X)',
+          start: [-1.05, 0.36, 2.68],
+          end: [1.05, 0.36, 2.68],
+        },
+      ];
+    case 'fire_hydrant_jet':
+      return [
+        { label: 'Hydrant Body Axis (Y)', start: [0, 0, 0], end: [0, 0.92, 0] },
+        {
+          label: 'Side Nozzle Axis (X)',
+          start: [-0.26, 0.56, 0],
+          end: [0.26, 0.56, 0],
+        },
+      ];
+    case 'bistro_umbrella_set':
+      return [{ label: 'Umbrella Pole Axis (Y)', start: [0, 0, 0], end: [0, 2.34, 0] }];
+    case 'street_lamp':
+      return [
+        { label: 'Lamp Column Axis (Y)', start: [0, 0, 0], end: [0, 3.15, 0] },
+        {
+          label: 'Lantern Cage Axis (Y)',
+          start: [0, 2.55, 0.48],
+          end: [0, 3.35, 0.48],
+        },
+      ];
+    case 'fountain_water_hazard':
+      return [{ label: 'Pedestal Symmetry (Y)', start: [0, 0, 0], end: [0, 1.44, 0] }];
+    default:
+      return [];
+  }
+}
+
+function getBoundsForProp(prop: CoursePropSpec): {
+  min: [number, number, number];
+  max: [number, number, number];
+} {
+  if (prop.type === 'overhanging_street_tree') {
+    return {
+      min: [-4.4, 0, -1.45],
+      max: [1.45, 5.45, 2.6],
+    };
+  }
+  const hx = prop.localSize[0] * 0.5;
+  const hz = prop.localSize[2] * 0.5;
+  return {
+    min: [-hx, 0, -hz],
+    max: [hx, prop.localSize[1], hz],
+  };
+}
+
+export const PROP_QA_REGISTRY: PropQAGalleryEntry[] = [
+  ...COURSE_PROPS.map((prop): PropQAGalleryEntry => {
+    const bounds = getBoundsForProp(prop);
+    return {
+      id: prop.id,
+      title: getTitleForProp(prop),
+      propType: prop.type,
+      category: getCategoryForProp(prop.type),
+      description: `${prop.name} · World: [${prop.position[0].toFixed(2)}, ${prop.position[1].toFixed(2)}, ${prop.position[2].toFixed(2)}]m.`,
+      localSize: [prop.localSize[0], prop.localSize[1], prop.localSize[2]],
+      localBoundsMin: bounds.min,
+      localBoundsMax: bounds.max,
+      coaxialAxles: getCoaxialAxlesForProp(prop),
+      courseProp: prop,
+    };
+  }),
   {
-    id: 'hotdog_cart_umbrella',
-    label: PROP_CATALOG.hotdog_cart_umbrella.label,
-    category: 'reactive',
-    localSize: PROP_CATALOG.hotdog_cart_umbrella.localSize,
-    summary:
-      'Coaxial spoked wheels flush at y=0, 0.34m under-cart Skimmer clearance, bouncy striped umbrella canopy & brass bell.',
-    render: (opts) => (
-      <HotdogCartProp
-        position={[0, 0, 0]}
-        lastHitAt={opts.lastHitAt}
-        showWireframe={opts.showWireframe}
-      />
-    ),
+    id: 'tee-mat-and-bag',
+    title: 'Hole 1 Tee Mat & Stand Bag',
+    propType: 'golf_bag_tee',
+    category: 'street-architecture',
+    description:
+      'Compact brass-trimmed welcome tee pad & tour stand bag grounded flush on asphalt at TEE_POSITION [0, 0, 27.52].',
+    localSize: [2.55, 1.0, 1.08],
+    localBoundsMin: [-1.59, 0, -0.54],
+    localBoundsMax: [0.96, 1.0, 0.54],
+    coaxialAxles: [],
   },
   {
-    id: 'fire_hydrant_jet',
-    label: PROP_CATALOG.fire_hydrant_jet.label,
-    category: 'reactive',
-    localSize: PROP_CATALOG.fire_hydrant_jet.localSize,
-    summary:
-      'Coaxial cast-iron coral hydrant with 5-sided nut, orthogonal nozzle caps, and pulsing +Z water-jet arc.',
-    render: (opts) => (
-      <FireHydrantJetProp
-        position={[0, 0, 0]}
-        lastSurfAt={opts.lastHitAt}
-        showWireframe={opts.showWireframe}
-      />
-    ),
+    id: 'curved-gutter-corner',
+    title: 'Curved Storm-Drain Corner Grate',
+    propType: 'curved_gutter_corner',
+    category: 'dynamic-hazard',
+    description:
+      'Banked 90-degree storm gutter & steel catch-basin corner guide seated flush at y = 0.',
+    localSize: [1.45, 0.22, 1.45],
+    localBoundsMin: [-0.725, 0, -0.725],
+    localBoundsMax: [0.725, 0.22, 0.725],
+    coaxialAxles: [],
   },
   {
-    id: 'subway_steam_grate',
-    label: PROP_CATALOG.subway_steam_grate.label,
-    category: 'reactive',
-    localSize: PROP_CATALOG.subway_steam_grate.localSize,
-    summary:
-      'Flush y=0 iron grate frame with amber under-glow, wind-gust ribbons, and rhythmic upward steam column.',
-    render: (opts) => (
-      <SubwaySteamGrateProp
-        position={[0, 0, 0]}
-        forceGust={opts.forceAction}
-        showWireframe={opts.showWireframe}
-      />
-    ),
-  },
-  {
-    id: 'scaffolding_tunnel',
-    label: PROP_CATALOG.scaffolding_tunnel.label,
-    category: 'reactive',
-    localSize: PROP_CATALOG.scaffolding_tunnel.localSize,
-    summary:
-      'Galvanized steel scaffolding with baseplates at y=0, planked bounce deck, and 1.45m high x 1.42m wide underpass.',
-    render: (opts) => (
-      <ScaffoldingTunnelProp
-        position={[0, 0, 0]}
-        showWireframe={opts.showWireframe}
-      />
-    ),
-  },
-  {
-    id: 'delivery_box_van',
-    label: PROP_CATALOG.delivery_box_van.label,
-    category: 'reactive',
-    localSize: PROP_CATALOG.delivery_box_van.localSize,
-    summary:
-      '4 coaxial wheels seated at y=0, cab + cargo box facing +Z, and springy green rooftop bank deck.',
-    render: (opts) => (
-      <DeliveryBoxVanProp
-        position={[0, 0, 0]}
-        lastRoofHitAt={opts.lastHitAt}
-        showWireframe={opts.showWireframe}
-      />
-    ),
-  },
-  {
-    id: 'bistro_umbrella_set',
-    label: PROP_CATALOG.bistro_umbrella_set.label,
-    category: 'reactive',
-    localSize: PROP_CATALOG.bistro_umbrella_set.localSize,
-    summary:
-      'Coaxial bistro umbrella canopy + cafe table + twin chairs with cast-iron bases seated at y=0.',
-    render: (opts) => (
-      <BistroUmbrellaSetProp
-        position={[0, 0, 0]}
-        lastHitAt={opts.lastHitAt}
-        showWireframe={opts.showWireframe}
-      />
-    ),
-  },
-  {
-    id: 'fountain_water_hazard',
-    label: PROP_CATALOG.fountain_water_hazard.label,
-    category: 'hazard',
-    localSize: PROP_CATALOG.fountain_water_hazard.localSize,
-    summary:
-      'Watertight limestone basin flush at y=0, shimmering turquoise water, tiered bowl, brass finial & splash ring.',
-    render: (opts) => (
-      <FountainHazardProp
-        position={[0, 0, 0]}
-        radius={1.52}
-        lastSplashAt={opts.lastHitAt}
-        showWireframe={opts.showWireframe}
-      />
-    ),
-  },
-  {
-    id: 'curved_gutter_corner',
-    label: PROP_CATALOG.curved_gutter_corner.label,
-    category: 'reactive',
-    localSize: PROP_CATALOG.curved_gutter_corner.localSize,
-    summary:
-      '90-degree curved storm-drain catch basin & amber hazard curb banking skimmer shots around corners.',
-    render: (opts) => (
-      <CurvedGutterCornerProp
-        position={[0, 0, 0]}
-        showWireframe={opts.showWireframe}
-      />
-    ),
-  },
-  {
-    id: 'pigeon_flock',
-    label: PROP_CATALOG.pigeon_flock.label,
-    category: 'accent',
-    localSize: PROP_CATALOG.pigeon_flock.localSize,
-    summary:
-      'Low-poly foraging pigeon flock with feet flush at y=0 and smooth anti-loop flight scatter reaction.',
-    render: (opts) => (
-      <PigeonFlockProp
-        position={[0, 0, 0]}
-        forceScatter={opts.forceAction}
-        showWireframe={opts.showWireframe}
-      />
-    ),
-  },
-  {
-    id: 'street_tree',
-    label: PROP_CATALOG.street_tree.label,
-    category: 'accent',
-    localSize: PROP_CATALOG.street_tree.localSize,
-    summary:
-      'Terracotta planter box flush at y=0, cast-iron tree grate, warm wooden trunk & sculpted canopy.',
-    render: (opts) => (
-      <StreetTreeProp
-        position={[0, 0, 0]}
-        showWireframe={opts.showWireframe}
-      />
-    ),
-  },
-  {
-    id: 'brass_bollard',
-    label: PROP_CATALOG.brass_bollard.label,
-    category: 'accent',
-    localSize: PROP_CATALOG.brass_bollard.localSize,
-    summary:
-      'Cast-iron and brushed brass corner safety bollard with reflective collar seated at y=0.',
-    render: (opts) => (
-      <StreetBollardProp
-        position={[0, 0, 0]}
-        showWireframe={opts.showWireframe}
-      />
-    ),
-  },
-  {
-    id: 'street_lamp',
-    label: PROP_CATALOG.street_lamp.label,
-    category: 'accent',
-    localSize: PROP_CATALOG.street_lamp.localSize,
-    summary:
-      'Slender cast-iron city street lamp with warm lantern globe seated flush at y=0.',
-    render: (opts) => (
-      <StreetLampProp
-        position={[0, 0, 0]}
-        showWireframe={opts.showWireframe}
-      />
-    ),
-  },
-  {
-    id: 'golf_bag_tee',
-    label: 'Start Tee Pad & Tour Bag',
-    category: 'accent',
-    localSize: [1.5, 0.92, 1.5],
-    summary:
-      'Turf tee mat with wooden markers, leather tour bag, spare clubs reacting to active club, and fluttering towel.',
-    render: (opts) => (
-      <GolfBagAndTeeProp
-        position={[0, 0, 0]}
-        selectedClub={opts.selectedClub ?? 'driver'}
-        showWireframe={opts.showWireframe}
-      />
-    ),
-  },
-  {
-    id: 'corner_building_accent',
-    label: 'Corner Brownstone Accent (Low-Profile)',
-    category: 'accent',
-    localSize: [2.8, 2.55, 2.8],
-    summary:
-      'Perimeter corner brownstone stoop & terracotta facade accent kept under 2.55m to protect 3/4 diorama sightlines.',
-    render: (opts) => (
-      <CornerBuildingAccentProp
-        position={[0, 0, 0]}
-        showWireframe={opts.showWireframe}
-      />
-    ),
+    id: 'corner-building-accent',
+    title: 'Storefront Accent Vignette',
+    propType: 'corner_building_accent',
+    category: 'street-architecture',
+    description:
+      'Grounded terracotta brownstone storefront bay with sunlit awning, cornice & window flowerboxes.',
+    localSize: [4.4, 5.6, 0.72],
+    localBoundsMin: [-2.2, 0, -0.36],
+    localBoundsMax: [2.2, 5.6, 0.36],
+    coaxialAxles: [],
   },
 ];

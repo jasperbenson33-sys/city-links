@@ -10,11 +10,17 @@ import {
   type PlacedTile,
   type TileRampSpec,
   type Vec3Tuple,
+  type WalkableRampSpec,
 } from '@/types';
 import {
   localToWorldPoint,
   worldToLocalPoint,
 } from '@/engine/geometryHelpers';
+import {
+  COURSE_PROPS,
+  HOLE_1_CUP,
+  STORM_GUTTERS,
+} from '@/config/courseMasterPlan';
 
 export interface RampColliderTransform {
   midPosition: Vec3Tuple;
@@ -474,4 +480,231 @@ export function isPointInPropLocalBox(
  */
 export function getClubRestitution(clubId: ClubId): number {
   return Math.max(0.2, Math.min(0.85, CLUB_SPECS[clubId].restitution));
+}
+
+export interface MasterPlanRampTransform {
+  position: Vec3Tuple;
+  rotationEuler: Vec3Tuple;
+  halfExtents: Vec3Tuple;
+  friction: number;
+  restitution: number;
+}
+
+/**
+ * Computes a flush Rapier CuboidCollider transform for a WalkableRampSpec so its
+ * top surface meets both bottomY and topY with zero catching lip.
+ */
+export function computeMasterPlanRampTransform(
+  ramp: WalkableRampSpec,
+): MasterPlanRampTransform {
+  const { minX, maxX, minZ, maxZ } = ramp.boundsXZ;
+  const xSpan = Math.max(0.2, maxX - minX);
+  const zSpan = Math.max(0.2, maxZ - minZ);
+  const rise = ramp.topY - ramp.bottomY;
+  const alongX =
+    ramp.climbDirection === 'east' || ramp.climbDirection === 'west';
+  const run = alongX ? xSpan : zSpan;
+  const cross = alongX ? zSpan : xSpan;
+  const slopeLen = Math.hypot(run, rise) + 0.08;
+  const thickness = Math.max(0.24, ramp.slabThickness);
+  const halfT = thickness * 0.5;
+  const theta = Math.atan2(rise, run);
+  const cosT = Math.cos(theta);
+  const sinT = Math.sin(theta);
+
+  const midX = (minX + maxX) * 0.5;
+  const midY = (ramp.bottomY + ramp.topY) * 0.5;
+  const midZ = (minZ + maxZ) * 0.5;
+
+  let centerOffsetX = 0;
+  let centerOffsetZ = 0;
+  let rotationEuler: Vec3Tuple = [0, 0, 0];
+
+  if (ramp.climbDirection === 'east') {
+    centerOffsetX = halfT * sinT;
+    rotationEuler = [0, 0, theta];
+  } else if (ramp.climbDirection === 'west') {
+    centerOffsetX = -halfT * sinT;
+    rotationEuler = [0, 0, -theta];
+  } else if (ramp.climbDirection === 'north') {
+    centerOffsetZ = -halfT * sinT;
+    rotationEuler = [theta, 0, 0];
+  } else {
+    centerOffsetZ = halfT * sinT;
+    rotationEuler = [-theta, 0, 0];
+  }
+
+  return {
+    position: [
+      midX + centerOffsetX,
+      midY - halfT * cosT,
+      midZ + centerOffsetZ,
+    ],
+    rotationEuler,
+    halfExtents: alongX
+      ? [slopeLen * 0.5, halfT, cross * 0.5]
+      : [cross * 0.5, halfT, slopeLen * 0.5],
+    friction: ramp.friction,
+    restitution: ramp.restitution,
+  };
+}
+
+export interface MasterPlanGutterEval {
+  inGutter: boolean;
+  inCornerBoostZone: boolean;
+  isCurvedCorner?: boolean;
+  tangentXZ: [number, number];
+  pullVelocityXZ: [number, number];
+  boostVelocity: Vec3Tuple | null;
+}
+
+/**
+ * Evaluates ball position relative to COURSE_MASTER_PLAN storm gutters and the
+ * SE hydrant-fed corner water boost corridor.
+ */
+export function evaluateMasterPlanGutterAtPoint(
+  wx: number,
+  wy: number,
+  wz: number,
+  vx: number,
+  vz: number,
+): MasterPlanGutterEval {
+  const noHit: MasterPlanGutterEval = {
+    inGutter: false,
+    inCornerBoostZone: false,
+    tangentXZ: [0, 0],
+    pullVelocityXZ: [0, 0],
+    boostVelocity: null,
+  };
+  if (wy > ELEVATIONS.SIDEWALK_Y + BALL_RADIUS + 0.25) return noHit;
+
+  const speed = Math.hypot(vx, vz);
+  const hydrant = COURSE_PROPS.find((p) => p.id === 'hydrant-corner-se');
+  const cornerGutter = STORM_GUTTERS.find((g) => g.kind === 'corner_90');
+
+  if (cornerGutter?.arcPivot && cornerGutter.arcRadius !== undefined) {
+    const px = cornerGutter.arcPivot[0];
+    const pz = cornerGutter.arcPivot[2];
+    const r = cornerGutter.arcRadius;
+    const dx = wx - px;
+    const dz = wz - pz;
+    const dist = Math.hypot(dx, dz);
+
+    // Corner 90-degree curve: theta in [PI, 1.5*PI] -> West (-X) to North (-Z) relative to pivot, tangent North -> East (+X).
+    // Only capture balls actually moving forward along the corner tangent (never pull backward/south-aimed shots).
+    if (dist >= r - 0.55 && dist <= r + 0.65 && wx <= px + 0.45 && wz <= pz + 0.45) {
+      let theta = Math.atan2(dz, dx);
+      if (theta < 0) theta += Math.PI * 2;
+      if (theta >= Math.PI - 0.25 && theta <= Math.PI * 1.5 + 0.28) {
+        const tx = -Math.sin(theta);
+        const tz = Math.cos(theta);
+        const forwardTangentSpeed = vx * tx + vz * tz;
+        if (forwardTangentSpeed > 1.5) {
+          const radialErr = r - dist;
+          const rx = dist > 1e-4 ? dx / dist : 0;
+          const rz = dist > 1e-4 ? dz / dist : 0;
+          // Preserve entry speed ordering around the 90° arc with a gentle hydrant stream nudge
+          const targetSpeed = Math.min(18.5, forwardTangentSpeed + 0.45);
+          const pullScale = 12.0;
+          return {
+            inGutter: true,
+            inCornerBoostZone: true,
+            isCurvedCorner: true,
+            tangentXZ: [tx, tz],
+            pullVelocityXZ: [
+              tx * targetSpeed + rx * radialErr * pullScale,
+              tz * targetSpeed + rz * radialErr * pullScale,
+            ],
+            boostVelocity: hydrant?.hydrantBoostMeta?.gutterExitBoostVector ?? [11.8, 0, 0],
+          };
+        }
+      }
+    }
+  }
+
+  // Only guide & boost the hydrant-fed SE corner corridor when inside the actual recessed gutter trough
+  // and already traveling forward along the stream direction.
+  for (const gutter of STORM_GUTTERS) {
+    if (gutter.kind !== 'straight' || !gutter.start || !gutter.end) continue;
+    const isEastCornerEntry = gutter.id === 'gutter-east-5th-straight';
+    const isMercerSouth = gutter.id === 'gutter-mercer-south-straight';
+    if (!isEastCornerEntry && !isMercerSouth) continue;
+
+    if (isEastCornerEntry) {
+      if (wz > -10.5 || wz < -15.8 || Math.abs(wx - 3.775) > 0.45) {
+        continue;
+      }
+      if (vz >= -1.5 || Math.abs(vx) >= Math.abs(vz) * 0.85) {
+        continue;
+      }
+      const pullX = (3.775 - wx) * 5.0;
+      const forwardBoostSpeed = Math.min(18.5, Math.abs(vz) + 0.65);
+      return {
+        inGutter: true,
+        inCornerBoostZone: wz <= -13.5,
+        tangentXZ: [0, -1],
+        pullVelocityXZ: [pullX, -forwardBoostSpeed],
+        boostVelocity: hydrant?.hydrantBoostMeta?.gutterExitBoostVector ?? [11.8, 0, 0],
+      };
+    }
+
+    if (isMercerSouth) {
+      // Strictly inside the Mercer South recessed gutter band (z in [-18.75, -18.05], x in [5.8, 14.6])
+      if (wx < 5.8 || wx > 14.6 || wz < -18.75 || wz > -18.05) {
+        continue;
+      }
+      // Require forward (+X East) velocity along the stream; never hijack south- or west-aimed shots
+      if (vx <= 1.8 || Math.abs(vz) >= vx * 0.85) {
+        continue;
+      }
+      const targetZ = -18.38;
+      const pullZ = (targetZ - wz) * 4.5;
+      // Gentle hydrant stream push ONLY below 8.4 m/s so corner banks crest the courtyard ramp cleanly without
+      // accelerating faster shots toward the back courtyard wall
+      const streamPush = vx < 8.4 ? 1.06 : 0.0;
+      const additiveTargetVx = Math.max(2.0, vx + streamPush);
+      return {
+        inGutter: true,
+        inCornerBoostZone: true,
+        tangentXZ: [1, 0],
+        pullVelocityXZ: [additiveTargetVx, pullZ],
+        boostVelocity: hydrant?.hydrantBoostMeta?.gutterExitBoostVector ?? [11.8, 0, 0],
+      };
+    }
+  }
+
+  return noHit;
+}
+
+export function computeDistanceToPinMeters(pos: Vec3Tuple): number {
+  return Math.hypot(
+    HOLE_1_CUP.position[0] - pos[0],
+    HOLE_1_CUP.position[2] - pos[2],
+  );
+}
+
+export function isPointInSteamBay(wx: number, wy: number, wz: number): boolean {
+  const grate = COURSE_PROPS.find((p) => p.id === 'steam-grate-corner');
+  const b = grate?.steamLiftMeta?.utilityBayBoundsXZ;
+  if (!b) return false;
+  return (
+    wx >= b.minX - 0.12 &&
+    wx <= b.maxX + 0.12 &&
+    wz >= b.minZ - 0.12 &&
+    wz <= b.maxZ + 0.12 &&
+    wy >= -0.05 &&
+    wy <= 1.25
+  );
+}
+
+export function isPointInFountainBasin(wx: number, wy: number, wz: number): boolean {
+  const fountain = COURSE_PROPS.find((p) => p.id === 'fountain-courtyard-front');
+  const reactive = fountain?.reactive;
+  if (!reactive) return false;
+  const distXZ = Math.hypot(
+    wx - reactive.zoneCenter[0],
+    wz - reactive.zoneCenter[2],
+  );
+  const r = (reactive.zoneRadius ?? 1.15) - 0.05;
+  return distXZ <= r && wy <= reactive.zoneCenter[1] + 0.45 && wy >= 0.35;
 }

@@ -1,13 +1,67 @@
 'use client';
 
 import React, { useMemo } from 'react';
+import * as THREE from 'three';
 import { TOYBOX_MATERIALS } from '@/materials';
-import { createArcBandExtrusion } from '../tiles/tileGeometry';
 
 export interface CurvedGutterCornerPropProps {
   position?: [number, number, number];
   rotationY?: number;
   showWireframe?: boolean;
+}
+
+/**
+ * Generates an extruded circular arc band in local XZ spanning [bottomY, topY]
+ * around (pivotX, pivotZ), cleanly self-contained with zero legacy tile imports.
+ */
+function createArcBandExtrusion({
+  pivotX,
+  pivotZ,
+  innerR,
+  outerR,
+  startTheta,
+  endTheta,
+  bottomY,
+  topY,
+  segments = 16,
+}: {
+  pivotX: number;
+  pivotZ: number;
+  innerR: number;
+  outerR: number;
+  startTheta: number;
+  endTheta: number;
+  bottomY: number;
+  topY: number;
+  segments?: number;
+}): THREE.BufferGeometry {
+  const shape = new THREE.Shape();
+  for (let i = 0; i <= segments; i++) {
+    const t = i / segments;
+    const th = THREE.MathUtils.lerp(startTheta, endTheta, t);
+    const x = pivotX + Math.cos(th) * outerR;
+    const y = -(pivotZ + Math.sin(th) * outerR);
+    if (i === 0) shape.moveTo(x, y);
+    else shape.lineTo(x, y);
+  }
+  for (let i = segments; i >= 0; i--) {
+    const t = i / segments;
+    const th = THREE.MathUtils.lerp(startTheta, endTheta, t);
+    const x = pivotX + Math.cos(th) * innerR;
+    const y = -(pivotZ + Math.sin(th) * innerR);
+    shape.lineTo(x, y);
+  }
+  shape.closePath();
+
+  const geo = new THREE.ExtrudeGeometry(shape, {
+    depth: Math.max(0.01, topY - bottomY),
+    bevelEnabled: false,
+    steps: 1,
+  });
+  geo.rotateX(-Math.PI * 0.5);
+  geo.translate(0, bottomY, 0);
+  geo.computeVertexNormals();
+  return geo;
 }
 
 /**
@@ -58,7 +112,11 @@ export function CurvedGutterCornerProp({
       rotation={[0, rotationY, 0]}
     >
       {/* Curved Slotted Drain Grate Bed at y = 0 */}
-      <mesh receiveShadow geometry={arcDrainGeo} material={TOYBOX_MATERIALS.stormDrainSteel} />
+      <mesh
+        receiveShadow
+        geometry={arcDrainGeo}
+        material={TOYBOX_MATERIALS.stormDrainSteel}
+      />
 
       {/* Curved Taxi-Amber Bankable Curb Reflector Wall */}
       <mesh
@@ -78,7 +136,7 @@ export function CurvedGutterCornerProp({
       </mesh>
       {[-0.16, 0, 0.16].map((off, idx) => (
         <mesh
-          key={idx}
+          key={`slat-${idx}`}
           position={[0, 0.026, off]}
           material={TOYBOX_MATERIALS.stormDrainSteel}
         >

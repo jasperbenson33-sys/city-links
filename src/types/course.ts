@@ -148,6 +148,13 @@ export interface CenterlineSegmentSpec {
   lengthMeters: number;
 }
 
+export interface GroundZoneArcClipSpec {
+  pivotXZ: Vec2Tuple;
+  radius: number;
+  keepSide: 'inside' | 'outside';
+  quadrant: 'sw' | 'se' | 'nw' | 'ne';
+}
+
 export interface GroundSurfaceZoneSpec {
   id: string;
   label: string;
@@ -158,6 +165,8 @@ export interface GroundSurfaceZoneSpec {
     minZ: number;
     maxZ: number;
   };
+  /** Optional circular corner arc clip (e.g. SE 5th & Mercer corner apron & road spandrel) */
+  arcClip?: GroundZoneArcClipSpec;
   /** Top resting surface elevation in world Y */
   topY: number;
   /** Slab visual/collider thickness extending downward from topY */
@@ -219,6 +228,8 @@ export interface StoneCurbSegmentSpec {
   bevelAngleDeg?: number;
   arcPivotXZ?: Vec2Tuple;
   arcRadius?: number;
+  arcInnerRadius?: number;
+  arcOuterRadius?: number;
   startAngleRad?: number;
   endAngleRad?: number;
   restitution: number;
@@ -445,6 +456,17 @@ export interface DeliveryVanRampMetadata {
   rampLaunchAngleDeg: number;
   roofDeckTopY: number;
   roofRestitution: number;
+  /** Explicit sloped collider spec for the lowered rear metal ramp (z: -3.40 -> -6.00) */
+  slopedRampSpec?: WalkableRampSpec;
+  /** Internal bakery-chute sloped roof-access kicker (z: -6.00 -> -7.80, y: 1.08 -> 2.24) */
+  roofAccessKickerSpec?: WalkableRampSpec;
+  /** Open-sky roof bounce launch deck bounds (z <= -7.80, clear of overhanging tree canopy) */
+  roofLaunchDeckBoundsXZ?: {
+    minX: number;
+    maxX: number;
+    minZ: number;
+    maxZ: number;
+  };
 }
 
 export interface OverhangingTreeMetadata {
@@ -611,6 +633,16 @@ export interface CourseMasterPlan {
   strategicRoutes: StrategicShotRouteSpec[];
   auditStations: AuditCameraStationSpec[];
   streetScoutCamera: StreetScoutCameraSpec;
+  /** Continuous outer city horizon earth skirt sealing pitched camera rays */
+  outerGroundSkirt?: {
+    boundsXZ: {
+      minX: number;
+      maxX: number;
+      minZ: number;
+      maxZ: number;
+    };
+    topY: number;
+  };
 }
 
 // ============================================================================
