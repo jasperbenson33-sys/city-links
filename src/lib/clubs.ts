@@ -36,7 +36,7 @@ export const CLUB_PROFILES: Record<ClubId, ClubPhysicsProfile> = {
     liftCoeff: 0.14,
     maxLiftFractionOfGravity: 0.42,
     flightDamping: 0.055,
-    rollDamping: 1.66,
+    rollDamping: 1.74,
     restitution: 0.24,
     turfCheckMultiplier: 0.88,
     previewStopSpeed: 0.08,

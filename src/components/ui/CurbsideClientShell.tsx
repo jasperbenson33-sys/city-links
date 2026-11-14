@@ -1,7 +1,9 @@
 'use client';
 
+import { useEffect } from 'react';
 import dynamic from 'next/dynamic';
 import { CurbsideHud } from './CurbsideHud';
+import { syncQaFreezeDocumentFlag } from './useQaFreeze';
 
 const CurbsideGameRoot = dynamic(
   () => import('@/components/game/CurbsideGameRoot'),
@@ -22,6 +24,10 @@ const CurbsideGameRoot = dynamic(
 );
 
 export function CurbsideClientShell() {
+  useEffect(() => {
+    syncQaFreezeDocumentFlag();
+  }, []);
+
   return (
     <CurbsideGameRoot>
       <CurbsideHud />

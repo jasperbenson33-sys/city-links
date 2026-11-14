@@ -1,8 +1,31 @@
 'use client';
 
 import React, { useMemo } from 'react';
+import * as THREE from 'three';
 import { TOYBOX_MATERIALS } from '@/materials';
 import { PROP_ACCENT_MATERIALS } from './propMaterials';
+
+/**
+ * Local cached polygon-offset clones (shared TOYBOX materials are never mutated).
+ * tier 1 => factor/units -1, tier 2 => -2, tier 3 => -3.
+ */
+const LAYERED_CACHE = new WeakMap<THREE.Material, Map<number, THREE.Material>>();
+function layered<T extends THREE.Material>(base: T, tier: 1 | 2 | 3): T {
+  let byTier = LAYERED_CACHE.get(base);
+  if (!byTier) {
+    byTier = new Map();
+    LAYERED_CACHE.set(base, byTier);
+  }
+  let m = byTier.get(tier);
+  if (!m) {
+    m = base.clone();
+    m.polygonOffset = true;
+    m.polygonOffsetFactor = -tier;
+    m.polygonOffsetUnits = -tier;
+    byTier.set(tier, m);
+  }
+  return m as T;
+}
 
 export interface ScaffoldingTunnelPropProps {
   position?: [number, number, number];
@@ -70,6 +93,7 @@ export function ScaffoldingTunnelProp({
       name="scaffolding-tunnel-prop"
       position={position}
       rotation={[0, rotationY, 0]}
+      userData={{ occludableProp: true }}
     >
       {/* Steel Baseplates & Vertical Stanchions Flush at y = 0 */}
       {zLines.map((pz, zIdx) =>
@@ -77,7 +101,6 @@ export function ScaffoldingTunnelProp({
           <group key={`post-${zIdx}-${xIdx}`} position={[px, 0, pz]}>
             {/* Flush Steel Baseplate (bottom exact y = 0) */}
             <mesh
-              castShadow
               receiveShadow
               position={[0, 0.015, 0]}
               material={TOYBOX_MATERIALS.darkIron}
@@ -87,18 +110,18 @@ export function ScaffoldingTunnelProp({
             {/* Vertical Galvanized Steel Standard */}
             <mesh
               castShadow
-              position={[0, 0.03 + (topRailY - 0.03) * 0.5, 0]}
+              position={[0, 0.02 + (topRailY - 0.02) * 0.5, 0]}
               material={TOYBOX_MATERIALS.scaffoldingSteel}
             >
-              <cylinderGeometry args={[0.045, 0.048, topRailY - 0.03, 8]} />
+              <cylinderGeometry args={[0.045, 0.048, topRailY - 0.02, 8]} />
             </mesh>
             {/* High-Visibility Pedestrian Safety Collar Sleeve on Curb-Side Posts */}
             {xIdx === 1 && (
               <mesh
                 position={[0, 0.95, 0]}
-                material={TOYBOX_MATERIALS.scaffoldingSafetyAmber}
+                material={layered(TOYBOX_MATERIALS.scaffoldingSafetyAmber, 1)}
               >
-                <cylinderGeometry args={[0.058, 0.058, 0.45, 8]} />
+                <cylinderGeometry args={[0.066, 0.066, 0.45, 8]} />
               </mesh>
             )}
             {/* Wall Tie Rubber Pads Kissing West Brownstone Facade at Exact x = -halfW */}
@@ -154,14 +177,12 @@ export function ScaffoldingTunnelProp({
           position={[outerPostX, 0.55 + braceH * 0.5, bz]}
         >
           <mesh
-            castShadow
             rotation={[Math.PI * 0.5 - braceAngle, 0, 0]}
             material={TOYBOX_MATERIALS.scaffoldingSteel}
           >
             <cylinderGeometry args={[0.022, 0.022, braceDiagLen, 6]} />
           </mesh>
           <mesh
-            castShadow
             rotation={[-(Math.PI * 0.5 - braceAngle), 0, 0]}
             material={TOYBOX_MATERIALS.scaffoldingSteel}
           >
@@ -199,9 +220,8 @@ export function ScaffoldingTunnelProp({
       {[innerPostX + 0.03, outerPostX - 0.03].map((tx, idx) => (
         <mesh
           key={`toe-side-${idx}`}
-          castShadow
-          position={[tx, deckTopY + 0.075, 0]}
-          material={TOYBOX_MATERIALS.scaffoldingSafetyAmber}
+          position={[tx, deckTopY + 0.07, 0]}
+          material={layered(TOYBOX_MATERIALS.scaffoldingSafetyAmber, 1)}
         >
           <boxGeometry args={[0.04, 0.15, depth - 0.1]} />
         </mesh>
@@ -209,9 +229,8 @@ export function ScaffoldingTunnelProp({
       {[-depth * 0.5 + 0.08, depth * 0.5 - 0.08].map((tz, idx) => (
         <mesh
           key={`toe-end-${idx}`}
-          castShadow
-          position={[0, deckTopY + 0.075, tz]}
-          material={TOYBOX_MATERIALS.scaffoldingSafetyAmber}
+          position={[0, deckTopY + 0.07, tz]}
+          material={layered(TOYBOX_MATERIALS.scaffoldingSafetyAmber, 1)}
         >
           <boxGeometry args={[width - 0.24, 0.15, 0.04]} />
         </mesh>
@@ -272,8 +291,8 @@ export function ScaffoldingTunnelProp({
           <cylinderGeometry args={[0.17, 0.13, 0.3, 12]} />
         </mesh>
         <mesh
-          position={[0, 0.27, 0]}
-          material={PROP_ACCENT_MATERIALS.mortarCement}
+          position={[0, 0.295, 0]}
+          material={layered(PROP_ACCENT_MATERIALS.mortarCement, 1)}
         >
           <cylinderGeometry args={[0.15, 0.15, 0.04, 12]} />
         </mesh>
@@ -287,7 +306,7 @@ export function ScaffoldingTunnelProp({
             <boxGeometry args={[0.14, 0.12, 0.14]} />
           </mesh>
           <mesh
-            position={[0, 0.17, 0]}
+            position={[0, 0.165, 0]}
             material={TOYBOX_MATERIALS.taxiAmber}
           >
             <cylinderGeometry args={[0.06, 0.06, 0.1, 10]} />

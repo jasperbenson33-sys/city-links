@@ -14,11 +14,17 @@ export type CurbsideSoundId =
 
 export interface PlaySoundOptions {
   intensity?: number;
+  /** Physical collision speed in m/s for velocity-scaled gain & filter brightness */
+  impactSpeed?: number;
+  /** Optional per-surface cooldown key (e.g. 'curb:se', 'awning:hotdog') */
+  surfaceKey?: string;
   /** 0-based sunk flag order (0..4) for ascending chimes */
   flagIndex?: number;
   /** Optional shot power (0..1) for club strike scaling */
   power?: number;
 }
+
+export type SoundArg = number | PlaySoundOptions;
 
 type WebkitWindow = Window & {
   webkitAudioContext?: typeof AudioContext;
@@ -32,18 +38,139 @@ let isUnlocked = false;
 let unlockListenersAttached = false;
 let mutedState = false;
 
-// Throttle rapid repetitive triggers so drags and curb/gutter rolls stay musical
-let lastSwingTickMs = 0;
-let lastCurbClackMs = 0;
-let lastGutterBankMs = 0;
-let lastAwningMs = 0;
-let lastSteamMs = 0;
-let lastPigeonMs = 0;
-let lastCupDropMs = 0;
+// Minimum 45ms per-surface / per-voice cooldown to prevent multi-bounce clipping or spam
+const MIN_VOICE_COOLDOWN_MS = 45;
+const MAX_CONCURRENT_VOICES = 14;
+const lastPlayedAtByKey = new Map<string, number>();
 let lastHapticMs = 0;
+
+interface ActiveVoiceEntry {
+  id: number;
+  stopTime: number;
+  steal: () => void;
+}
+
+const activeVoices: ActiveVoiceEntry[] = [];
+let nextVoiceId = 1;
+
+function removeActiveVoice(id: number): void {
+  const idx = activeVoices.findIndex((v) => v.id === id);
+  if (idx !== -1) {
+    activeVoices.splice(idx, 1);
+  }
+}
+
+function registerActiveVoice(
+  ctx: AudioContext,
+  stopTime: number,
+  sourceNode: AudioScheduledSourceNode,
+  cleanup: () => void,
+): () => void {
+  const now = ctx.currentTime;
+  for (let i = activeVoices.length - 1; i >= 0; i -= 1) {
+    if (activeVoices[i].stopTime <= now) {
+      activeVoices.splice(i, 1);
+    }
+  }
+
+  while (activeVoices.length >= MAX_CONCURRENT_VOICES) {
+    const oldest = activeVoices.shift();
+    if (oldest) {
+      oldest.steal();
+    }
+  }
+
+  const id = nextVoiceId++;
+  let cleaned = false;
+  const finish = () => {
+    if (cleaned) return;
+    cleaned = true;
+    removeActiveVoice(id);
+    cleanup();
+  };
+
+  activeVoices.push({
+    id,
+    stopTime,
+    steal: () => {
+      try {
+        sourceNode.stop();
+      } catch {
+        // Ignore already-stopped nodes
+      }
+      finish();
+    },
+  });
+
+  return finish;
+}
 
 function clamp(val: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, val));
+}
+
+function canTriggerVoice(key: string, cooldownMs = MIN_VOICE_COOLDOWN_MS): boolean {
+  const effectiveCooldown = Math.max(MIN_VOICE_COOLDOWN_MS, cooldownMs);
+  const nowMs =
+    typeof performance !== 'undefined' ? performance.now() : Date.now();
+  const prevMs = lastPlayedAtByKey.get(key);
+  if (prevMs !== undefined && nowMs - prevMs < effectiveCooldown) {
+    return false;
+  }
+  lastPlayedAtByKey.set(key, nowMs);
+  return true;
+}
+
+function resolveVelocityParams(
+  intensityOrOpts: SoundArg | undefined,
+  impactSpeedArg: number | undefined,
+  defaultIntensity: number,
+  referenceSpeedMps: number,
+  minIntensity = 0.14,
+  maxIntensity = 1.2,
+): { intensity: number; brightness: number; surfaceKey?: string } {
+  let baseIntensity = defaultIntensity;
+  let impactSpeed = impactSpeedArg;
+  let surfaceKey: string | undefined;
+
+  if (typeof intensityOrOpts === 'number' && Number.isFinite(intensityOrOpts)) {
+    baseIntensity = intensityOrOpts;
+  } else if (typeof intensityOrOpts === 'object' && intensityOrOpts !== null) {
+    if (
+      typeof intensityOrOpts.intensity === 'number' &&
+      Number.isFinite(intensityOrOpts.intensity)
+    ) {
+      baseIntensity = intensityOrOpts.intensity;
+    }
+    if (
+      typeof intensityOrOpts.impactSpeed === 'number' &&
+      Number.isFinite(intensityOrOpts.impactSpeed)
+    ) {
+      impactSpeed = intensityOrOpts.impactSpeed;
+    }
+    if (typeof intensityOrOpts.surfaceKey === 'string' && intensityOrOpts.surfaceKey) {
+      surfaceKey = intensityOrOpts.surfaceKey;
+    }
+  }
+
+  if (typeof impactSpeed === 'number' && Number.isFinite(impactSpeed)) {
+    const speedNorm = clamp(Math.abs(impactSpeed) / referenceSpeedMps, 0.08, 1.35);
+    const hasExplicitIntensity =
+      typeof intensityOrOpts === 'number' ||
+      (typeof intensityOrOpts === 'object' &&
+        intensityOrOpts !== null &&
+        typeof intensityOrOpts.intensity === 'number');
+    const speedIntensity = clamp(0.18 + speedNorm * 0.88, minIntensity, maxIntensity);
+    const effectiveIntensity = hasExplicitIntensity
+      ? clamp(baseIntensity * (0.45 + 0.55 * speedNorm), minIntensity, maxIntensity)
+      : speedIntensity;
+    const brightness = clamp(0.52 + speedNorm * 0.72, 0.5, 1.4);
+    return { intensity: effectiveIntensity, brightness, surfaceKey };
+  }
+
+  const effectiveIntensity = clamp(baseIntensity, minIntensity, maxIntensity);
+  const brightness = clamp(0.62 + effectiveIntensity * 0.45, 0.55, 1.3);
+  return { intensity: effectiveIntensity, brightness, surfaceKey };
 }
 
 function getAudioContextConstructor(): typeof AudioContext | null {
@@ -159,7 +286,19 @@ export function unlockAudioEngine(): void {
  * and auto-suspend whenever the tab/app is backgrounded (`document.hidden`).
  */
 export function initSoundEngine(): () => void {
-  if (typeof window === 'undefined' || unlockListenersAttached) {
+  if (typeof window === 'undefined') {
+    return () => {};
+  }
+
+  // Pre-allocate AudioContext, compressor/gain graph, and 1.6s pink-noise buffer at mount
+  // so the first shot incurs 0ms synchronous audio-graph init stall.
+  try {
+    ensureAudioGraph();
+  } catch {
+    // Ignore in restricted environments
+  }
+
+  if (unlockListenersAttached) {
     return () => {};
   }
 
@@ -287,17 +426,17 @@ function scheduleTone(
     filter.frequency.setValueAtTime(lowpassHz, startTime);
     osc.connect(filter);
     filter.connect(gain);
-    osc.onended = () => {
+    osc.onended = registerActiveVoice(ctx, startTime + duration + 0.015, osc, () => {
       osc.disconnect();
       filter.disconnect();
       gain.disconnect();
-    };
+    });
   } else {
     osc.connect(gain);
-    osc.onended = () => {
+    osc.onended = registerActiveVoice(ctx, startTime + duration + 0.015, osc, () => {
       osc.disconnect();
       gain.disconnect();
-    };
+    });
   }
 
   gain.connect(dest);
@@ -370,11 +509,11 @@ function scheduleFilteredNoise(
   filter.connect(gain);
   gain.connect(dest);
 
-  src.onended = () => {
+  src.onended = registerActiveVoice(ctx, startTime + duration + 0.02, src, () => {
     src.disconnect();
     filter.disconnect();
     gain.disconnect();
-  };
+  });
 
   src.start(startTime, offset, duration + 0.02);
 }
@@ -624,26 +763,29 @@ function synthCurbBank(
   out: AudioNode,
   t: number,
   intensity: number,
+  brightness = 1.0,
 ): void {
-  // Crisp granite stone curb clack
-  triggerHaptic(7, 32);
+  // Crisp granite stone curb clack — velocity-scaled gain, filter cutoff & micro-haptic
+  if (intensity >= 0.24) {
+    triggerHaptic(Math.round(clamp(4 + intensity * 6, 4, 12)), 45);
+  }
   scheduleTone(ctx, out, {
     type: 'triangle',
     startTime: t,
-    duration: 0.038,
-    startFreq: 560,
-    endFreq: 230,
+    duration: 0.036 + intensity * 0.008,
+    startFreq: 500 + brightness * 90,
+    endFreq: 215 + brightness * 25,
     peakGain: 0.24 * intensity,
     attack: 0.0015,
-    lowpassHz: 2300,
+    lowpassHz: clamp(1350 + brightness * 1150, 950, 3400),
   });
   scheduleTone(ctx, out, {
     type: 'sine',
     startTime: t,
     duration: 0.015,
-    startFreq: 1460,
-    endFreq: 660,
-    peakGain: 0.11 * intensity,
+    startFreq: 1220 + brightness * 310,
+    endFreq: 590 + brightness * 90,
+    peakGain: 0.11 * intensity * clamp(brightness, 0.45, 1.25),
     attack: 0.001,
   });
 }
@@ -654,16 +796,19 @@ function synthAwningCushion(
   noise: AudioBuffer,
   t: number,
   intensity: number,
+  brightness = 1.0,
 ): void {
   // Taut canvas drum thump + soft cushioned whoosh + subtle hotdog vendor brass ding
-  triggerHaptic([14, 32, 10]);
+  if (intensity >= 0.25) {
+    triggerHaptic([Math.round(10 + intensity * 5), 32, Math.round(7 + intensity * 4)], 48);
+  }
   scheduleTone(ctx, out, {
     type: 'sine',
     startTime: t,
     duration: 0.165,
-    startFreq: 175,
-    midFreq: { freq: 245, atOffset: 0.04 },
-    endFreq: 112,
+    startFreq: 165 + brightness * 16,
+    midFreq: { freq: 230 + brightness * 22, atOffset: 0.04 },
+    endFreq: 108,
     peakGain: 0.38 * intensity,
     attack: 0.004,
   });
@@ -671,24 +816,24 @@ function synthAwningCushion(
     type: 'triangle',
     startTime: t,
     duration: 0.11,
-    startFreq: 310,
-    endFreq: 160,
+    startFreq: 290 + brightness * 30,
+    endFreq: 155,
     peakGain: 0.16 * intensity,
     attack: 0.005,
-    lowpassHz: 1100,
+    lowpassHz: clamp(820 + brightness * 420, 680, 1750),
   });
   scheduleFilteredNoise(ctx, out, noise, {
     startTime: t + 0.005,
     duration: 0.19,
     filterType: 'bandpass',
-    startFreq: 480,
-    midFreq: { freq: 920, atOffset: 0.07 },
-    endFreq: 360,
+    startFreq: 420 + brightness * 75,
+    midFreq: { freq: 760 + brightness * 220, atOffset: 0.07 },
+    endFreq: 340,
     q: 1.2,
     peakGain: 0.18 * intensity,
     attack: 0.012,
   });
-  scheduleBrassVendorBell(ctx, out, t + 0.065, 0.34, intensity * 0.72);
+  scheduleBrassVendorBell(ctx, out, t + 0.065, 0.34, intensity * 0.72 * clamp(brightness, 0.65, 1.2));
 }
 
 function synthGutterBoost(
@@ -697,16 +842,17 @@ function synthGutterBoost(
   noise: AudioBuffer,
   t: number,
   intensity: number,
+  brightness = 1.0,
 ): void {
   // Sparkling rushing water chime along the curved storm-drain gutter
-  triggerHaptic([9, 22, 11]);
+  triggerHaptic([8, 22, Math.round(8 + intensity * 4)], 48);
   scheduleFilteredNoise(ctx, out, noise, {
     startTime: t,
     duration: 0.42,
     filterType: 'bandpass',
-    startFreq: 560,
-    midFreq: { freq: 2150, atOffset: 0.15 },
-    endFreq: 1020,
+    startFreq: 520 + brightness * 65,
+    midFreq: { freq: clamp(1650 + brightness * 620, 1200, 2900), atOffset: 0.15 },
+    endFreq: 980,
     q: 2.2,
     peakGain: 0.24 * intensity,
     attack: 0.025,
@@ -720,7 +866,7 @@ function synthGutterBoost(
       duration: 0.18,
       startFreq: hz,
       endFreq: hz * 1.03,
-      peakGain: (0.12 - idx * 0.01) * intensity,
+      peakGain: (0.12 - idx * 0.01) * intensity * clamp(brightness, 0.7, 1.2),
       attack: 0.004,
     });
   });
@@ -732,15 +878,16 @@ function synthSteamPop(
   noise: AudioBuffer,
   t: number,
   intensity: number,
+  brightness = 1.0,
 ): void {
   // Warm pressurized subway steam hiss + buoyant pneumatic pop
-  triggerHaptic([12, 28, 16]);
+  triggerHaptic([11, 28, Math.round(13 + intensity * 4)], 48);
   scheduleTone(ctx, out, {
     type: 'sine',
     startTime: t,
     duration: 0.11,
     startFreq: 145,
-    midFreq: { freq: 420, atOffset: 0.045 },
+    midFreq: { freq: 390 + brightness * 45, atOffset: 0.045 },
     endFreq: 260,
     peakGain: 0.32 * intensity,
     attack: 0.004,
@@ -750,7 +897,7 @@ function synthSteamPop(
     duration: 0.38,
     filterType: 'bandpass',
     startFreq: 420,
-    midFreq: { freq: 1550, atOffset: 0.12 },
+    midFreq: { freq: clamp(1280 + brightness * 360, 950, 2200), atOffset: 0.12 },
     endFreq: 680,
     q: 1.5,
     peakGain: 0.26 * intensity,
@@ -775,16 +922,17 @@ function synthFountainSplash(
   noise: AudioBuffer,
   t: number,
   intensity: number,
+  brightness = 1.0,
 ): void {
   // Water splash + gentle penalty two-tone (cozy descending F4 -> D4 marimba interval)
-  triggerHaptic([14, 36, 12]);
+  triggerHaptic([14, 36, 12], 60);
   scheduleTone(ctx, out, {
     type: 'sine',
     startTime: t,
     duration: 0.11,
     startFreq: 380,
     midFreq: { freq: 175, atOffset: 0.032 },
-    endFreq: 690,
+    endFreq: 640 + brightness * 75,
     peakGain: 0.28 * intensity,
     attack: 0.005,
   });
@@ -792,7 +940,7 @@ function synthFountainSplash(
     startTime: t + 0.025,
     duration: 0.28,
     filterType: 'bandpass',
-    startFreq: 1100,
+    startFreq: clamp(920 + brightness * 240, 720, 1650),
     endFreq: 420,
     q: 1.65,
     peakGain: 0.24 * intensity,
@@ -1011,6 +1159,7 @@ function synthUiClick(
 // ============================================================================
 
 export function playClubStrike(clubId: ClubId, power = 0.75): void {
+  if (!canTriggerVoice(`strike:${clubId}`, MIN_VOICE_COOLDOWN_MS)) return;
   const ready = getReadyGraph();
   if (!ready) return;
   const intensity = clamp(0.35 + power * 0.75, 0.25, 1.15);
@@ -1030,79 +1179,152 @@ export function playClubStrike(clubId: ClubId, power = 0.75): void {
   }
 }
 
-export function playCurbBank(intensity = 0.85): void {
-  const nowMs = performance.now();
-  if (nowMs - lastCurbClackMs < 32) return;
-  lastCurbClackMs = nowMs;
+export function playCurbBank(
+  intensityOrOpts: SoundArg = 0.85,
+  impactSpeed?: number,
+): void {
+  const { intensity, brightness, surfaceKey } = resolveVelocityParams(
+    intensityOrOpts,
+    impactSpeed,
+    0.85,
+    11.0,
+    0.15,
+    1.2,
+  );
+  const voiceKey = surfaceKey ? `curb:${surfaceKey}` : 'curb_bank';
+  if (!canTriggerVoice(voiceKey, 45)) return;
   const ready = getReadyGraph();
   if (!ready) return;
-  synthCurbBank(ready.ctx, ready.out, ready.t, clamp(intensity, 0.15, 1.2));
+  synthCurbBank(ready.ctx, ready.out, ready.t, intensity, brightness);
 }
 
-export function playAwningCushion(intensity = 0.95): void {
-  const nowMs = performance.now();
-  if (nowMs - lastAwningMs < 90) return;
-  lastAwningMs = nowMs;
+export function playAwningCushion(
+  intensityOrOpts: SoundArg = 0.95,
+  impactSpeed?: number,
+): void {
+  const { intensity, brightness, surfaceKey } = resolveVelocityParams(
+    intensityOrOpts,
+    impactSpeed,
+    0.95,
+    12.0,
+    0.2,
+    1.2,
+  );
+  const voiceKey = surfaceKey ? `awning:${surfaceKey}` : 'awning_cushion';
+  if (!canTriggerVoice(voiceKey, 90)) return;
   const ready = getReadyGraph();
   if (!ready) return;
-  synthAwningCushion(ready.ctx, ready.out, ready.noise, ready.t, clamp(intensity, 0.2, 1.2));
+  synthAwningCushion(ready.ctx, ready.out, ready.noise, ready.t, intensity, brightness);
 }
 
-export function playGutterBoost(intensity = 0.9): void {
-  const nowMs = performance.now();
-  if (nowMs - lastGutterBankMs < 130) return;
-  lastGutterBankMs = nowMs;
+export function playGutterBoost(
+  intensityOrOpts: SoundArg = 0.9,
+  impactSpeed?: number,
+): void {
+  const { intensity, brightness, surfaceKey } = resolveVelocityParams(
+    intensityOrOpts,
+    impactSpeed,
+    0.9,
+    12.0,
+    0.2,
+    1.2,
+  );
+  const voiceKey = surfaceKey ? `gutter:${surfaceKey}` : 'gutter_boost';
+  if (!canTriggerVoice(voiceKey, 130)) return;
   const ready = getReadyGraph();
   if (!ready) return;
-  synthGutterBoost(ready.ctx, ready.out, ready.noise, ready.t, clamp(intensity, 0.2, 1.2));
+  synthGutterBoost(ready.ctx, ready.out, ready.noise, ready.t, intensity, brightness);
 }
 
-export function playSteamPop(intensity = 0.95): void {
-  const nowMs = performance.now();
-  if (nowMs - lastSteamMs < 140) return;
-  lastSteamMs = nowMs;
+export function playSteamPop(
+  intensityOrOpts: SoundArg = 0.95,
+  impactSpeed?: number,
+): void {
+  const { intensity, brightness, surfaceKey } = resolveVelocityParams(
+    intensityOrOpts,
+    impactSpeed,
+    0.95,
+    11.0,
+    0.2,
+    1.2,
+  );
+  const voiceKey = surfaceKey ? `steam:${surfaceKey}` : 'steam_pop';
+  if (!canTriggerVoice(voiceKey, 140)) return;
   const ready = getReadyGraph();
   if (!ready) return;
-  synthSteamPop(ready.ctx, ready.out, ready.noise, ready.t, clamp(intensity, 0.2, 1.2));
+  synthSteamPop(ready.ctx, ready.out, ready.noise, ready.t, intensity, brightness);
 }
 
-export function playFountainSplash(intensity = 0.95): void {
+export function playFountainSplash(
+  intensityOrOpts: SoundArg = 0.95,
+  impactSpeed?: number,
+): void {
+  const { intensity, brightness, surfaceKey } = resolveVelocityParams(
+    intensityOrOpts,
+    impactSpeed,
+    0.95,
+    10.0,
+    0.2,
+    1.2,
+  );
+  const voiceKey = surfaceKey ? `fountain:${surfaceKey}` : 'fountain_splash';
+  if (!canTriggerVoice(voiceKey, 120)) return;
   const ready = getReadyGraph();
   if (!ready) return;
-  synthFountainSplash(ready.ctx, ready.out, ready.noise, ready.t, clamp(intensity, 0.2, 1.2));
+  synthFountainSplash(ready.ctx, ready.out, ready.noise, ready.t, intensity, brightness);
 }
 
-export function playPigeonScatter(intensity = 0.85): void {
-  const nowMs = performance.now();
-  if (nowMs - lastPigeonMs < 160) return;
-  lastPigeonMs = nowMs;
+export function playPigeonScatter(
+  intensityOrOpts: SoundArg = 0.85,
+  impactSpeed?: number,
+): void {
+  const { intensity, surfaceKey } = resolveVelocityParams(
+    intensityOrOpts,
+    impactSpeed,
+    0.85,
+    8.0,
+    0.2,
+    1.2,
+  );
+  const voiceKey = surfaceKey ? `pigeon:${surfaceKey}` : 'pigeon_scatter';
+  if (!canTriggerVoice(voiceKey, 160)) return;
   const ready = getReadyGraph();
   if (!ready) return;
-  synthPigeonScatter(ready.ctx, ready.out, ready.noise, ready.t, clamp(intensity, 0.2, 1.2));
+  synthPigeonScatter(ready.ctx, ready.out, ready.noise, ready.t, intensity);
 }
 
-export function playCupDrop(intensity = 1.0): void {
-  const nowMs = performance.now();
-  if (nowMs - lastCupDropMs < 350) return;
-  lastCupDropMs = nowMs;
+export function playCupDrop(
+  intensityOrOpts: SoundArg = 1.0,
+  impactSpeed?: number,
+): void {
+  const { intensity, surfaceKey } = resolveVelocityParams(
+    intensityOrOpts,
+    impactSpeed,
+    1.0,
+    4.0,
+    0.3,
+    1.2,
+  );
+  const voiceKey = surfaceKey ? `cup:${surfaceKey}` : 'cup_drop';
+  if (!canTriggerVoice(voiceKey, 350)) return;
   const ready = getReadyGraph();
   if (!ready) return;
-  synthCupDropAndVictory(ready.ctx, ready.out, ready.t, clamp(intensity, 0.3, 1.2));
+  synthCupDropAndVictory(ready.ctx, ready.out, ready.t, intensity);
 }
 
-export function playUiClick(intensity = 0.8): void {
+export function playUiClick(intensityOrOpts: SoundArg = 0.8): void {
+  const { intensity } = resolveVelocityParams(intensityOrOpts, undefined, 0.8, 1.0, 0.15, 1.2);
+  if (!canTriggerVoice('ui_click', 45)) return;
   const ready = getReadyGraph();
   if (!ready) return;
-  synthUiClick(ready.ctx, ready.out, ready.t, clamp(intensity, 0.15, 1.2));
+  synthUiClick(ready.ctx, ready.out, ready.t, intensity);
 }
 
 export function playSwingTick(power = 0.5): void {
-  const nowMs = performance.now();
-  if (nowMs - lastSwingTickMs < 24) return;
-  lastSwingTickMs = nowMs;
+  if (!canTriggerVoice('swing_tick', 45)) return;
   const ready = getReadyGraph();
   if (!ready) return;
-  triggerHaptic(5, 36);
+  triggerHaptic(5, 45);
   const norm = clamp(power, 0, 1);
   const baseHz = 370 + norm * 340;
   scheduleTone(ready.ctx, ready.out, {
@@ -1126,7 +1348,7 @@ export function playSwingTick(power = 0.5): void {
  */
 export function playToySound(
   sound: CurbsideSoundId,
-  rawIntensityOrOpts: number | PlaySoundOptions = 1.0,
+  rawIntensityOrOpts: SoundArg = 1.0,
 ): void {
   if (!canPlayNow()) return;
 
@@ -1154,29 +1376,32 @@ export function playToySound(
       playClubStrike('putter', opts.power ?? clamp((intensity - 0.25) / 0.75, 0.1, 1));
       break;
     case 'curb_clack':
-      playCurbBank(intensity);
+      playCurbBank(opts);
       break;
     case 'awning_cushion':
     case 'umbrella_boing':
-      playAwningCushion(intensity);
+      playAwningCushion(opts);
       break;
     case 'gutter_bank':
     case 'gutter_boost':
     case 'hydrant_whoosh':
-      playGutterBoost(intensity);
+      playGutterBoost(opts);
       break;
     case 'steam_hiss':
     case 'steam_pop':
-      playSteamPop(intensity);
+      playSteamPop(opts);
       break;
     case 'pigeon_flutter':
-      playPigeonScatter(intensity);
+      playPigeonScatter(opts);
       break;
     case 'water_plop':
     case 'fountain_splash':
-      playFountainSplash(intensity);
+      playFountainSplash(opts);
       break;
     case 'cup_rattle': {
+      if (!canTriggerVoice(opts.surfaceKey ? `cup_rattle:${opts.surfaceKey}` : 'cup_rattle', 45)) {
+        break;
+      }
       const ready = getReadyGraph();
       if (ready) synthCupRattleOnly(ready.ctx, ready.out, ready.t, intensity);
       break;
@@ -1184,12 +1409,12 @@ export function playToySound(
     case 'cup_drop':
     case 'flag_chime':
     case 'round_fanfare':
-      playCupDrop(intensity);
+      playCupDrop(opts);
       break;
     case 'club_switch':
     case 'ui_tap':
     case 'ui_click':
-      playUiClick(intensity);
+      playUiClick(opts);
       break;
     default: {
       const _exhaustive: never = sound;

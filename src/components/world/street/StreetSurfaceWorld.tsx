@@ -1,8 +1,7 @@
 'use client';
 
-import React, { useEffect, useMemo, useRef } from 'react';
+import React, { useEffect, useMemo } from 'react';
 import * as THREE from 'three';
-import { useFrame } from '@react-three/fiber';
 import {
   A_POSITION_CROSSWALK,
   GROUND_ZONES,
@@ -31,9 +30,66 @@ import {
   buildRadialArcSlabGeometry,
   buildRadialWaterRibbonGeometry,
   buildRectSlabGeometry,
+  buildRectSlabWithPolygonHolesGeometry,
+  buildRectSlabWithRectHoleGeometry,
   buildSeRoadSpandrelGeometry,
   buildSolidRampGeometry,
 } from './streetGeometry';
+
+/**
+ * Anti-shimmer layering contract (visual-only; physics heights in config are untouched):
+ *  - every decal-like layer sits >= 0.015m above its base (tier 1 = +0.015, tier 2 = +0.030)
+ *  - decal materials are LOCAL clones carrying polygonOffset (tier 1: -1/-1, tier 2: -2/-2),
+ *    so the shared '@/materials' set is never mutated.
+ */
+const DECAL_LIFT = 0.015;
+const DECAL_LIFT_T2 = 0.03;
+
+const decalMaterialCache = new Map<string, THREE.MeshStandardMaterial>();
+
+function decalMat(
+  src: THREE.MeshStandardMaterial,
+  tier: 1 | 2 = 1,
+  tint?: string,
+): THREE.MeshStandardMaterial {
+  const key = `${src.uuid}|${tier}|${tint ?? ''}`;
+  let m = decalMaterialCache.get(key);
+  if (!m) {
+    m = src.clone();
+    m.polygonOffset = true;
+    m.polygonOffsetFactor = -tier;
+    m.polygonOffsetUnits = -tier;
+    if (tint) m.color.set(tint);
+    decalMaterialCache.set(key, m);
+  }
+  return m;
+}
+
+/** Lazily-built local decal material set (module-level cache; built on first render). */
+function getDecalMaterials() {
+  const V = VENICE_MATERIALS;
+  return {
+    laneLine: decalMat(V.laneLineCream, 1),
+    crosswalk: decalMat(V.crosswalkWhite, 1),
+    amber: decalMat(V.loadingZoneAmber, 1),
+    amberT2: decalMat(V.loadingZoneAmber, 2),
+    rampCourseStone: decalMat(V.graniteCurbBevelTop, 1),
+    rampCourseAccent: decalMat(V.courtyardRampCourseAccent, 1),
+    curbCap: decalMat(V.graniteCurbBevelTop, 1),
+    curbJoint: decalMat(V.graniteCurbJoint, 2),
+    waterSheen: decalMat(V.gutterWetWaterSheen, 1),
+    // Warm-palette grate set (replaces razor dark iron / slate contrast)
+    grateFrame: decalMat(V.wroughtIron, 1, '#4A4247'),
+    grateBasin: decalMat(V.asphaltRoadEdgeBase, 1, '#2F2B31'),
+    grateBar: decalMat(V.gutterConcreteLip, 2, '#8C8479'),
+  };
+}
+
+let decalMaterialSet: ReturnType<typeof getDecalMaterials> | null = null;
+function decals() {
+  if (!decalMaterialSet) decalMaterialSet = getDecalMaterials();
+  return decalMaterialSet;
+}
 
 export interface StreetSurfaceWorldProps {
   zones?: GroundSurfaceZoneSpec[];
@@ -45,10 +101,102 @@ export interface StreetSurfaceWorldProps {
   vanLoadingZone?: VanLoadingZoneSpec;
   cup?: HoleCupSpec;
   isHoleSunk?: boolean;
+  /** When false, caller renders CupFlagAssembly separately so isHoleSunk never re-reconciles static street slabs. */
+  includeCupAssembly?: boolean;
   showWireframe?: boolean;
 }
 
 const SLAB_FOUNDATION_BOTTOM_Y = -0.35;
+/**
+ * Courtyard turf layers (green / fringe / patio / limestone coping) stay FLUSH with the physics
+ * surface (zone topY, coping +2mm). Instead of lifting them, the terrace slab underneath is
+ * carved open under their footprints so no two horizontal faces ever overlap in plan.
+ */
+const COPING_RISE = 0.002;
+const BORDER_W = 0.22;
+/** South coping bar is 2cm narrower so it butts the south patio slab (which starts at fringe.maxZ + 0.2). */
+const BORDER_SOUTH_W = 0.2;
+
+type XZ = readonly [number, number];
+type RectXZ = { minX: number; maxX: number; minZ: number; maxZ: number };
+
+function rectPoly(r: RectXZ): XZ[] {
+  return [
+    [r.minX, r.minZ],
+    [r.maxX, r.minZ],
+    [r.maxX, r.maxZ],
+    [r.minX, r.maxZ],
+  ];
+}
+
+/** Hole polygons (world x,z) to carve out of the courtyard terrace slab. */
+function computeTerraceHoles(
+  zones: GroundSurfaceZoneSpec[],
+  terrace: RectXZ,
+): XZ[][] {
+  const inside = (r: RectXZ) =>
+    r.minX > terrace.minX &&
+    r.maxX < terrace.maxX &&
+    r.minZ > terrace.minZ &&
+    r.maxZ < terrace.maxZ;
+  const fringe = zones.find((z) => z.surfaceTag === 'green_fringe_collar');
+  const patios = zones
+    .filter((z) => z.surfaceTag === 'patio_rough')
+    .map((z) => z.boundsXZ)
+    .filter(inside);
+  const holes: XZ[][] = [];
+
+  if (fringe) {
+    const f = fringe.boundsXZ;
+    const A: RectXZ = {
+      minX: f.minX - BORDER_W,
+      maxX: f.maxX + BORDER_W,
+      minZ: f.minZ - BORDER_W,
+      maxZ: f.maxZ + BORDER_SOUTH_W,
+    };
+    if (inside(A)) {
+      // A patio abutting the coping's south edge merges with it into one L-shaped window.
+      const idx = patios.findIndex(
+        (P) =>
+          Math.abs(P.minZ - A.maxZ) < 1e-4 &&
+          P.minX >= A.minX &&
+          P.maxX >= A.maxX &&
+          P.minX < A.maxX,
+      );
+      if (idx >= 0) {
+        const P = patios.splice(idx, 1)[0];
+        holes.push([
+          [A.minX, A.minZ],
+          [A.maxX, A.minZ],
+          [A.maxX, A.maxZ],
+          [P.maxX, A.maxZ],
+          [P.maxX, P.maxZ],
+          [P.minX, P.maxZ],
+          [P.minX, A.maxZ],
+          [A.minX, A.maxZ],
+        ]);
+      } else {
+        holes.push(rectPoly(A));
+      }
+    }
+  }
+  for (const P of patios) holes.push(rectPoly(P));
+  return holes;
+}
+/**
+ * Curbs sit ON the sidewalk slabs (same 0.15 top, same outer wall plane). To kill the coplanar
+ * top/side faces the granite body is widened 1.2cm per side and lifted 1.5cm (visual only,
+ * <= 0.02m); the bevel cap rides +0.4cm above that.
+ */
+const CURB_TOP_Y = 0.15;
+const CURB_FACE_INSET = 0.012;
+const CURB_BODY_LIFT = DECAL_LIFT;
+const CURB_CAP_RISE = 0.004;
+/**
+ * Water sheen: 8mm-thick film whose TOP sits 1.5cm above the gutter floor; box centre/ribbon
+ * elevation = floor + WATER_LIFT.
+ */
+const WATER_LIFT = 0.011;
 
 /**
  * Renders the 5th Ave & Mercer Street road corridor, painted crosswalk & loading stripes,
@@ -67,6 +215,7 @@ export const StreetSurfaceWorld = React.memo(function StreetSurfaceWorld({
   vanLoadingZone = VAN_LOADING_ZONE,
   cup = HOLE_1_CUP,
   isHoleSunk = false,
+  includeCupAssembly = true,
   showWireframe = false,
 }: StreetSurfaceWorldProps) {
   const seCornerGutter = useMemo(
@@ -88,6 +237,7 @@ export const StreetSurfaceWorld = React.memo(function StreetSurfaceWorld({
   const seHalfW = (seCornerGutter?.width ?? 0.45) * 0.5;
   const seInnerR = seCenterR - seHalfW; // 2.20
   const seOuterR = seCenterR + seHalfW; // 2.65
+  const gutterChannelY = seCornerGutter?.channelY ?? -0.02;
   const seStartRad = seCornerGutter?.startAngleRad ?? Math.PI;
   const seEndRad = seCornerGutter?.endAngleRad ?? Math.PI * 1.5;
 
@@ -95,7 +245,9 @@ export const StreetSurfaceWorld = React.memo(function StreetSurfaceWorld({
     () => ({
       x: cup.position[0],
       z: cup.position[2],
-      radius: Math.max(0.28, cup.cupRadius - 0.006),
+      // Wider than the 0.38m white liner (including 20-gon chord sagitta) so turf never hides the liner,
+      // while staying well inside the Lip Flange outer radius (cupRadius + 0.062).
+      radius: Math.max(0.28, cup.cupRadius + 0.018),
     }),
     [cup.position, cup.cupRadius],
   );
@@ -153,48 +305,71 @@ export const StreetSurfaceWorld = React.memo(function StreetSurfaceWorld({
           ),
         );
       } else if (z.surfaceTag === 'putting_green_turf') {
-        map.set(
-          z.id,
-          buildRectSlabGeometry(
-            z.boundsXZ,
-            z.topY - 0.015,
-            z.topY + 0.008,
-            1.6,
-            cupCutout,
-          ),
-        );
-      } else if (z.surfaceTag === 'green_fringe_collar') {
-        map.set(
-          z.id,
-          buildRectSlabGeometry(
-            z.boundsXZ,
-            z.topY - 0.012,
-            z.topY + 0.005,
-            1.6,
-            cupCutout,
-          ),
-        );
-      } else if (z.surfaceTag === 'patio_rough') {
-        map.set(
-          z.id,
-          buildRectSlabGeometry(
-            z.boundsXZ,
-            z.topY - 0.01,
-            z.topY + 0.004,
-            1.8,
-            null,
-          ),
-        );
-      } else if (z.surfaceTag === 'courtyard_paver') {
+        // Flush with physics top; full-depth so the cup bore reads the same as before.
         map.set(
           z.id,
           buildRectSlabGeometry(
             z.boundsXZ,
             SLAB_FOUNDATION_BOTTOM_Y,
             z.topY,
-            2.2,
+            1.6,
             cupCutout,
           ),
+        );
+      } else if (z.surfaceTag === 'green_fringe_collar') {
+        // Fringe is a frame around the putting-green window.
+        const greenBounds = zones.find(
+          (o) => o.surfaceTag === 'putting_green_turf',
+        )?.boundsXZ;
+        map.set(
+          z.id,
+          greenBounds
+            ? buildRectSlabWithRectHoleGeometry(
+                z.boundsXZ,
+                greenBounds,
+                SLAB_FOUNDATION_BOTTOM_Y,
+                z.topY,
+                1.6,
+              )
+            : buildRectSlabGeometry(
+                z.boundsXZ,
+                SLAB_FOUNDATION_BOTTOM_Y,
+                z.topY,
+                1.6,
+                cupCutout,
+              ),
+        );
+      } else if (z.surfaceTag === 'patio_rough') {
+        map.set(
+          z.id,
+          buildRectSlabGeometry(
+            z.boundsXZ,
+            SLAB_FOUNDATION_BOTTOM_Y,
+            z.topY,
+            1.8,
+            null,
+          ),
+        );
+      } else if (z.surfaceTag === 'courtyard_paver') {
+        // Terrace is carved open under fringe + coping + patios (they fill the windows flush).
+        const holes = computeTerraceHoles(zones, z.boundsXZ);
+        map.set(
+          z.id,
+          holes.length > 0
+            ? buildRectSlabWithPolygonHolesGeometry(
+                z.boundsXZ,
+                holes,
+                SLAB_FOUNDATION_BOTTOM_Y,
+                z.topY,
+                2.2,
+              )
+            : buildRectSlabGeometry(
+                z.boundsXZ,
+                SLAB_FOUNDATION_BOTTOM_Y,
+                z.topY,
+                2.2,
+                cupCutout,
+              ),
         );
       } else if (z.surfaceTag === 'road_asphalt') {
         map.set(
@@ -291,7 +466,7 @@ export const StreetSurfaceWorld = React.memo(function StreetSurfaceWorld({
         seOuterR - 0.08,
         seStartRad,
         seEndRad,
-        (seCornerGutter?.channelY ?? -0.02) + 0.005,
+        gutterChannelY + WATER_LIFT,
         24,
       ),
     [
@@ -301,7 +476,7 @@ export const StreetSurfaceWorld = React.memo(function StreetSurfaceWorld({
       seOuterR,
       seStartRad,
       seEndRad,
-      seCornerGutter?.channelY,
+      gutterChannelY,
     ],
   );
 
@@ -310,12 +485,12 @@ export const StreetSurfaceWorld = React.memo(function StreetSurfaceWorld({
       buildRadialArcSlabGeometry(
         sePivotX,
         sePivotZ,
-        seInnerR - 0.25,
-        seInnerR,
+        seInnerR - 0.25 - CURB_FACE_INSET,
+        seInnerR + CURB_FACE_INSET,
         seStartRad,
         seEndRad,
         -0.02,
-        0.15,
+        CURB_TOP_Y + CURB_BODY_LIFT,
         1.5,
         22,
       ),
@@ -331,8 +506,8 @@ export const StreetSurfaceWorld = React.memo(function StreetSurfaceWorld({
         seInnerR - 0.02,
         seStartRad,
         seEndRad,
-        0.15,
-        0.162,
+        CURB_TOP_Y + CURB_BODY_LIFT - 0.005,
+        CURB_TOP_Y + CURB_BODY_LIFT + CURB_CAP_RISE,
         1.5,
         22,
       ),
@@ -359,16 +534,54 @@ export const StreetSurfaceWorld = React.memo(function StreetSurfaceWorld({
     curvedCornerCurbCapGeo,
   ]);
 
-  const waterStreamGroupRef = useRef<THREE.Group>(null);
-  const pulseAccumRef = useRef(0);
-
-  useFrame((_, delta) => {
-    pulseAccumRef.current += delta;
-    if (waterStreamGroupRef.current) {
-      const shimmer = 0.0015 * Math.sin(pulseAccumRef.current * 4.5);
-      waterStreamGroupRef.current.position.y = shimmer;
-    }
-  });
+  // Straight gutters are tiled with zero overlap: where an along-X gutter meets an along-Z
+  // gutter end-to-end (centerlines share an end point) the X gutter extends by half a width
+  // to own the corner square and the Z gutter is trimmed by the same amount.
+  const straightGutterRects = useMemo(() => {
+    const straight = gutters.filter(
+      (g) => g.kind !== 'corner_90' && g.start && g.end,
+    );
+    const near = (a: number[], b: number[]) =>
+      Math.hypot(a[0] - b[0], a[2] - b[2]) < 0.02;
+    return straight.map((g) => {
+      const s = g.start as number[];
+      const e = g.end as number[];
+      const alongX = Math.abs(e[0] - s[0]) >= Math.abs(e[2] - s[2]);
+      const half = g.width * 0.5;
+      const meets = (pt: number[]) =>
+        straight.some((o) => {
+          if (o === g) return false;
+          const os = o.start as number[];
+          const oe = o.end as number[];
+          const oAlongX = Math.abs(oe[0] - os[0]) >= Math.abs(oe[2] - os[2]);
+          return oAlongX !== alongX && (near(pt, os) || near(pt, oe));
+        });
+      // along-axis coordinate range (with end adjustments)
+      const a0 = alongX ? Math.min(s[0], e[0]) : Math.min(s[2], e[2]);
+      const a1 = alongX ? Math.max(s[0], e[0]) : Math.max(s[2], e[2]);
+      const loPt = alongX
+        ? s[0] <= e[0]
+          ? s
+          : e
+        : s[2] <= e[2]
+          ? s
+          : e;
+      const hiPt = loPt === s ? e : s;
+      const sign = alongX ? 1 : -1; // X gutters extend, Z gutters trim
+      const lo = a0 - (meets(loPt) ? sign * half : 0);
+      const hi = a1 + (meets(hiPt) ? sign * half : 0);
+      const cross = alongX ? s[2] : s[0];
+      return {
+        id: g.id,
+        channelY: g.channelY,
+        alongX,
+        lo,
+        hi,
+        cross,
+        width: g.width,
+      };
+    });
+  }, [gutters]);
 
   const puttingGreenZone = useMemo(
     () => zones.find((z) => z.surfaceTag === 'putting_green_turf') ?? null,
@@ -384,7 +597,7 @@ export const StreetSurfaceWorld = React.memo(function StreetSurfaceWorld({
     [zones],
   );
 
-  const cupSurfaceY = (puttingGreenZone?.topY ?? cup.elevationY) + 0.008;
+  const cupSurfaceY = puttingGreenZone?.topY ?? cup.elevationY;
 
   return (
     <group name="street-surface-world">
@@ -419,6 +632,7 @@ export const StreetSurfaceWorld = React.memo(function StreetSurfaceWorld({
               geometry={geo}
               material={mat}
               receiveShadow
+              castShadow={false}
             />
           );
         })}
@@ -442,7 +656,10 @@ export const StreetSurfaceWorld = React.memo(function StreetSurfaceWorld({
 
       {/* 3. Decorative Limestone Coping Border around Putting Green Fringe & Courtyard Terrace Edge */}
       {fringeZone && (
-        <PuttingGreenBorderAndTeeMarker bounds={fringeZone.boundsXZ} />
+        <PuttingGreenBorderAndTeeMarker
+          bounds={fringeZone.boundsXZ}
+          copingBaseY={fringeZone.topY}
+        />
       )}
 
       {/* 4. Recessed Storm Gutters (-0.02m), Hydrant Water Flow Sheen & Drain Grates */}
@@ -456,33 +673,35 @@ export const StreetSurfaceWorld = React.memo(function StreetSurfaceWorld({
                 geometry={curvedGutterGeo}
                 material={VENICE_MATERIALS.gutterConcreteChannel}
                 receiveShadow
+                castShadow={false}
               />
             );
           }
 
-          const sx = g.start?.[0] ?? 0;
-          const sz = g.start?.[2] ?? 0;
-          const ex = g.end?.[0] ?? 0;
-          const ez = g.end?.[2] ?? 0;
-          const dx = ex - sx;
-          const dz = ez - sz;
-          const len = Math.hypot(dx, dz);
-          const cx = (sx + ex) * 0.5;
-          const cz = (sz + ez) * 0.5;
-          const alongX = Math.abs(dx) >= Math.abs(dz);
-          const slabH = g.channelY - SLAB_FOUNDATION_BOTTOM_Y;
+          const rect = straightGutterRects.find((r) => r.id === g.id);
+          if (!rect) return null;
+          const len = rect.hi - rect.lo;
+          const mid = (rect.hi + rect.lo) * 0.5;
+          const slabH = rect.channelY - SLAB_FOUNDATION_BOTTOM_Y;
 
           return (
             <mesh
               key={g.id}
               name={`gutter-${g.id}`}
-              position={[cx, SLAB_FOUNDATION_BOTTOM_Y + slabH * 0.5, cz]}
+              position={
+                rect.alongX
+                  ? [mid, SLAB_FOUNDATION_BOTTOM_Y + slabH * 0.5, rect.cross]
+                  : [rect.cross, SLAB_FOUNDATION_BOTTOM_Y + slabH * 0.5, mid]
+              }
               material={VENICE_MATERIALS.gutterConcreteChannel}
               receiveShadow
+              castShadow={false}
             >
               <boxGeometry
                 args={
-                  alongX ? [len, slabH, g.width] : [g.width, slabH, len]
+                  rect.alongX
+                    ? [len, slabH, rect.width]
+                    : [rect.width, slabH, len]
                 }
               />
             </mesh>
@@ -490,20 +709,23 @@ export const StreetSurfaceWorld = React.memo(function StreetSurfaceWorld({
         })}
 
         {/* Glistening wet water sheen tracing Hydrant -> SE Corner Boost -> Mercer Approach */}
-        <group ref={waterStreamGroupRef} name="hydrant-gutter-water-flow">
+        <group name="hydrant-gutter-water-flow">
           <mesh
-            position={[3.775, -0.014, -14.1]}
-            material={VENICE_MATERIALS.gutterWetWaterSheen}
+            position={[3.775, gutterChannelY + WATER_LIFT, -14.1]}
+            material={decals().waterSheen}
+            castShadow={false}
           >
             <boxGeometry args={[0.28, 0.008, 3.4]} />
           </mesh>
           <mesh
             geometry={curvedWaterRibbonGeo}
-            material={VENICE_MATERIALS.gutterWetWaterSheen}
+            material={decals().waterSheen}
+            castShadow={false}
           />
           <mesh
-            position={[10.35, -0.014, -18.225]}
-            material={VENICE_MATERIALS.gutterWetWaterSheen}
+            position={[10.35, gutterChannelY + WATER_LIFT, -18.225]}
+            material={decals().waterSheen}
+            castShadow={false}
           >
             <boxGeometry args={[8.3, 0.008, 0.28]} />
           </mesh>
@@ -532,8 +754,8 @@ export const StreetSurfaceWorld = React.memo(function StreetSurfaceWorld({
                 />
                 <mesh
                   geometry={curvedCornerCurbCapGeo}
-                  material={VENICE_MATERIALS.graniteCurbBevelTop}
-                  castShadow
+                  material={decals().curbCap}
+                  castShadow={false}
                   receiveShadow
                 />
               </group>
@@ -568,15 +790,17 @@ export const StreetSurfaceWorld = React.memo(function StreetSurfaceWorld({
         })}
       </group>
 
-      {/* 7. Recessed Hole 1 Cup & Flag Assembly */}
-      <CupFlagAssembly
-        position={[cup.position[0], cupSurfaceY, cup.position[2]]}
-        color={cup.flagColor}
-        isSunk={isHoleSunk}
-        cupRadius={cup.cupRadius}
-        cupDepth={cup.cupDepth}
-        poleHeight={cup.pinHeight}
-      />
+      {/* 7. Recessed Hole 1 Cup & Flag Assembly (optional when hosted outside static backdrop) */}
+      {includeCupAssembly && (
+        <CupFlagAssembly
+          position={[cup.position[0], cupSurfaceY, cup.position[2]]}
+          color={cup.flagColor}
+          isSunk={isHoleSunk}
+          cupRadius={cup.cupRadius}
+          cupDepth={cup.cupDepth}
+          poleHeight={cup.pinHeight}
+        />
+      )}
 
       {/* Optional Wireframe Helper */}
       {showWireframe && (
@@ -620,6 +844,27 @@ function CourtyardRampStoneCourses({ ramp }: { ramp: WalkableRampSpec }) {
   const cy = (ramp.bottomY + ramp.topY) * 0.5;
   const cz = (minZ + maxZ) * 0.5;
   const courseCount = 6;
+  const d = decals();
+
+  // All course pieces are mutually non-overlapping in plan (stringers | headers | runner
+  // segments abut edge-to-edge), so they all live on tier 1: top = ramp surface + 0.015.
+  // Box spans local y in [-0.005, +DECAL_LIFT] (centre 0.005, height 0.02).
+  const layerH = DECAL_LIFT + 0.005;
+  const layerY = (DECAL_LIFT - 0.005) * 0.5;
+
+  const courses = Array.from({ length: courseCount }, (_, idx) => {
+    const t = idx / (courseCount - 1) - 0.5;
+    const isEnd = idx === 0 || idx === courseCount - 1;
+    return { idx, lx: t * (slopeLen - 0.24), w: isEnd ? 0.16 : 0.075, isEnd };
+  });
+
+  // Runner bands only occupy the gaps BETWEEN transverse courses (no crossings).
+  const runnerSegments = courses.slice(0, -1).map((c, i) => {
+    const n = courses[i + 1];
+    const from = c.lx + c.w * 0.5;
+    const to = n.lx - n.w * 0.5;
+    return { key: i, mid: (from + to) * 0.5, len: Math.max(0.05, to - from) };
+  });
 
   return (
     <group
@@ -628,58 +873,45 @@ function CourtyardRampStoneCourses({ ramp }: { ramp: WalkableRampSpec }) {
       rotation={[0, 0, tiltZ]}
     >
       {/* Granite Side Coping Stringers */}
-      <mesh
-        position={[0, 0.002, -(spanZ * 0.5 - 0.14)]}
-        material={VENICE_MATERIALS.graniteCurbBevelTop}
-        receiveShadow
-      >
-        <boxGeometry args={[slopeLen - 0.04, 0.004, 0.24]} />
-      </mesh>
-      <mesh
-        position={[0, 0.002, spanZ * 0.5 - 0.14]}
-        material={VENICE_MATERIALS.graniteCurbBevelTop}
-        receiveShadow
-      >
-        <boxGeometry args={[slopeLen - 0.04, 0.004, 0.24]} />
-      </mesh>
-
-      {/* Flush Transverse Stone Step-Course Header Strips */}
-      {Array.from({ length: courseCount }, (_, idx) => {
-        const t = idx / (courseCount - 1) - 0.5;
-        const lx = t * (slopeLen - 0.24);
-        return (
-          <mesh
-            key={`course-${idx}`}
-            position={[lx, 0.0018, 0]}
-            material={
-              idx === 0 || idx === courseCount - 1
-                ? VENICE_MATERIALS.graniteCurbBevelTop
-                : VENICE_MATERIALS.courtyardRampCourseAccent
-            }
-            receiveShadow
-          >
-            <boxGeometry
-              args={[
-                idx === 0 || idx === courseCount - 1 ? 0.16 : 0.075,
-                0.004,
-                spanZ - 0.52,
-              ]}
-            />
-          </mesh>
-        );
-      })}
-
-      {/* Central Stone Joint Runner Bands */}
-      {[-spanZ * 0.24, 0, spanZ * 0.24].map((lz, jIdx) => (
+      {[-1, 1].map((side) => (
         <mesh
-          key={`runner-${jIdx}`}
-          position={[0, 0.0015, lz]}
-          material={VENICE_MATERIALS.courtyardRampCourseAccent}
+          key={`stringer-${side}`}
+          position={[0, layerY, side * (spanZ * 0.5 - 0.14)]}
+          material={d.rampCourseStone}
           receiveShadow
+          castShadow={false}
         >
-          <boxGeometry args={[slopeLen - 0.22, 0.003, 0.055]} />
+          <boxGeometry args={[slopeLen - 0.04, layerH, 0.24]} />
         </mesh>
       ))}
+
+      {/* Flush Transverse Stone Step-Course Header Strips */}
+      {courses.map((c) => (
+        <mesh
+          key={`course-${c.idx}`}
+          position={[c.lx, layerY, 0]}
+          material={c.isEnd ? d.rampCourseStone : d.rampCourseAccent}
+          receiveShadow
+          castShadow={false}
+        >
+          <boxGeometry args={[c.w, layerH, spanZ - 0.52]} />
+        </mesh>
+      ))}
+
+      {/* Central Stone Joint Runner Bands (segmented between courses) */}
+      {[-spanZ * 0.24, 0, spanZ * 0.24].map((lz, jIdx) =>
+        runnerSegments.map((seg) => (
+          <mesh
+            key={`runner-${jIdx}-${seg.key}`}
+            position={[seg.mid, layerY, lz]}
+            material={d.rampCourseAccent}
+            receiveShadow
+            castShadow={false}
+          >
+            <boxGeometry args={[seg.len, layerH, 0.06]} />
+          </mesh>
+        )),
+      )}
     </group>
   );
 }
@@ -709,6 +941,15 @@ function StreetMarkingsOverlay({
   const lzCX = (lzMinX + lzMaxX) * 0.5;
   const lzCZ = (lzMinZ + lzMaxZ) * 0.5;
   const stripeAngleRad = (vanLoadingZone.stripeAngleDeg * Math.PI) / 180;
+  const d = decals();
+
+  // Paint decals: box spans y in [-0.005, topY] on the road (y = 0).
+  const t1H = DECAL_LIFT + 0.005; // top = +0.015
+  const t1Y = (DECAL_LIFT - 0.005) * 0.5;
+  const t2H = DECAL_LIFT_T2 + 0.005; // top = +0.030 (stacked over tier 1)
+  const t2Y = (DECAL_LIFT_T2 - 0.005) * 0.5;
+
+  const perimW = 0.1;
 
   return (
     <group name="street-road-markings">
@@ -716,11 +957,12 @@ function StreetMarkingsOverlay({
       {[-12.0, -7.0, -2.0, 3.0, 8.0, 13.0, 18.0, 23.0].map((zPos, i) => (
         <mesh
           key={`dash-5th-${i}`}
-          position={[0, 0.004, zPos]}
-          material={VENICE_MATERIALS.laneLineCream}
+          position={[0, t1Y, zPos]}
+          material={d.laneLine}
           receiveShadow
+          castShadow={false}
         >
-          <boxGeometry args={[0.14, 0.005, 2.3]} />
+          <boxGeometry args={[0.14, t1H, 2.3]} />
         </mesh>
       ))}
 
@@ -728,21 +970,23 @@ function StreetMarkingsOverlay({
       {[5.5, 9.8].map((xPos, i) => (
         <mesh
           key={`dash-mercer-${i}`}
-          position={[xPos, 0.004, -22.0]}
-          material={VENICE_MATERIALS.laneLineCream}
+          position={[xPos, t1Y, -22.0]}
+          material={d.laneLine}
           receiveShadow
+          castShadow={false}
         >
-          <boxGeometry args={[2.2, 0.005, 0.14]} />
+          <boxGeometry args={[2.2, t1H, 0.14]} />
         </mesh>
       ))}
 
       {/* Stop Bar before South Crosswalk */}
       <mesh
-        position={[1.7, 0.004, cwMaxZ + 0.75]}
-        material={VENICE_MATERIALS.crosswalkWhite}
+        position={[1.7, t1Y, cwMaxZ + 0.75]}
+        material={d.crosswalk}
         receiveShadow
+        castShadow={false}
       >
-        <boxGeometry args={[2.9, 0.005, 0.34]} />
+        <boxGeometry args={[2.9, t1H, 0.34]} />
       </mesh>
 
       {/* Crosswalk A-Position 7 Crisp Zebra Bars */}
@@ -752,48 +996,54 @@ function StreetMarkingsOverlay({
         return (
           <mesh
             key={`crosswalk-bar-${idx}`}
-            position={[x, 0.005, cwCenterZ]}
-            material={VENICE_MATERIALS.crosswalkWhite}
+            position={[x, t1Y, cwCenterZ]}
+            material={d.crosswalk}
             receiveShadow
+            castShadow={false}
           >
-            <boxGeometry args={[0.52, 0.006, cwDepthZ - 0.25]} />
+            <boxGeometry args={[0.52, t1H, cwDepthZ - 0.25]} />
           </mesh>
         );
       })}
 
       {/* Van Loading Zone Amber Perimeter Frame & Diagonal Stripes */}
       <group name="van-loading-zone-markings">
-        {/* West, North & South Amber Perimeter Line */}
+        {/* West line owns both corner squares; North & South lines start after it
+            so the three perimeter pieces never overlap. */}
         <mesh
-          position={[lzMinX, 0.004, lzCZ]}
-          material={VENICE_MATERIALS.loadingZoneAmber}
+          position={[lzMinX, t1Y, lzCZ]}
+          material={d.amber}
+          castShadow={false}
         >
-          <boxGeometry args={[0.1, 0.005, lzL]} />
+          <boxGeometry args={[perimW, t1H, lzL + perimW]} />
         </mesh>
         <mesh
-          position={[lzCX, 0.004, lzMinZ]}
-          material={VENICE_MATERIALS.loadingZoneAmber}
+          position={[lzCX + perimW * 0.25, t1Y, lzMinZ]}
+          material={d.amber}
+          castShadow={false}
         >
-          <boxGeometry args={[lzW, 0.005, 0.1]} />
+          <boxGeometry args={[lzW - perimW * 0.5, t1H, perimW]} />
         </mesh>
         <mesh
-          position={[lzCX, 0.004, lzMaxZ]}
-          material={VENICE_MATERIALS.loadingZoneAmber}
+          position={[lzCX + perimW * 0.25, t1Y, lzMaxZ]}
+          material={d.amber}
+          castShadow={false}
         >
-          <boxGeometry args={[lzW, 0.005, 0.1]} />
+          <boxGeometry args={[lzW - perimW * 0.5, t1H, perimW]} />
         </mesh>
 
-        {/* Diagonal 38-deg Amber Loading Stripes */}
+        {/* Diagonal 38-deg Amber Loading Stripes: tier 2 (their tips may graze the perimeter) */}
         {Array.from({ length: 7 }, (_, idx) => {
           const z = lzMinZ + 0.85 + (idx / 6) * (lzL - 1.7);
           return (
             <mesh
               key={`lz-stripe-${idx}`}
-              position={[lzCX, 0.004, z]}
+              position={[lzCX, t2Y, z]}
               rotation={[0, -stripeAngleRad, 0]}
-              material={VENICE_MATERIALS.loadingZoneAmber}
+              material={d.amberT2}
+              castShadow={false}
             >
-              <boxGeometry args={[lzW * 0.96, 0.005, 0.16]} />
+              <boxGeometry args={[lzW * 0.96, t2H, 0.16]} />
             </mesh>
           );
         })}
@@ -804,45 +1054,61 @@ function StreetMarkingsOverlay({
 
 function PuttingGreenBorderAndTeeMarker({
   bounds,
+  copingBaseY,
 }: {
   bounds: { minX: number; maxX: number; minZ: number; maxZ: number };
+  copingBaseY: number;
 }) {
   const { minX, maxX, minZ, maxZ } = bounds;
   const w = maxX - minX;
   const d = maxZ - minZ;
   const cx = (minX + maxX) * 0.5;
   const cz = (minZ + maxZ) * 0.5;
-  const borderW = 0.22;
+  const borderW = BORDER_W;
+  // South bar is trimmed so it butts the south patio slab instead of overlapping it.
+  const southW = BORDER_SOUTH_W;
+  // Coping top = terrace + 2mm. The terrace is carved open under this frame, so nothing
+  // shares its plan area. Box runs down into the foundation (solid).
+  const terraceY = copingBaseY;
+  const topY = terraceY + COPING_RISE;
+  const botY = SLAB_FOUNDATION_BOTTOM_Y;
+  const h = topY - botY;
+  const y = (topY + botY) * 0.5;
+  const mat = VENICE_MATERIALS.puttingGreenStoneBorder;
 
   return (
     <group name="putting-green-limestone-border">
       <mesh
-        position={[cx, 0.606, minZ - borderW * 0.5]}
-        material={VENICE_MATERIALS.puttingGreenStoneBorder}
+        position={[cx, y, minZ - borderW * 0.5]}
+        material={mat}
         receiveShadow
+        castShadow={false}
       >
-        <boxGeometry args={[w + borderW * 2, 0.012, borderW]} />
+        <boxGeometry args={[w + borderW * 2, h, borderW]} />
       </mesh>
       <mesh
-        position={[cx, 0.606, maxZ + borderW * 0.5]}
-        material={VENICE_MATERIALS.puttingGreenStoneBorder}
+        position={[cx, y, maxZ + southW * 0.5]}
+        material={mat}
         receiveShadow
+        castShadow={false}
       >
-        <boxGeometry args={[w + borderW * 2, 0.012, borderW]} />
+        <boxGeometry args={[w + borderW * 2, h, southW]} />
       </mesh>
       <mesh
-        position={[minX - borderW * 0.5, 0.606, cz]}
-        material={VENICE_MATERIALS.puttingGreenStoneBorder}
+        position={[minX - borderW * 0.5, y, cz]}
+        material={mat}
         receiveShadow
+        castShadow={false}
       >
-        <boxGeometry args={[borderW, 0.012, d]} />
+        <boxGeometry args={[borderW, h, d]} />
       </mesh>
       <mesh
-        position={[maxX + borderW * 0.5, 0.606, cz]}
-        material={VENICE_MATERIALS.puttingGreenStoneBorder}
+        position={[maxX + borderW * 0.5, y, cz]}
+        material={mat}
         receiveShadow
+        castShadow={false}
       >
-        <boxGeometry args={[borderW, 0.012, d]} />
+        <boxGeometry args={[borderW, h, d]} />
       </mesh>
     </group>
   );
@@ -850,11 +1116,29 @@ function PuttingGreenBorderAndTeeMarker({
 
 function StraightGraniteCurb({ curb }: { curb: StoneCurbSegmentSpec }) {
   const [sx, _, sz] = curb.size;
-  const h = curb.height;
   const alongX = sx >= sz;
   const length = alongX ? sx : sz;
   const width = alongX ? sz : sx;
   const jointCount = Math.floor(length / 2.2);
+  const d = decals();
+
+  // Body: widened by CURB_FACE_INSET each side (no coplanar wall/top with the sidewalk slab it
+  // sits on) and lifted CURB_BODY_LIFT; spans y in [-0.04, topY + lift].
+  const bodyW = width + CURB_FACE_INSET * 2;
+  const bodyTop = curb.topY + CURB_BODY_LIFT;
+  const bodyH = bodyTop + 0.04;
+  const bodyY = (bodyTop - 0.04) * 0.5;
+
+  const capTop = bodyTop + CURB_CAP_RISE;
+  const capH = 0.022;
+  const capY = capTop - capH * 0.5;
+
+  // Expansion joint scoring ribs: >= 1.5cm over the cap, >= 4cm wide.
+  const jointTop = capTop + DECAL_LIFT;
+  const jointBot = capTop - 0.02;
+  const jointH = jointTop - jointBot;
+  const jointY = (jointTop + jointBot) * 0.5;
+  const jointT = 0.04;
 
   return (
     <group
@@ -864,31 +1148,31 @@ function StraightGraniteCurb({ curb }: { curb: StoneCurbSegmentSpec }) {
     >
       {/* Main Granite Curb Body extending cleanly below road/gutter so zero gaps show */}
       <mesh
-        position={[0, (curb.topY - 0.04) * 0.5, 0]}
+        position={[0, bodyY, 0]}
         material={VENICE_MATERIALS.graniteCurbStone}
         castShadow
         receiveShadow
       >
         <boxGeometry
           args={[
-            alongX ? length : width,
-            curb.topY + 0.04,
-            alongX ? width : length,
+            alongX ? length : bodyW,
+            bodyH,
+            alongX ? bodyW : length,
           ]}
         />
       </mesh>
 
-      {/* Beveled Top Granite Cap */}
+      {/* Beveled Top Granite Cap (flat 2cm plate: receives shadow, does not cast) */}
       <mesh
-        position={[0, curb.topY - 0.008, 0]}
-        material={VENICE_MATERIALS.graniteCurbBevelTop}
-        castShadow
+        position={[0, capY, 0]}
+        material={d.curbCap}
+        castShadow={false}
         receiveShadow
       >
         <boxGeometry
           args={[
             alongX ? length - 0.01 : width - 0.04,
-            0.022,
+            capH,
             alongX ? width - 0.04 : length - 0.01,
           ]}
         />
@@ -901,15 +1185,17 @@ function StraightGraniteCurb({ curb }: { curb: StoneCurbSegmentSpec }) {
           <mesh
             key={`joint-${idx}`}
             position={
-              alongX
-                ? [offset, curb.topY - 0.006, 0]
-                : [0, curb.topY - 0.006, offset]
+              alongX ? [offset, jointY, 0] : [0, jointY, offset]
             }
-            material={VENICE_MATERIALS.graniteCurbJoint}
+            material={d.curbJoint}
+            castShadow={false}
+            receiveShadow
           >
             <boxGeometry
               args={
-                alongX ? [0.02, 0.03, width - 0.02] : [width - 0.02, 0.03, 0.02]
+                alongX
+                  ? [jointT, jointH, width - 0.02]
+                  : [width - 0.02, jointH, jointT]
               }
             />
           </mesh>
@@ -922,7 +1208,26 @@ function StraightGraniteCurb({ curb }: { curb: StoneCurbSegmentSpec }) {
 function DrainGrateMesh({ grate }: { grate: StormDrainGrateSpec }) {
   const [w, _, l] = grate.size;
   const alongZ = l >= w;
-  const barCount = 5;
+  const barCount = 4;
+  const d = decals();
+
+  // All heights are local to the grate origin = gutter floor (-0.02), so
+  //   rim ring top   = +0.017  (>= 0.015 over gutter slab)
+  //   basin top      = +0.015  (>= 0.015 over gutter slab; plan-disjoint from the ring)
+  //   bar tops       = +0.032  (>= 0.015 over BOTH ring and basin)
+  const rimT = 0.05; // rim thickness (>= 3.5cm)
+  const rimTop = 0.017;
+  const rimBot = -0.005;
+  const basinTop = 0.015;
+  const basinBot = -0.005;
+  const barTop = 0.032;
+  const barBot = 0.0;
+  const barW = 0.04; // thickened from 3.2cm
+  const openW = w - rimT * 2;
+  const openL = l - rimT * 2;
+  const barSpan = (alongZ ? openW : openL) - 0.06;
+  const barPitch = barSpan / (barCount - 1);
+  const barLen = (alongZ ? l : w) * 0.88;
 
   return (
     <group
@@ -930,28 +1235,54 @@ function DrainGrateMesh({ grate }: { grate: StormDrainGrateSpec }) {
       position={grate.position}
       rotation={[0, grate.rotationY, 0]}
     >
-      {/* Recessed Iron Frame */}
-      <mesh material={VENICE_MATERIALS.wroughtIron} receiveShadow>
-        <boxGeometry args={[w, 0.016, l]} />
+      {/* Iron Frame: four rim bars (no centre slab, so it never overlaps the basin) */}
+      {[
+        { p: [-(w - rimT) * 0.5, 0, 0], a: [rimT, l] },
+        { p: [(w - rimT) * 0.5, 0, 0], a: [rimT, l] },
+        { p: [0, 0, -(l - rimT) * 0.5], a: [openW, rimT] },
+        { p: [0, 0, (l - rimT) * 0.5], a: [openW, rimT] },
+      ].map((r, i) => (
+        <mesh
+          key={`rim-${i}`}
+          position={[r.p[0], (rimTop + rimBot) * 0.5, r.p[2]]}
+          material={d.grateFrame}
+          receiveShadow
+          castShadow={false}
+        >
+          <boxGeometry args={[r.a[0], rimTop - rimBot, r.a[1]]} />
+        </mesh>
+      ))}
+
+      {/* Dark Drain Basin filling the frame opening */}
+      <mesh
+        position={[0, (basinTop + basinBot) * 0.5, 0]}
+        material={d.grateBasin}
+        receiveShadow
+        castShadow={false}
+      >
+        <boxGeometry args={[openW, basinTop - basinBot, openL]} />
       </mesh>
 
-      {/* Dark Drain Basin Underneath */}
-      <mesh position={[0, -0.004, 0]} material={VENICE_MATERIALS.asphaltRoadEdgeBase}>
-        <boxGeometry args={[w * 0.82, 0.014, l * 0.86]} />
-      </mesh>
-
-      {/* Longitudinal Cast-Iron Grate Slats */}
+      {/* Longitudinal Cast-Iron Grate Slats (4cm wide) */}
       {Array.from({ length: barCount }, (_, idx) => {
-        const t = -0.35 + (idx / (barCount - 1)) * 0.7;
+        const off = (idx - (barCount - 1) * 0.5) * barPitch;
         return (
           <mesh
             key={`bar-${idx}`}
-            position={alongZ ? [t * w, 0.006, 0] : [0, 0.006, t * l]}
-            material={VENICE_MATERIALS.gutterConcreteLip}
+            position={
+              alongZ
+                ? [off, (barTop + barBot) * 0.5, 0]
+                : [0, (barTop + barBot) * 0.5, off]
+            }
+            material={d.grateBar}
+            receiveShadow
+            castShadow={false}
           >
             <boxGeometry
               args={
-                alongZ ? [w * 0.08, 0.01, l * 0.88] : [w * 0.88, 0.01, l * 0.08]
+                alongZ
+                  ? [barW, barTop - barBot, barLen]
+                  : [barLen, barTop - barBot, barW]
               }
             />
           </mesh>

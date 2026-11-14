@@ -5,6 +5,29 @@ import { useFrame } from '@react-three/fiber';
 import * as THREE from 'three';
 import { TOYBOX_MATERIALS } from '@/materials';
 import { PROP_ACCENT_MATERIALS } from './propMaterials';
+import { resolveAnimTime } from '../qaFreeze';
+
+/**
+ * Local cached polygon-offset clones (shared TOYBOX materials are never mutated).
+ * tier 1 => factor/units -1, tier 2 => -2, tier 3 => -3.
+ */
+const LAYERED_CACHE = new WeakMap<THREE.Material, Map<number, THREE.Material>>();
+function layered<T extends THREE.Material>(base: T, tier: 1 | 2 | 3): T {
+  let byTier = LAYERED_CACHE.get(base);
+  if (!byTier) {
+    byTier = new Map();
+    LAYERED_CACHE.set(base, byTier);
+  }
+  let m = byTier.get(tier);
+  if (!m) {
+    m = base.clone();
+    m.polygonOffset = true;
+    m.polygonOffsetFactor = -tier;
+    m.polygonOffsetUnits = -tier;
+    byTier.set(tier, m);
+  }
+  return m as T;
+}
 
 export interface GolfBagAndTeePropProps {
   /** World [x, y, z] where y is exact ground surface top. */
@@ -22,7 +45,7 @@ export interface GolfBagAndTeePropProps {
  * seated flush on y = 0.00m. Compact Z footprint (1.06m deep) stays strictly clear
  * of the south tee-area backstop curb behind TEE_POSITION.
  */
-export function GolfBagAndTeeProp({
+export const GolfBagAndTeeProp = React.memo(function GolfBagAndTeeProp({
   position = [0, 0, 0],
   rotationY = 0,
   selectedClub = 'driver',
@@ -30,11 +53,10 @@ export function GolfBagAndTeeProp({
   showWireframe = false,
 }: GolfBagAndTeePropProps) {
   const towelRef = useRef<THREE.Mesh>(null);
-  const elapsedRef = useRef(0);
 
-  useFrame((_, delta) => {
-    elapsedRef.current += Math.min(delta, 0.05);
-    const t = elapsedRef.current;
+  useFrame((state) => {
+    // Absolute clock (no frame-rate dependent accumulation); pinned when ?qaFreezeParticles=1.
+    const t = resolveAnimTime(state.clock.elapsedTime);
     if (!towelRef.current) return;
     towelRef.current.rotation.z = Math.sin(t * 2.1) * 0.055 + 0.04;
     towelRef.current.rotation.x = Math.cos(t * 1.7) * 0.035;
@@ -45,41 +67,42 @@ export function GolfBagAndTeeProp({
       name="golf-bag-and-tee-prop"
       position={position}
       rotation={[0, rotationY, 0]}
+      userData={{ occludableProp: true }}
     >
       {/* Tiered Brass-Framed Tee Mat (flush at y = 0, compact 1.06m Z depth) */}
       <mesh
         receiveShadow
-        position={[0, 0.006, 0]}
-        material={TOYBOX_MATERIALS.brassAccent}
+        position={[0, 0.01, 0]}
+        material={layered(TOYBOX_MATERIALS.brassAccent, 1)}
       >
-        <boxGeometry args={[1.92, 0.012, 1.06]} />
+        <boxGeometry args={[1.92, 0.02, 1.06]} />
       </mesh>
       <mesh
         receiveShadow
-        position={[0, 0.015, 0]}
-        material={TOYBOX_MATERIALS.awningMint}
+        position={[0, 0.0275, 0]}
+        material={layered(TOYBOX_MATERIALS.awningMint, 2)}
       >
-        <boxGeometry args={[1.74, 0.01, 0.92]} />
+        <boxGeometry args={[1.74, 0.015, 0.92]} />
       </mesh>
       <mesh
         receiveShadow
-        position={[0, 0.023, 0]}
-        material={TOYBOX_MATERIALS.turfEmerald}
+        position={[0, 0.0425, 0]}
+        material={layered(TOYBOX_MATERIALS.turfEmerald, 3)}
       >
-        <boxGeometry args={[1.22, 0.01, 0.68]} />
+        <boxGeometry args={[1.22, 0.015, 0.68]} />
       </mesh>
 
       {/* Twin Brass Tee Markers */}
       <mesh
         castShadow
-        position={[-0.56, 0.056, 0]}
+        position={[-0.56, 0.078, 0]}
         material={TOYBOX_MATERIALS.taxiAmber}
       >
         <sphereGeometry args={[0.055, 10, 8]} />
       </mesh>
       <mesh
         castShadow
-        position={[0.56, 0.056, 0]}
+        position={[0.56, 0.078, 0]}
         material={TOYBOX_MATERIALS.taxiAmber}
       >
         <sphereGeometry args={[0.055, 10, 8]} />
@@ -100,34 +123,30 @@ export function GolfBagAndTeeProp({
 
           {/* Twin Stand Legs Anchored Flush at y = 0.00m */}
           <mesh
-            castShadow
             position={[-0.12, 0.015, 0.26]}
             material={TOYBOX_MATERIALS.tireRubber}
           >
-            <cylinderGeometry args={[0.016, 0.018, 0.03, 8]} />
+            <cylinderGeometry args={[0.02, 0.022, 0.03, 8]} />
           </mesh>
           <mesh
-            castShadow
             position={[0.12, 0.015, 0.26]}
             material={TOYBOX_MATERIALS.tireRubber}
           >
-            <cylinderGeometry args={[0.016, 0.018, 0.03, 8]} />
+            <cylinderGeometry args={[0.02, 0.022, 0.03, 8]} />
           </mesh>
           <mesh
-            castShadow
             position={[-0.1, 0.34, 0.13]}
             rotation={[-0.36, 0, -0.06]}
             material={TOYBOX_MATERIALS.darkIron}
           >
-            <cylinderGeometry args={[0.011, 0.01, 0.72, 8]} />
+            <cylinderGeometry args={[0.019, 0.018, 0.72, 8]} />
           </mesh>
           <mesh
-            castShadow
             position={[0.1, 0.34, 0.13]}
             rotation={[-0.36, 0, 0.06]}
             material={TOYBOX_MATERIALS.darkIron}
           >
-            <cylinderGeometry args={[0.011, 0.01, 0.72, 8]} />
+            <cylinderGeometry args={[0.019, 0.018, 0.72, 8]} />
           </mesh>
 
           {/* Tilted Tour Golf Bag Body Anchored Into Base Cup */}
@@ -165,64 +184,76 @@ export function GolfBagAndTeeProp({
               <boxGeometry args={[0.04, 0.28, 0.1]} />
             </mesh>
 
-            {/* Unused Clubs Resting Inside Bag */}
-            {selectedClub !== 'driver' && (
-              <group position={[-0.04, 0.56, -0.03]} rotation={[-0.08, 0, 0.06]}>
-                <mesh castShadow material={TOYBOX_MATERIALS.chromeSilver}>
-                  <cylinderGeometry args={[0.008, 0.008, 0.42, 6]} />
-                </mesh>
-                <mesh
-                  castShadow
-                  position={[0, 0.21, 0.025]}
-                  material={TOYBOX_MATERIALS.hydrantCoral}
-                >
-                  <sphereGeometry args={[0.048, 8, 6]} />
-                </mesh>
-              </group>
-            )}
-            {selectedClub !== 'wedge' && (
-              <group position={[0.04, 0.5, -0.01]} rotation={[0.05, 0, -0.06]}>
-                <mesh castShadow material={TOYBOX_MATERIALS.chromeSilver}>
-                  <cylinderGeometry args={[0.008, 0.008, 0.34, 6]} />
-                </mesh>
-                <mesh
-                  castShadow
-                  position={[0.015, 0.17, 0]}
-                  rotation={[0, 0, 0.4]}
-                  material={TOYBOX_MATERIALS.chromeSilver}
-                >
-                  <boxGeometry args={[0.062, 0.042, 0.018]} />
-                </mesh>
-              </group>
-            )}
-            {selectedClub !== 'skimmer' && (
-              <group position={[0, 0.52, 0.04]} rotation={[0.1, 0, 0]}>
-                <mesh castShadow material={TOYBOX_MATERIALS.chromeSilver}>
-                  <cylinderGeometry args={[0.008, 0.008, 0.36, 6]} />
-                </mesh>
-                <mesh
-                  castShadow
-                  position={[0, 0.18, 0.015]}
-                  material={TOYBOX_MATERIALS.taxiAmber}
-                >
-                  <boxGeometry args={[0.056, 0.036, 0.024]} />
-                </mesh>
-              </group>
-            )}
-            {selectedClub !== 'putter' && (
-              <group position={[-0.02, 0.48, 0.04]} rotation={[-0.04, 0, 0]}>
-                <mesh castShadow material={TOYBOX_MATERIALS.chromeSilver}>
-                  <cylinderGeometry args={[0.008, 0.008, 0.3, 6]} />
-                </mesh>
-                <mesh
-                  castShadow
-                  position={[0.012, 0.15, 0]}
-                  material={TOYBOX_MATERIALS.brassAccent}
-                >
-                  <boxGeometry args={[0.068, 0.026, 0.026]} />
-                </mesh>
-              </group>
-            )}
+            {/* Unused Clubs Resting Inside Bag (always mounted visible={true} for 0ms club-switch pre-warm) */}
+            <group
+              visible={true}
+              scale={selectedClub !== 'driver' ? 1 : 0}
+              position={[-0.04, 0.56, -0.03]}
+              rotation={[-0.08, 0, 0.06]}
+            >
+              <mesh material={TOYBOX_MATERIALS.chromeSilver} frustumCulled={false}>
+                <cylinderGeometry args={[0.018, 0.018, 0.42, 6]} />
+              </mesh>
+              <mesh
+                position={[0, 0.21, 0.025]}
+                material={TOYBOX_MATERIALS.hydrantCoral}
+                frustumCulled={false}
+              >
+                <sphereGeometry args={[0.048, 8, 6]} />
+              </mesh>
+            </group>
+            <group
+              visible={true}
+              scale={selectedClub !== 'wedge' ? 1 : 0}
+              position={[0.04, 0.5, -0.01]}
+              rotation={[0.05, 0, -0.06]}
+            >
+              <mesh material={TOYBOX_MATERIALS.chromeSilver} frustumCulled={false}>
+                <cylinderGeometry args={[0.018, 0.018, 0.34, 6]} />
+              </mesh>
+              <mesh
+                position={[0.015, 0.17, 0]}
+                rotation={[0, 0, 0.4]}
+                material={TOYBOX_MATERIALS.chromeSilver}
+                frustumCulled={false}
+              >
+                <boxGeometry args={[0.062, 0.042, 0.036]} />
+              </mesh>
+            </group>
+            <group
+              visible={true}
+              scale={selectedClub !== 'skimmer' ? 1 : 0}
+              position={[0, 0.52, 0.04]}
+              rotation={[0.1, 0, 0]}
+            >
+              <mesh material={TOYBOX_MATERIALS.chromeSilver} frustumCulled={false}>
+                <cylinderGeometry args={[0.018, 0.018, 0.36, 6]} />
+              </mesh>
+              <mesh
+                position={[0, 0.18, 0.015]}
+                material={TOYBOX_MATERIALS.taxiAmber}
+                frustumCulled={false}
+              >
+                <boxGeometry args={[0.056, 0.036, 0.036]} />
+              </mesh>
+            </group>
+            <group
+              visible={true}
+              scale={selectedClub !== 'putter' ? 1 : 0}
+              position={[-0.02, 0.48, 0.04]}
+              rotation={[-0.04, 0, 0]}
+            >
+              <mesh material={TOYBOX_MATERIALS.chromeSilver} frustumCulled={false}>
+                <cylinderGeometry args={[0.018, 0.018, 0.3, 6]} />
+              </mesh>
+              <mesh
+                position={[0.012, 0.15, 0]}
+                material={TOYBOX_MATERIALS.brassAccent}
+                frustumCulled={false}
+              >
+                <boxGeometry args={[0.068, 0.036, 0.036]} />
+              </mesh>
+            </group>
           </group>
         </group>
       )}
@@ -237,4 +268,4 @@ export function GolfBagAndTeeProp({
       )}
     </group>
   );
-}
+});

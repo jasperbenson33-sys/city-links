@@ -3,6 +3,12 @@
 import React, { useMemo } from 'react';
 import * as THREE from 'three';
 import { TOYBOX_MATERIALS } from '@/materials';
+import { withPolygonOffset } from './propMaterials';
+
+// Cached polygonOffset variants (never mutate shared palette materials).
+const DRAIN_BED_MAT = withPolygonOffset(TOYBOX_MATERIALS.stormDrainSteel, 1);
+const GRATE_PLATE_MAT = withPolygonOffset(TOYBOX_MATERIALS.darkIron, 1);
+const GRATE_SLAT_MAT = withPolygonOffset(TOYBOX_MATERIALS.stormDrainSteel, 2);
 
 export interface CurvedGutterCornerPropProps {
   position?: [number, number, number];
@@ -95,7 +101,8 @@ export function CurvedGutterCornerProp({
         pivotX: 0.65,
         pivotZ: -0.65,
         innerR: 0.56,
-        outerR: 0.95,
+        // +5mm overlap into the curb band so the two never share a coplanar wall.
+        outerR: 0.955,
         startTheta: Math.PI * 0.5,
         endTheta: Math.PI,
         bottomY: 0,
@@ -115,7 +122,7 @@ export function CurvedGutterCornerProp({
       <mesh
         receiveShadow
         geometry={arcDrainGeo}
-        material={TOYBOX_MATERIALS.stormDrainSteel}
+        material={DRAIN_BED_MAT}
       />
 
       {/* Curved Taxi-Amber Bankable Curb Reflector Wall */}
@@ -130,15 +137,15 @@ export function CurvedGutterCornerProp({
       <mesh
         receiveShadow
         position={[0, 0.012, 0]}
-        material={TOYBOX_MATERIALS.darkIron}
+        material={GRATE_PLATE_MAT}
       >
         <boxGeometry args={[0.56, 0.024, 0.56]} />
       </mesh>
       {[-0.16, 0, 0.16].map((off, idx) => (
         <mesh
           key={`slat-${idx}`}
-          position={[0, 0.026, off]}
-          material={TOYBOX_MATERIALS.stormDrainSteel}
+          position={[0, 0.0335, off]}
+          material={GRATE_SLAT_MAT}
         >
           <boxGeometry args={[0.48, 0.012, 0.05]} />
         </mesh>

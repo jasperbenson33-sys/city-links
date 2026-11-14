@@ -109,7 +109,7 @@ function getTreeVariant(propId: string): 'emerald' | 'sunny' | 'peach' {
  * Renders any CoursePropSpec or PlacedProp dynamically by PropType, preserving exact
  * COURSE_MASTER_PLAN coordinates, dimensions, angles, and coaxial geometry.
  */
-export function PlacedPropRenderer({
+export const PlacedPropRenderer = React.memo(function PlacedPropRenderer({
   prop,
   ballPosition,
   selectedClub = 'driver',
@@ -328,7 +328,7 @@ export function PlacedPropRenderer({
     default:
       return null;
   }
-}
+});
 
 export interface CoursePropsWorldProps {
   ballPosition?: [number, number, number];

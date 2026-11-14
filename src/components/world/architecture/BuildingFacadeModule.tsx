@@ -29,6 +29,28 @@ export interface BuildingFacadeModuleProps {
   showWireframe?: boolean;
 }
 
+/**
+ * Anti-shimmer decal materials: local clones of shared '@/materials' entries carrying
+ * polygonOffset (tier 1 = -1/-1, tier 2 = -2/-2). Shared materials are never mutated.
+ */
+const DECAL_MAT_CACHE = new WeakMap<THREE.Material, Partial<Record<1 | 2, THREE.Material>>>();
+function decalMat(base: THREE.Material, tier: 1 | 2 = 1): THREE.Material {
+  let entry = DECAL_MAT_CACHE.get(base);
+  if (!entry) {
+    entry = {};
+    DECAL_MAT_CACHE.set(base, entry);
+  }
+  let hit = entry[tier];
+  if (!hit) {
+    hit = base.clone();
+    hit.polygonOffset = true;
+    hit.polygonOffsetFactor = -tier;
+    hit.polygonOffsetUnits = -tier;
+    entry[tier] = hit;
+  }
+  return hit;
+}
+
 function hashStr(str: string): number {
   let h = 2166136261;
   for (let i = 0; i < str.length; i++) {
@@ -299,6 +321,12 @@ function WindowUnit({
   const glassH = isArched
     ? jambHeight + frameSpec.archInnerRadius * 0.86
     : jambHeight;
+  // Glass is overlapped 1.5cm into sill/jambs/lintel so no two faces share a plane.
+  const glassBottomY = 0.075;
+  const glassTopY = 0.09 + glassH + 0.02;
+  const mullionMat = decalMat(VENICE_MATERIALS.storefrontTimber, 1);
+  const muntinMat = decalMat(VENICE_MATERIALS.storefrontTimber, 2);
+  const slatMat = decalMat(VENICE_MATERIALS.shutterEspresso, 1);
 
   return (
     <group>
@@ -353,22 +381,22 @@ function WindowUnit({
 
       {/* Recessed Glass Plane + Crisp Muntin Sash Bars */}
       <mesh
-        position={[0, 0.09 + glassH * 0.5, 0.015]}
+        position={[0, (glassBottomY + glassTopY) * 0.5, 0.015]}
         material={glassMat}
       >
-        <boxGeometry args={[width, glassH, 0.025]} />
+        <boxGeometry args={[width + 0.03, glassTopY - glassBottomY, 0.025]} />
       </mesh>
       <mesh
-        position={[0, 0.09 + glassH * 0.5, 0.032]}
-        material={VENICE_MATERIALS.storefrontTimber}
+        position={[0, 0.09 + glassH * 0.5, 0.037]}
+        material={mullionMat}
       >
-        <boxGeometry args={[0.04, glassH, 0.02]} />
+        <boxGeometry args={[0.04, glassH, 0.03]} />
       </mesh>
       <mesh
-        position={[0, 0.09 + jambHeight * 0.54, 0.032]}
-        material={VENICE_MATERIALS.storefrontTimber}
+        position={[0, 0.09 + jambHeight * 0.54, 0.044]}
+        material={muntinMat}
       >
-        <boxGeometry args={[width, 0.04, 0.02]} />
+        <boxGeometry args={[width + 0.04, 0.04, 0.03]} />
       </mesh>
 
       {/* Louvered Venetian Shutters */}
@@ -378,17 +406,17 @@ function WindowUnit({
           position={sh.position}
           rotation={sh.rotation}
         >
-          <mesh castShadow material={shutterMat}>
+          <mesh material={shutterMat}>
             <boxGeometry args={sh.size} />
           </mesh>
           {/* Louvered horizontal slat accents */}
           {[-0.36, -0.12, 0.12, 0.36].map((sy, idx) => (
             <mesh
               key={idx}
-              position={[0, sy * sh.size[1], 0.018]}
-              material={VENICE_MATERIALS.shutterEspresso}
+              position={[0, sy * sh.size[1], 0.028]}
+              material={slatMat}
             >
-              <boxGeometry args={[sh.size[0] * 0.78, 0.028, 0.014]} />
+              <boxGeometry args={[sh.size[0] * 0.78, 0.036, 0.024]} />
             </mesh>
           ))}
         </group>
@@ -419,10 +447,10 @@ function JulietBalcony({
       <mesh
         castShadow
         receiveShadow
-        position={[0, -0.04, deckD * 0.5]}
+        position={[0, -0.04, deckD * 0.5 - 0.01]}
         material={trimMat}
       >
-        <boxGeometry args={[deckW, 0.1, deckD]} />
+        <boxGeometry args={[deckW, 0.1, deckD + 0.02]} />
       </mesh>
 
       {/* Twin Carved Corbel Brackets Underneath */}
@@ -443,20 +471,18 @@ function JulietBalcony({
 
       {/* Baluster or Wrought-Iron Railing */}
       <mesh
-        castShadow
         position={[0, railH, deckD - 0.04]}
         material={useWroughtIron ? VENICE_MATERIALS.wroughtIron : trimMat}
       >
-        <boxGeometry args={[deckW, 0.06, 0.07]} />
+        <boxGeometry args={[deckW * 0.96, 0.06, 0.07]} />
       </mesh>
       {[-deckW * 0.48, deckW * 0.48].map((sx, idx) => (
         <mesh
           key={`side-rail-${idx}`}
-          castShadow
-          position={[sx, railH, deckD * 0.5]}
+          position={[sx, railH - 0.02, deckD * 0.5 - 0.01]}
           material={useWroughtIron ? VENICE_MATERIALS.wroughtIron : trimMat}
         >
-          <boxGeometry args={[0.06, 0.06, deckD]} />
+          <boxGeometry args={[0.06, 0.06, deckD + 0.02]} />
         </mesh>
       ))}
 
@@ -466,14 +492,13 @@ function JulietBalcony({
         return (
           <mesh
             key={`p-${idx}`}
-            castShadow
             position={[px, railH * 0.5, deckD - 0.04]}
             material={useWroughtIron ? VENICE_MATERIALS.wroughtIron : trimMat}
           >
             <boxGeometry
               args={
                 useWroughtIron
-                  ? [0.026, railH, 0.026]
+                  ? [0.036, railH, 0.036]
                   : [0.075, railH, 0.075]
               }
             />
@@ -483,7 +508,7 @@ function JulietBalcony({
 
       {/* Terracotta Flower Box on Select Balconies */}
       {hasFlowerBox && (
-        <group position={[0, 0.09, deckD + 0.04]}>
+        <group position={[0, 0.08, deckD + 0.04]}>
           <mesh castShadow material={VENICE_MATERIALS.flowerBoxClay}>
             <boxGeometry args={[deckW * 0.62, 0.16, 0.18]} />
           </mesh>
@@ -563,10 +588,10 @@ function StorefrontBay({
           key={`pilaster-${idx}`}
           castShadow
           receiveShadow
-          position={[px, 1.55, suppressProtrusions ? 0.02 : 0.05]}
+          position={[px, 1.55, suppressProtrusions ? 0.02 : 0.0475]}
           material={trimMat}
         >
-          <boxGeometry args={[0.18, 3.1, suppressProtrusions ? 0.04 : 0.1]} />
+          <boxGeometry args={[0.18, 3.1, suppressProtrusions ? 0.06 : 0.135]} />
         </mesh>
       ))}
 
@@ -615,20 +640,20 @@ function StorefrontBay({
           </mesh>
           {/* Warm Glowing Upper Glass Panes & Arched Transom */}
           <mesh
-            position={[0, 1.56, 0.038]}
-            material={VENICE_MATERIALS.storefrontWarmInterior}
+            position={[0, 1.56, 0.047]}
+            material={decalMat(VENICE_MATERIALS.storefrontWarmInterior, 1)}
           >
-            <boxGeometry args={[openingW * 0.64, 0.85, 0.02]} />
+            <boxGeometry args={[openingW * 0.64, 0.85, 0.024]} />
           </mesh>
           <mesh
-            position={[0, 2.26, 0.025]}
-            material={VENICE_MATERIALS.storefrontWarmInterior}
+            position={[0, 2.26, 0.047]}
+            material={decalMat(VENICE_MATERIALS.storefrontWarmInterior, 2)}
           >
-            <boxGeometry args={[openingW * 0.8, 0.42, 0.02]} />
+            <boxGeometry args={[openingW * 0.8, 0.42, 0.024]} />
           </mesh>
           {/* Brass Door Push Bar */}
           <mesh
-            position={[openingW * 0.24, 1.02, 0.055]}
+            position={[openingW * 0.24, 1.02, 0.08]}
             material={TOYBOX_MATERIALS.brassAccent}
           >
             <cylinderGeometry args={[0.02, 0.02, 0.36, 8]} />
@@ -638,37 +663,36 @@ function StorefrontBay({
         <group>
           {/* Warm Illuminated Bakery / Trattoria Display Window */}
           <mesh
-            position={[0, 1.48, 0.02]}
+            position={[0, 1.47, 0.02]}
             material={VENICE_MATERIALS.storefrontWarmInterior}
           >
-            <boxGeometry args={[openingW, 2.1, 0.025]} />
+            <boxGeometry args={[openingW + 0.03, 2.12, 0.025]} />
           </mesh>
           {/* Dark Timber Muntin Grid */}
           <mesh
-            position={[0, 1.48, 0.04]}
-            material={VENICE_MATERIALS.storefrontTimber}
+            position={[0, 1.48, 0.043]}
+            material={decalMat(VENICE_MATERIALS.storefrontTimber, 1)}
           >
-            <boxGeometry args={[0.05, 2.1, 0.02]} />
+            <boxGeometry args={[0.05, 2.07, 0.03]} />
           </mesh>
           <mesh
-            position={[0, 1.72, 0.04]}
-            material={VENICE_MATERIALS.storefrontTimber}
+            position={[0, 1.72, 0.05]}
+            material={decalMat(VENICE_MATERIALS.storefrontTimber, 2)}
           >
-            <boxGeometry args={[openingW, 0.05, 0.02]} />
+            <boxGeometry args={[openingW + 0.04, 0.05, 0.03]} />
           </mesh>
           {/* Shop Signage Frieze Plaque Above Window */}
           <mesh
-            castShadow
             position={[0, 3.04, suppressProtrusions ? 0.03 : 0.06]}
             material={VENICE_MATERIALS.signagePlaqueBg}
           >
             <boxGeometry args={[bayWidth * 0.72, 0.26, 0.04]} />
           </mesh>
           <mesh
-            position={[0, 3.04, suppressProtrusions ? 0.052 : 0.082]}
-            material={VENICE_MATERIALS.signagePlaqueInk}
+            position={[0, 3.04, suppressProtrusions ? 0.055 : 0.085]}
+            material={decalMat(VENICE_MATERIALS.signagePlaqueInk, 1)}
           >
-            <boxGeometry args={[bayWidth * 0.54, 0.08, 0.015]} />
+            <boxGeometry args={[bayWidth * 0.54, 0.08, 0.03]} />
           </mesh>
         </group>
       )}
@@ -689,11 +713,11 @@ function StorefrontBay({
                   : awningPrimaryMat
               }
             >
-              <boxGeometry args={panel.size} />
+              {/* Helper pads each stripe by +4mm, which overlaps neighbours coplanar: abut exactly instead */}
+              <boxGeometry args={[panel.size[0] - 0.004, panel.size[1], panel.size[2]]} />
             </mesh>
           ))}
           <mesh
-            castShadow
             position={awningSpec.frontValance.position}
             material={awningPrimaryMat}
           >
@@ -707,7 +731,7 @@ function StorefrontBay({
               rotation={[0.6, 0, 0]}
               material={VENICE_MATERIALS.wroughtIron}
             >
-              <cylinderGeometry args={[0.016, 0.016, 0.56, 6]} />
+              <cylinderGeometry args={[0.019, 0.019, 0.56, 6]} />
             </mesh>
           ))}
         </group>
@@ -743,14 +767,13 @@ function FireEscapeAssembly({
             {/* Grated Iron Balcony Platform */}
             <mesh
               castShadow
-              position={[0, ly, platD * 0.5]}
+              position={[0, ly, platD * 0.5 - 0.01]}
               material={VENICE_MATERIALS.wroughtIron}
             >
-              <boxGeometry args={[platW, 0.055, platD]} />
+              <boxGeometry args={[platW, 0.055, platD + 0.02]} />
             </mesh>
             {/* Front & Side Safety Railings */}
             <mesh
-              castShadow
               position={[0, ly + 0.78, platD - 0.03]}
               material={VENICE_MATERIALS.wroughtIron}
             >
@@ -762,7 +785,7 @@ function FireEscapeAssembly({
                 position={[px, ly + 0.4, platD - 0.03]}
                 material={VENICE_MATERIALS.wroughtIron}
               >
-                <boxGeometry args={[0.025, 0.78, 0.025]} />
+                <boxGeometry args={[0.036, 0.78, 0.036]} />
               </mesh>
             ))}
             {/* Diagonal Zig-Zag Stair Flight */}
@@ -808,6 +831,8 @@ function FacadeFaceDetail({
   const uCenter = (faceConfig.uMin + faceConfig.uMax) * 0.5;
   const streetY = faceConfig.effectiveStreetY;
   const suppressLowProtrusions = Boolean(building.isScaffoldingHost);
+  // Flush trim bands/quoins are decal-like layers over the wall: local polygonOffset clone, backs embedded 2cm.
+  const flushTrimMat = decalMat(trimMat, 1);
 
   // Ground-floor storefront bays
   const bayCount = Math.max(
@@ -842,21 +867,21 @@ function FacadeFaceDetail({
       <mesh
         castShadow
         receiveShadow
-        position={[uCenter, (streetY + 0.58) * 0.5, 0.03]}
-        material={trimMat}
+        position={[uCenter, (streetY + 0.58) * 0.5, 0.02]}
+        material={flushTrimMat}
       >
-        <boxGeometry args={[exposedSpan, streetY + 0.58, 0.06]} />
+        <boxGeometry args={[exposedSpan - 0.03, streetY + 0.58, 0.08]} />
       </mesh>
 
       {/* Belt Course Ledge Separating Ground Retail & Upper Apartments */}
       <mesh
         castShadow
         receiveShadow
-        position={[uCenter, streetY + 3.45, suppressLowProtrusions ? 0.03 : 0.07]}
-        material={trimMat}
+        position={[uCenter, streetY + 3.45, suppressLowProtrusions ? 0.02 : 0.06]}
+        material={flushTrimMat}
       >
         <boxGeometry
-          args={[exposedSpan + 0.06, 0.18, suppressLowProtrusions ? 0.06 : 0.14]}
+          args={[exposedSpan + 0.06, 0.18, suppressLowProtrusions ? 0.08 : 0.16]}
         />
       </mesh>
 
@@ -889,10 +914,10 @@ function FacadeFaceDetail({
             {/* Subtle Floor Stringcourse Trim */}
             {sIdx > 0 && (
               <mesh
-                position={[uCenter, upperStartY + sIdx * storyH - 0.04, 0.035]}
-                material={trimMat}
+                position={[uCenter, upperStartY + sIdx * storyH - 0.04, 0.025]}
+                material={decalMat(trimMat, 2)}
               >
-                <boxGeometry args={[exposedSpan, 0.09, 0.07]} />
+                <boxGeometry args={[exposedSpan - 0.03, 0.09, 0.09]} />
               </mesh>
             )}
 
@@ -989,16 +1014,16 @@ function FacadeFaceDetail({
           return (
             <React.Fragment key={`q-${qi}`}>
               <mesh
-                position={[faceConfig.uMin + qw * 0.5, qy, 0.025]}
-                material={trimMat}
+                position={[faceConfig.uMin + 0.015 + qw * 0.5, qy, 0.015]}
+                material={flushTrimMat}
               >
-                <boxGeometry args={[qw, 0.42, 0.05]} />
+                <boxGeometry args={[qw, 0.42, 0.07]} />
               </mesh>
               <mesh
-                position={[faceConfig.uMax - qw * 0.5, qy, 0.025]}
-                material={trimMat}
+                position={[faceConfig.uMax - 0.015 - qw * 0.5, qy, 0.015]}
+                material={flushTrimMat}
               >
-                <boxGeometry args={[qw, 0.42, 0.05]} />
+                <boxGeometry args={[qw, 0.42, 0.07]} />
               </mesh>
             </React.Fragment>
           );
@@ -1106,7 +1131,49 @@ export function BuildingFacadeModule({
     [building],
   );
 
+  const occludableAabb = useMemo(() => {
+    const hasShopfrontAwning =
+      Boolean(building.shopfrontAwningHex) && !building.isScaffoldingHost;
+    if (!hasShopfrontAwning) return building.aabb;
+
+    const min: [number, number, number] = [
+      building.aabb.min[0],
+      building.aabb.min[1],
+      building.aabb.min[2],
+    ];
+    const max: [number, number, number] = [
+      building.aabb.max[0],
+      building.aabb.max[1],
+      building.aabb.max[2],
+    ];
+
+    for (const fc of exposedFaces) {
+      if (!fc.isPrimaryStreetFront) continue;
+      switch (fc.face) {
+        case 'north':
+          min[2] -= 0.85;
+          break;
+        case 'south':
+          max[2] += 0.85;
+          break;
+        case 'west':
+          min[0] -= 0.85;
+          break;
+        case 'east':
+          max[0] += 0.85;
+          break;
+      }
+    }
+
+    return { min, max };
+  }, [building, exposedFaces]);
+
   const roofCapY = bodyHeight + roofRise;
+
+  // Per-building deterministic 2-8mm growth so abutting/overlapping neighbours never share an identical wall plane.
+  const wallEps = 0.002 + hashStr(`${building.id}-wall-eps`) * 0.006;
+  const wallW = widthX + wallEps;
+  const wallD = depthZ + wallEps;
 
   return (
     <group
@@ -1116,7 +1183,7 @@ export function BuildingFacadeModule({
       userData={{
         occludableBuilding: true,
         buildingId: building.id,
-        aabb: building.aabb,
+        aabb: occludableAabb,
       }}
     >
       {/* Main Structural Facade Massing Flush at Local y = 0 */}
@@ -1126,7 +1193,7 @@ export function BuildingFacadeModule({
         position={[0, bodyHeight * 0.5, 0]}
         material={wallMat}
       >
-        <boxGeometry args={[widthX, bodyHeight, depthZ]} />
+        <boxGeometry args={[wallW, bodyHeight, wallD]} />
       </mesh>
 
       {/* Detailed Street-Facing Storefronts, Windows, Shutters, Balconies & Cornices */}
@@ -1197,34 +1264,34 @@ export function BuildingFacadeModule({
           <mesh
             castShadow
             receiveShadow
-            position={[0, roofRise * 0.5, depthZ * 0.5 - 0.18]}
+            position={[0, (roofRise + 0.02) * 0.5, wallD * 0.5 - 0.18]}
             material={wallMat}
           >
-            <boxGeometry args={[widthX, roofRise, 0.36]} />
+            <boxGeometry args={[wallW, roofRise + 0.02, 0.36]} />
           </mesh>
           <mesh
             castShadow
             receiveShadow
-            position={[0, roofRise * 0.5, -depthZ * 0.5 + 0.18]}
+            position={[0, (roofRise + 0.02) * 0.5, -wallD * 0.5 + 0.18]}
             material={wallMat}
           >
-            <boxGeometry args={[widthX, roofRise, 0.36]} />
+            <boxGeometry args={[wallW, roofRise + 0.02, 0.36]} />
           </mesh>
           <mesh
             castShadow
             receiveShadow
-            position={[widthX * 0.5 - 0.18, roofRise * 0.5, 0]}
+            position={[wallW * 0.5 - 0.18, (roofRise + 0.02) * 0.5, 0]}
             material={wallMat}
           >
-            <boxGeometry args={[0.36, roofRise, depthZ]} />
+            <boxGeometry args={[0.36, roofRise + 0.02, wallD - 0.72]} />
           </mesh>
           <mesh
             castShadow
             receiveShadow
-            position={[-widthX * 0.5 + 0.18, roofRise * 0.5, 0]}
+            position={[-wallW * 0.5 + 0.18, (roofRise + 0.02) * 0.5, 0]}
             material={wallMat}
           >
-            <boxGeometry args={[0.36, roofRise, depthZ]} />
+            <boxGeometry args={[0.36, roofRise + 0.02, wallD - 0.72]} />
           </mesh>
           {/* Coping Stone Rim */}
           <mesh
@@ -1268,7 +1335,7 @@ export function BuildingFacadeModule({
             material={VENICE_MATERIALS.roofMansardSlate}
           />
           <mesh
-            position={[0, roofRise + 0.06, 0]}
+            position={[0, roofRise + 0.045, 0]}
             material={trimMat}
           >
             <boxGeometry
@@ -1282,10 +1349,10 @@ export function BuildingFacadeModule({
           {/* Twin Chimneys */}
           <mesh
             castShadow
-            position={[widthX * 0.2, roofRise + 0.55, 0]}
+            position={[widthX * 0.2, roofRise + 0.52, 0]}
             material={VENICE_MATERIALS.brickBrownstone}
           >
-            <boxGeometry args={[0.65, 1.1, 0.65]} />
+            <boxGeometry args={[0.65, 1.16, 0.65]} />
           </mesh>
         </group>
       )}

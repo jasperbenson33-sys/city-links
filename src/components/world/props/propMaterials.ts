@@ -63,3 +63,50 @@ export const PROP_ACCENT_MATERIALS = {
   pigeonWingBar: new THREE.MeshToonMaterial({ color: '#313a47' }),
   pigeonChestBerry: new THREE.MeshToonMaterial({ color: '#8a5876' }),
 } as const;
+
+const POLYGON_OFFSET_CACHE = new Map<string, THREE.Material>();
+
+/**
+ * Anti-z-fight helper: returns a cached clone of `material` with polygonOffset enabled.
+ * tier 1 -> factor/units -1 (first decal layer above its base); tier 2 -> -2/-2 (second layer).
+ * The source (shared) material is never mutated; every caller gets the same cached clone.
+ */
+export function withPolygonOffset<T extends THREE.Material>(
+  material: T,
+  tier: 1 | 2 = 1
+): T {
+  const key = `${material.uuid}:${tier}`;
+  const hit = POLYGON_OFFSET_CACHE.get(key);
+  if (hit) return hit as T;
+  const clone = material.clone() as T;
+  clone.polygonOffset = true;
+  clone.polygonOffsetFactor = -tier;
+  clone.polygonOffsetUnits = -tier;
+  POLYGON_OFFSET_CACHE.set(key, clone);
+  return clone;
+}
+
+const SOFTENED_CACHE = new Map<string, THREE.Material>();
+
+/**
+ * Softens razor-sharp near-black / near-white colors on thin elements toward the warm Venice palette.
+ * Returns a cached clone; never mutates the shared material. Materials without a color are returned as-is.
+ */
+export function withSoftContrast<T extends THREE.Material>(material: T): T {
+  const src = material as unknown as { color?: THREE.Color };
+  if (!src.color) return material;
+  const key = material.uuid;
+  const hit = SOFTENED_CACHE.get(key);
+  if (hit) return hit as T;
+  const clone = material.clone() as T;
+  const c = (clone as unknown as { color: THREE.Color }).color;
+  const hsl = { h: 0, s: 0, l: 0 };
+  c.getHSL(hsl);
+  if (hsl.l < 0.16) {
+    c.lerp(new THREE.Color('#3b3430'), 0.6);
+  } else if (hsl.l > 0.93) {
+    c.lerp(new THREE.Color('#f3e8d2'), 0.6);
+  }
+  SOFTENED_CACHE.set(key, clone);
+  return clone;
+}

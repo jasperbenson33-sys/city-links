@@ -603,8 +603,12 @@ export function evaluateMasterPlanGutterAtPoint(
           const radialErr = r - dist;
           const rx = dist > 1e-4 ? dx / dist : 0;
           const rz = dist > 1e-4 ? dz / dist : 0;
-          // Preserve entry speed ordering around the 90° arc with a gentle hydrant stream nudge
-          const targetSpeed = Math.min(18.5, forwardTangentSpeed + 0.45);
+          // Preserve cornering momentum smoothly when tracking inside the gutter channel
+          // without letting high-vaulting mis-hits equalize with clean bank shots.
+          const targetSpeed =
+            wy <= ELEVATIONS.SIDEWALK_Y + BALL_RADIUS + 0.23
+              ? Math.min(18.5, Math.max(forwardTangentSpeed + 0.22, speed * 0.40))
+              : forwardTangentSpeed * 0.82;
           const pullScale = 12.0;
           return {
             inGutter: true,
@@ -650,7 +654,7 @@ export function evaluateMasterPlanGutterAtPoint(
 
     if (isMercerSouth) {
       // Strictly inside the Mercer South recessed gutter band (z in [-18.75, -18.05], x in [5.8, 14.6])
-      if (wx < 5.8 || wx > 14.6 || wz < -18.75 || wz > -18.05) {
+      if (wx < 5.8 || wx > 14.6 || wz < -18.75 || wz > -18.05 || wy > ELEVATIONS.SIDEWALK_Y + BALL_RADIUS + 0.04) {
         continue;
       }
       // Require forward (+X East) velocity along the stream; never hijack south- or west-aimed shots
@@ -659,10 +663,9 @@ export function evaluateMasterPlanGutterAtPoint(
       }
       const targetZ = -18.38;
       const pullZ = (targetZ - wz) * 4.5;
-      // Gentle hydrant stream push ONLY below 8.4 m/s so corner banks crest the courtyard ramp cleanly without
-      // accelerating faster shots toward the back courtyard wall
-      const streamPush = vx < 8.4 ? 1.06 : 0.0;
-      const additiveTargetVx = Math.max(2.0, vx + streamPush);
+      // Smooth continuous hydrant stream push proportional to remaining forward speed
+      const streamPush = vx < 4.5 ? 0 : Math.min(2.2, (vx - 4.5) * 0.52);
+      const additiveTargetVx = vx + streamPush;
       return {
         inGutter: true,
         inCornerBoostZone: true,
@@ -707,4 +710,67 @@ export function isPointInFountainBasin(wx: number, wy: number, wz: number): bool
   );
   const r = (reactive.zoneRadius ?? 1.15) - 0.05;
   return distXZ <= r && wy <= reactive.zoneCenter[1] + 0.45 && wy >= 0.35;
+}
+
+/**
+ * Duration in seconds (< 0.6s) of the Fountain Hazard parabolic recovery drop arc.
+ */
+export const FOUNTAIN_DROP_DURATION_SEC = 0.48;
+
+export interface RectBoundsXZ {
+  minX: number;
+  maxX: number;
+  minZ: number;
+  maxZ: number;
+}
+
+/**
+ * Partitions an axis-aligned XZ rectangle cleanly around a cutout rectangle so
+ * adjacent ground colliders never overlap coplanarly or block recessed openings (e.g. cup well).
+ */
+export function subtractRect2D(
+  outer: RectBoundsXZ,
+  hole: RectBoundsXZ,
+  minSpan = 1e-4,
+): RectBoundsXZ[] {
+  const ix0 = Math.max(outer.minX, hole.minX);
+  const ix1 = Math.min(outer.maxX, hole.maxX);
+  const iz0 = Math.max(outer.minZ, hole.minZ);
+  const iz1 = Math.min(outer.maxZ, hole.maxZ);
+  if (ix0 >= ix1 || iz0 >= iz1) return [outer];
+
+  const out: RectBoundsXZ[] = [];
+  if (ix0 - outer.minX > minSpan) {
+    out.push({ minX: outer.minX, maxX: ix0, minZ: outer.minZ, maxZ: outer.maxZ });
+  }
+  if (outer.maxX - ix1 > minSpan) {
+    out.push({ minX: ix1, maxX: outer.maxX, minZ: outer.minZ, maxZ: outer.maxZ });
+  }
+  if (iz0 - outer.minZ > minSpan) {
+    out.push({ minX: ix0, maxX: ix1, minZ: outer.minZ, maxZ: iz0 });
+  }
+  if (outer.maxZ - iz1 > minSpan) {
+    out.push({ minX: ix0, maxX: ix1, minZ: iz1, maxZ: outer.maxZ });
+  }
+  return out;
+}
+
+/**
+ * Samples a brisk parabolic recovery arc point from the fountain splash location
+ * over the stone rim onto the quick-drop relief spot.
+ */
+export function sampleFountainDropArcPoint(
+  from: Vec3Tuple,
+  to: Vec3Tuple,
+  progress01: number,
+  arcLiftMeters = 0.92,
+): Vec3Tuple {
+  const u = Math.max(0, Math.min(1, progress01));
+  // Gentle cubic-out horizontal ease with crisp ballistic parabola vertically
+  const horizT = 1 - Math.pow(1 - u, 1.85);
+  const x = from[0] + (to[0] - from[0]) * horizT;
+  const z = from[2] + (to[2] - from[2]) * horizT;
+  const baseY = from[1] + (to[1] - from[1]) * u;
+  const liftY = 4 * arcLiftMeters * u * (1 - u);
+  return [x, baseY + liftY, z];
 }

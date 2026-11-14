@@ -3,6 +3,7 @@
 export {
   type CurbsideSoundId,
   type PlaySoundOptions,
+  type SoundArg,
   initSoundEngine,
   isSoundMuted,
   playAwningCushion,

@@ -17,6 +17,133 @@ import type {
 } from '@/types/course';
 import { VENICE_MATERIALS } from '@/materials';
 
+// ---------------------------------------------------------------------------
+// Anti-shimmer helpers: local (memoized) material variants. Shared '@/materials'
+// instances are NEVER mutated; decal/thin-edge variants are cloned once at module scope.
+// ---------------------------------------------------------------------------
+
+/** Layered surfaces sit >= this far (m) above their base plane. */
+const DECAL_LIFT = 0.015;
+
+const layeredMaterialCache = new WeakMap<THREE.Material, Map<string, THREE.Material>>();
+
+/**
+ * Memoized clone of `base` with polygonOffset. tier 1 => -1/-1 (first layer over base),
+ * tier 2 => -2/-2 (second layer). Negative tiers push the surface toward the camera;
+ * `pushBack` (positive offset) is used for huge base planes like the horizon apron.
+ */
+function layeredMaterial<T extends THREE.Material>(base: T, tier: 1 | 2 | -1): T {
+  let perBase = layeredMaterialCache.get(base);
+  if (!perBase) {
+    perBase = new Map();
+    layeredMaterialCache.set(base, perBase);
+  }
+  const key = String(tier);
+  let variant = perBase.get(key);
+  if (!variant) {
+    variant = base.clone();
+    variant.polygonOffset = true;
+    const f = tier === -1 ? 1 : -tier;
+    variant.polygonOffsetFactor = f;
+    variant.polygonOffsetUnits = f;
+    perBase.set(key, variant);
+  }
+  return variant as T;
+}
+
+/** Softened warm-charcoal variants of razor-dark thin-element materials (rails, pickets, cords). */
+function softenedThinMaterial(
+  base: THREE.MeshStandardMaterial,
+  color: string,
+  metalness: number,
+  roughness: number,
+): THREE.MeshStandardMaterial {
+  const m = base.clone();
+  m.color.set(color);
+  m.metalness = metalness;
+  m.roughness = roughness;
+  return m;
+}
+
+const THIN_IRON_MAT = softenedThinMaterial(VENICE_MATERIALS.wroughtIron, '#403A3C', 0.28, 0.62);
+const THIN_CORD_MAT = softenedThinMaterial(VENICE_MATERIALS.stringLightCord, '#56473E', 0.05, 0.78);
+const BAY_PANEL_DECAL_MAT = layeredMaterial(VENICE_MATERIALS.stuccoTerracottaDeep, 1);
+const WINDOW_LIT_DECAL_MAT = layeredMaterial(VENICE_MATERIALS.windowWarmLit, 1);
+const WINDOW_DARK_DECAL_MAT = layeredMaterial(VENICE_MATERIALS.windowDarkGlass, 1);
+const HORIZON_APRON_MAT = layeredMaterial(VENICE_MATERIALS.horizonEarthApron, -1);
+
+interface WallAbut {
+  negX: number;
+  posX: number;
+  negZ: number;
+  posZ: number;
+  /** Height drop (m) applied to the later wall of an abutting pair so coping tops never share a plane. */
+  drop: number;
+}
+
+/**
+ * Detects gap=0 abutting walls (axis-aligned) and returns per-wall end-cap overlap extensions
+ * (tucks the end-cap 1.5cm inside the neighbour) plus a top drop for the later wall.
+ */
+function computeWallAbuts(walls: ArchitecturalWallSpec[]): Map<string, WallAbut> {
+  const out = new Map<string, WallAbut>();
+  const TOUCH = 0.011;
+  const boxes = walls.map((w) => {
+    const axisAligned = Math.abs(Math.sin(w.rotationY)) < 1e-6;
+    const swapped = Math.abs(Math.cos(w.rotationY)) < 1e-6;
+    const sx = swapped ? w.size[2] : w.size[0];
+    const sz = swapped ? w.size[0] : w.size[2];
+    return {
+      ok: axisAligned || swapped,
+      min: [w.center[0] - sx / 2, w.center[1] - w.size[1] / 2, w.center[2] - sz / 2],
+      max: [w.center[0] + sx / 2, w.center[1] + w.size[1] / 2, w.center[2] + sz / 2],
+      spanAxis: sz > sx ? 2 : 0,
+    };
+  });
+  walls.forEach((w, i) => {
+    const a = boxes[i]!;
+    const abut: WallAbut = { negX: 0, posX: 0, negZ: 0, posZ: 0, drop: 0 };
+    let touched = false;
+    if (a.ok) {
+      boxes.forEach((b, j) => {
+        if (i === j || !b.ok) return;
+        for (const axis of [0, 2] as const) {
+          const gapPos = b.min[axis]! - a.max[axis]!;
+          const gapNeg = a.min[axis]! - b.max[axis]!;
+          const other = axis === 0 ? 2 : 0;
+          const overlapOther =
+            Math.min(a.max[other]!, b.max[other]!) - Math.max(a.min[other]!, b.min[other]!);
+          const overlapY = Math.min(a.max[1]!, b.max[1]!) - Math.max(a.min[1]!, b.min[1]!);
+          if (overlapOther <= 0.005 || overlapY <= 0.005) continue;
+          const touchPos = Math.abs(gapPos) <= TOUCH;
+          const touchNeg = Math.abs(gapNeg) <= TOUCH;
+          if (!touchPos && !touchNeg) continue;
+          touched = true;
+          if (j < i) abut.drop = DECAL_LIFT;
+          // Only tuck the end-cap when the touching face is this wall's own end-cap (span axis).
+          if (axis !== a.spanAxis) continue;
+          if (axis === 0) {
+            if (touchPos) abut.posX = DECAL_LIFT;
+            if (touchNeg) abut.negX = DECAL_LIFT;
+          } else {
+            if (touchPos) abut.posZ = DECAL_LIFT;
+            if (touchNeg) abut.negZ = DECAL_LIFT;
+          }
+        }
+      });
+    }
+    if (touched) out.set(w.id, abut);
+  });
+  return out;
+}
+
+/** Deterministic tiny per-tower height nudge so adjacent skyline slabs never share a top plane. */
+function towerHeightNudge(id: string): number {
+  let sum = 0;
+  for (let i = 0; i < id.length; i++) sum += id.charCodeAt(i);
+  return (sum % 7) * DECAL_LIFT;
+}
+
 function getSkylineMaterial(
   palette: PerimeterBuildingSpec['palette'],
 ): THREE.MeshStandardMaterial {
@@ -52,12 +179,14 @@ export function ArchitecturalWallsGroup({
   walls?: ArchitecturalWallSpec[];
   showWireframe?: boolean;
 }) {
+  const abuts = useMemo(() => computeWallAbuts(walls), [walls]);
   return (
     <group name="architectural-walls-group">
       {walls.map((wall) => (
         <ArchitecturalWallMesh
           key={wall.id}
           wall={wall}
+          abut={abuts.get(wall.id)}
           showWireframe={showWireframe}
         />
       ))}
@@ -67,15 +196,25 @@ export function ArchitecturalWallsGroup({
 
 function ArchitecturalWallMesh({
   wall,
+  abut,
   showWireframe,
 }: {
   wall: ArchitecturalWallSpec;
+  abut?: WallAbut;
   showWireframe: boolean;
 }) {
-  const width = wall.size[0];
-  const depth = wall.size[2];
+  // Abutting end-caps are tucked 1.5cm into the neighbour (hidden) and the later wall's top is
+  // dropped 1.5cm so coping/pilaster tops never share an identical coplanar plane.
+  const extNegX = abut?.negX ?? 0;
+  const extPosX = abut?.posX ?? 0;
+  const extNegZ = abut?.negZ ?? 0;
+  const extPosZ = abut?.posZ ?? 0;
+  const width = wall.size[0] + extNegX + extPosX;
+  const depth = wall.size[2] + extNegZ + extPosZ;
+  const centerX = wall.center[0] + (extPosX - extNegX) * 0.5;
+  const centerZ = wall.center[2] + (extPosZ - extNegZ) * 0.5;
   const baseY = Math.min(wall.groundY, wall.center[1] - wall.size[1] * 0.5);
-  const topY = wall.topY;
+  const topY = wall.topY - (abut?.drop ?? 0);
   const totalHeight = Math.max(0.25, topY - baseY);
 
   if (wall.kind === 'wrought_iron_planter_wall') {
@@ -93,7 +232,7 @@ function ArchitecturalWallMesh({
     return (
       <group
         name={`wall-${wall.id}`}
-        position={[wall.center[0], 0, wall.center[2]]}
+        position={[centerX, 0, centerZ]}
         rotation={[0, wall.rotationY, 0]}
       >
         {/* Limestone planter wall base */}
@@ -138,29 +277,29 @@ function ArchitecturalWallMesh({
                   ? VENICE_MATERIALS.flowerBoxBlossomCoral
                   : VENICE_MATERIALS.flowerBoxBlossomGold
               }
-              castShadow
+              castShadow={false}
             >
               <dodecahedronGeometry args={[0.048, 0]} />
             </mesh>
           );
         })}
 
-        {/* Wrought-iron top handrail flush at wall.topY */}
+        {/* Wrought-iron top handrail (top at wall.topY - 0.001; posts/pickets end inside it) */}
         <mesh
           position={[0, topY - 0.022, -depth * 0.18]}
-          material={VENICE_MATERIALS.wroughtIron}
-          castShadow
+          material={THIN_IRON_MAT}
+          castShadow={false}
         >
-          <boxGeometry args={[width, 0.042, 0.05]} />
+          <boxGeometry args={[width, 0.042, 0.07]} />
         </mesh>
 
-        {/* Lower horizontal iron bar */}
+        {/* Lower horizontal iron bar (distinct half-thickness vs pickets 0.018 / posts 0.03) */}
         <mesh
           position={[0, copingTopY + 0.045, -depth * 0.18]}
-          material={VENICE_MATERIALS.wroughtIron}
-          castShadow
+          material={THIN_IRON_MAT}
+          castShadow={false}
         >
-          <boxGeometry args={[width - 0.04, 0.024, 0.032]} />
+          <boxGeometry args={[width - 0.04, 0.036, 0.045]} />
         </mesh>
 
         {/* Wrought-iron stanchion posts */}
@@ -170,11 +309,11 @@ function ArchitecturalWallMesh({
           return (
             <group key={`post-${idx}`} position={[x, 0, -depth * 0.18]}>
               <mesh
-                position={[0, copingTopY + railH * 0.5, 0]}
-                material={VENICE_MATERIALS.wroughtIron}
-                castShadow
+                position={[0, copingTopY + (railH - 0.022) * 0.5, 0]}
+                material={THIN_IRON_MAT}
+                castShadow={false}
               >
-                <boxGeometry args={[0.048, railH, 0.048]} />
+                <boxGeometry args={[0.06, railH - 0.022, 0.06]} />
               </mesh>
               <mesh
                 position={[0, baseY + masonryH * 0.5 + 0.02, depth * 0.18]}
@@ -196,10 +335,10 @@ function ArchitecturalWallMesh({
             <mesh
               key={`picket-${idx}`}
               position={[x, copingTopY + railH * 0.48, -depth * 0.18]}
-              material={VENICE_MATERIALS.wroughtIron}
-              castShadow
+              material={THIN_IRON_MAT}
+              castShadow={false}
             >
-              <boxGeometry args={[0.018, Math.max(0.04, railH - 0.04), 0.018]} />
+              <boxGeometry args={[0.036, Math.max(0.04, railH - 0.04), 0.036]} />
             </mesh>
           );
         })}
@@ -231,7 +370,7 @@ function ArchitecturalWallMesh({
     return (
       <group
         name={`wall-${wall.id}`}
-        position={[wall.center[0], 0, wall.center[2]]}
+        position={[centerX, 0, centerZ]}
         rotation={[0, wall.rotationY, 0]}
       >
         {/* Limestone / Ramp Cheek Masonry Body */}
@@ -271,18 +410,19 @@ function ArchitecturalWallMesh({
               key={`cheek-pil-${idx}`}
               position={
                 alongZ
-                  ? [0, baseY + totalHeight * 0.5, offset]
-                  : [offset, baseY + totalHeight * 0.5, 0]
+                  ? [0, baseY + (totalHeight - 0.03) * 0.5, offset]
+                  : [offset, baseY + (totalHeight - 0.03) * 0.5, 0]
               }
               material={VENICE_MATERIALS.stuccoCreamDeep}
               castShadow
               receiveShadow
             >
+              {/* Top sits 3cm inside the coping (never coplanar with coping top); sides 2cm proud of coping */}
               <boxGeometry
                 args={
                   alongZ
-                    ? [wallThick + 0.05, totalHeight, 0.24]
-                    : [0.24, totalHeight, wallThick + 0.05]
+                    ? [wallThick + 0.07, totalHeight - 0.03, 0.24]
+                    : [0.24, totalHeight - 0.03, wallThick + 0.07]
                 }
               />
             </mesh>
@@ -309,7 +449,7 @@ function ArchitecturalWallMesh({
   return (
     <group
       name={`wall-${wall.id}`}
-      position={[wall.center[0], 0, wall.center[2]]}
+      position={[centerX, 0, centerZ]}
       rotation={[0, wall.rotationY, 0]}
     >
       {/* Granite plinth base */}
@@ -346,28 +486,28 @@ function ArchitecturalWallMesh({
           const archH = Math.max(0.35, bodyH - 0.34);
           return (
             <group key={`ret-bay-${bIdx}`} position={[bx, baseY + 0.24, 0]}>
-              {/* Terracotta/limestone recessed panel inlay */}
+              {/* Terracotta/limestone recessed panel inlay: flat decal layer, >= 1.5cm proud + polygonOffset */}
               <mesh
                 position={[0, archH * 0.5, 0]}
-                material={VENICE_MATERIALS.stuccoTerracottaDeep}
-                castShadow
+                material={BAY_PANEL_DECAL_MAT}
+                castShadow={false}
                 receiveShadow
               >
-                <boxGeometry args={[archW, archH, depth + 0.035]} />
+                <boxGeometry args={[archW, archH, depth + 2 * DECAL_LIFT]} />
               </mesh>
-              {/* Limestone architrave lintel + keystone */}
+              {/* Limestone architrave lintel + keystone (faces >= 1.5cm apart from panel / each other) */}
               <mesh
                 position={[0, archH + 0.05, 0]}
                 material={VENICE_MATERIALS.stuccoCreamLimestone}
                 castShadow
               >
-                <boxGeometry args={[archW + 0.14, 0.09, depth + 0.06]} />
+                <boxGeometry args={[archW + 0.14, 0.09, depth + 0.07]} />
               </mesh>
               <mesh
-                position={[0, archH + 0.07, 0]}
+                position={[0, archH + 0.055, 0]}
                 material={VENICE_MATERIALS.graniteCurbBevelTop}
               >
-                <boxGeometry args={[0.16, 0.13, depth + 0.08]} />
+                <boxGeometry args={[0.16, 0.14, depth + 0.1]} />
               </mesh>
             </group>
           );
@@ -386,8 +526,8 @@ function ArchitecturalWallMesh({
       {/* Wrought-iron top rail & vertical balusters crowning the retaining wall strictly <= topY */}
       <mesh
         position={[0, topY - 0.018, 0]}
-        material={VENICE_MATERIALS.wroughtIron}
-        castShadow
+        material={THIN_IRON_MAT}
+        castShadow={false}
       >
         <boxGeometry
           args={
@@ -401,14 +541,16 @@ function ArchitecturalWallMesh({
         Array.from({ length: Math.max(8, Math.round(spanLen / 0.45)) }, (_, k) => {
           const count = Math.max(8, Math.round(spanLen / 0.45));
           const x = -spanLen * 0.48 + (k / (count - 1)) * spanLen * 0.96;
-          const balH = Math.max(0.04, topY - (baseY + bodyH + copingH));
+          // Balusters end at the rail's centreline (inside the rail) so tops never coincide with rail top.
+          const balH = Math.max(0.04, topY - 0.018 - (baseY + bodyH + copingH));
           return (
             <mesh
               key={`bal-${k}`}
               position={[x, baseY + bodyH + copingH + balH * 0.5, 0]}
-              material={VENICE_MATERIALS.wroughtIron}
+              material={THIN_IRON_MAT}
+              castShadow={false}
             >
-              <boxGeometry args={[0.022, balH, 0.022]} />
+              <boxGeometry args={[0.036, balH, 0.036]} />
             </mesh>
           );
         })}
@@ -431,16 +573,17 @@ function ArchitecturalWallMesh({
               <boxGeometry
                 args={
                   alongZ
-                    ? [wallThick + 0.14, bodyH + 0.08, 0.38]
-                    : [0.38, bodyH + 0.08, wallThick + 0.14]
+                    ? [wallThick + 0.2, bodyH + 0.08, 0.38]
+                    : [0.38, bodyH + 0.08, wallThick + 0.2]
                 }
               />
             </mesh>
             <mesh
-              position={[0, topY - 0.04, 0]}
+              position={[0, topY - 0.055, 0]}
               material={VENICE_MATERIALS.graniteCurbBevelTop}
               castShadow
             >
+              {/* Cap top sits 1.5cm below the rail top (rail passes through it) */}
               <boxGeometry
                 args={
                   alongZ
@@ -489,7 +632,11 @@ export function CourtyardPergolaMesh({
         const isNorthRow = pos[2] < centerZ;
         const braceSignZ = isNorthRow ? 1 : -1;
         return (
-          <group key={`pergola-post-${idx}`} position={[pos[0], groundY, pos[2]]}>
+          <group
+            key={`pergola-post-${idx}`}
+            position={[pos[0], groundY, pos[2]]}
+            userData={{ occludableProp: true }}
+          >
             {/* Molded limestone plinth */}
             <mesh
               position={[0, plinthH * 0.5, 0]}
@@ -557,78 +704,83 @@ export function CourtyardPergolaMesh({
         );
       })}
 
-      {/* Longitudinal Cedar Header Double Beams (South & North rows) */}
-      {[minZ + 0.1, maxZ - 0.1].map((beamZ, rowIdx) => (
-        <group key={`header-beam-${rowIdx}`} position={[centerX, beamY, beamZ]}>
-          <mesh
-            position={[0, 0.12, -0.09]}
-            material={VENICE_MATERIALS.pergolaCedar}
-            castShadow
-            receiveShadow
-          >
-            <boxGeometry args={[spanX + 0.75, 0.24, 0.12]} />
-          </mesh>
-          <mesh
-            position={[0, 0.12, 0.09]}
-            material={VENICE_MATERIALS.pergolaCedar}
-            castShadow
-            receiveShadow
-          >
-            <boxGeometry args={[spanX + 0.75, 0.24, 0.12]} />
-          </mesh>
-        </group>
-      ))}
-
-      {/* 9 Notched Transverse Rafters with overhanging Venetian tails */}
-      {Array.from({ length: rafterCount }, (_, idx) => {
-        const t = rafterCount === 1 ? 0.5 : idx / (rafterCount - 1);
-        const rx = minX + 0.25 + t * (spanX - 0.5);
-        return (
-          <mesh
-            key={`rafter-${idx}`}
-            position={[rx, beamY + 0.27, centerZ]}
-            material={VENICE_MATERIALS.pergolaCedar}
-            castShadow
-            receiveShadow
-          >
-            <boxGeometry args={[0.12, 0.18, spanZ + 0.85]} />
-          </mesh>
-        );
-      })}
-
-      {/* Longitudinal Roof Purlins + Draped Pergola Greenery & Blossoms */}
-      {[-spanZ * 0.3, 0, spanZ * 0.3].map((dz, pIdx) => (
-        <mesh
-          key={`purlin-${pIdx}`}
-          position={[centerX, beamY + 0.39, centerZ + dz]}
-          material={VENICE_MATERIALS.pergolaCedar}
-          castShadow
-        >
-          <boxGeometry args={[spanX + 0.4, 0.07, 0.07]} />
-        </mesh>
-      ))}
-
-      {/* Clustered low-poly climbing vine foliage over rafters */}
-      {Array.from({ length: 10 }, (_, idx) => {
-        const vx = minX + 0.75 + (idx / 9) * (spanX - 1.5);
-        const vz = centerZ + ((idx % 3) - 1) * (spanZ * 0.28);
-        return (
-          <group key={`vine-${idx}`} position={[vx, beamY + 0.44, vz]}>
-            <mesh material={VENICE_MATERIALS.pergolaVineLeaf} castShadow>
-              <dodecahedronGeometry args={[0.42 + (idx % 2) * 0.1, 0]} />
+      <group
+        name={`pergola-${pergola.id}-overhead`}
+        userData={{ occludableProp: true }}
+      >
+        {/* Longitudinal Cedar Header Double Beams (South & North rows) */}
+        {[minZ + 0.1, maxZ - 0.1].map((beamZ, rowIdx) => (
+          <group key={`header-beam-${rowIdx}`} position={[centerX, beamY, beamZ]}>
+            <mesh
+              position={[0, 0.12, -0.09]}
+              material={VENICE_MATERIALS.pergolaCedar}
+              castShadow
+              receiveShadow
+            >
+              <boxGeometry args={[spanX + 0.75, 0.24, 0.12]} />
             </mesh>
-            {idx % 2 === 0 && (
-              <mesh
-                position={[0.16, -0.14, 0.24]}
-                material={VENICE_MATERIALS.flowerBoxBlossomCoral}
-                castShadow
-              >
-                <dodecahedronGeometry args={[0.16, 0]} />
-              </mesh>
-            )}
+            <mesh
+              position={[0, 0.12, 0.09]}
+              material={VENICE_MATERIALS.pergolaCedar}
+              castShadow
+              receiveShadow
+            >
+              <boxGeometry args={[spanX + 0.75, 0.24, 0.12]} />
+            </mesh>
           </group>
-        );
-      })}
+        ))}
+
+        {/* 9 Notched Transverse Rafters with overhanging Venetian tails */}
+        {Array.from({ length: rafterCount }, (_, idx) => {
+          const t = rafterCount === 1 ? 0.5 : idx / (rafterCount - 1);
+          const rx = minX + 0.25 + t * (spanX - 0.5);
+          return (
+            <mesh
+              key={`rafter-${idx}`}
+              position={[rx, beamY + 0.27, centerZ]}
+              material={VENICE_MATERIALS.pergolaCedar}
+              castShadow
+              receiveShadow
+            >
+              <boxGeometry args={[0.12, 0.18, spanZ + 0.85]} />
+            </mesh>
+          );
+        })}
+
+        {/* Longitudinal Roof Purlins + Draped Pergola Greenery & Blossoms */}
+        {[-spanZ * 0.3, 0, spanZ * 0.3].map((dz, pIdx) => (
+          <mesh
+            key={`purlin-${pIdx}`}
+            position={[centerX, beamY + 0.39, centerZ + dz]}
+            material={VENICE_MATERIALS.pergolaCedar}
+            castShadow
+          >
+            <boxGeometry args={[spanX + 0.4, 0.07, 0.07]} />
+          </mesh>
+        ))}
+
+        {/* Clustered low-poly climbing vine foliage over rafters */}
+        {Array.from({ length: 10 }, (_, idx) => {
+          const vx = minX + 0.75 + (idx / 9) * (spanX - 1.5);
+          const vz = centerZ + ((idx % 3) - 1) * (spanZ * 0.28);
+          return (
+            <group key={`vine-${idx}`} position={[vx, beamY + 0.44, vz]}>
+              <mesh material={VENICE_MATERIALS.pergolaVineLeaf} castShadow>
+                <dodecahedronGeometry args={[0.42 + (idx % 2) * 0.1, 0]} />
+              </mesh>
+              {idx % 2 === 0 && (
+                <mesh
+                  position={[0.16, -0.14, 0.24]}
+                  material={VENICE_MATERIALS.flowerBoxBlossomCoral}
+                  castShadow
+                >
+                  <dodecahedronGeometry args={[0.16, 0]} />
+                </mesh>
+              )}
+            </group>
+          );
+        })}
+      </group>
     </group>
   );
 }
@@ -663,7 +815,8 @@ function SingleStringLightSpan({ span }: { span: StringLightSpanSpec }) {
       curvePts.push(p);
     }
     const curve = new THREE.CatmullRomCurve3(curvePts);
-    const tube = new THREE.TubeGeometry(curve, 24, 0.015, 5, false);
+    // Stylized cable: 4.5cm diameter (>= 3.5cm) so it glides during slow orbits instead of aliasing.
+    const tube = new THREE.TubeGeometry(curve, 24, 0.0225, 6, false);
 
     const bulbs: [number, number, number][] = [];
     const count = Math.max(2, span.bulbCount);
@@ -684,14 +837,15 @@ function SingleStringLightSpan({ span }: { span: StringLightSpanSpec }) {
   return (
     <group name={`string-span-${span.id}`}>
       {/* Catenary cord */}
-      <mesh geometry={tubeGeo} material={VENICE_MATERIALS.stringLightCord} />
+      <mesh geometry={tubeGeo} material={THIN_CORD_MAT} castShadow={false} receiveShadow={false} />
 
       {/* Wall anchor iron rosettes */}
       {[span.startAnchor, span.endAnchor].map((pt, idx) => (
         <mesh
           key={`anchor-${idx}`}
           position={pt}
-          material={VENICE_MATERIALS.wroughtIron}
+          material={THIN_IRON_MAT}
+          castShadow={false}
         >
           <boxGeometry args={[0.12, 0.12, 0.12]} />
         </mesh>
@@ -702,11 +856,12 @@ function SingleStringLightSpan({ span }: { span: StringLightSpanSpec }) {
         <group key={`bulb-${bIdx}`} position={pos}>
           <mesh
             position={[0, 0.045, 0]}
-            material={VENICE_MATERIALS.stringLightCord}
+            material={THIN_CORD_MAT}
+            castShadow={false}
           >
-            <cylinderGeometry args={[0.016, 0.022, 0.045, 6]} />
+            <cylinderGeometry args={[0.02, 0.026, 0.045, 8]} />
           </mesh>
-          <mesh material={VENICE_MATERIALS.stringLightBulbGlow}>
+          <mesh material={VENICE_MATERIALS.stringLightBulbGlow} castShadow={false}>
             <sphereGeometry args={[0.056, 8, 6]} />
           </mesh>
         </group>
@@ -738,7 +893,7 @@ export function SkylineAndHorizonSkirt({
         name="outer-city-ground-skirt"
         position={[skirtCX, OUTER_CITY_GROUND_SKIRT.topY, skirtCZ]}
         rotation={[-Math.PI / 2, 0, 0]}
-        material={VENICE_MATERIALS.horizonEarthApron}
+        material={HORIZON_APRON_MAT}
         receiveShadow
       >
         <planeGeometry args={[skirtW, skirtD]} />
@@ -857,9 +1012,9 @@ const SKYLINE_BAY_WALL_MATS = [
 ];
 
 const SKYLINE_SHUTTER_MATS = [
-  VENICE_MATERIALS.shutterSageDefault,
-  VENICE_MATERIALS.shutterEspresso,
-  VENICE_MATERIALS.stuccoTerracottaDeep,
+  layeredMaterial(VENICE_MATERIALS.shutterSageDefault, 1),
+  layeredMaterial(VENICE_MATERIALS.shutterEspresso, 1),
+  layeredMaterial(VENICE_MATERIALS.stuccoTerracottaDeep, 1),
 ];
 
 function SkylineTowerMesh({ tower }: { tower: PerimeterBuildingSpec }) {
@@ -987,7 +1142,7 @@ function SkylineTowerMesh({ tower }: { tower: PerimeterBuildingSpec }) {
               : bIdx % 3 === 2
                 ? -0.95
                 : 0.45;
-        const bayH = Math.max(14.0, tower.height + heightVar);
+        const bayH = Math.max(14.0, tower.height + heightVar) + towerHeightNudge(tower.id);
         const bayW = frontIsNS ? baySpan : minorDepth;
         const bayD = frontIsNS ? minorDepth : baySpan;
         const bayMat =
@@ -1019,7 +1174,7 @@ function SkylineTowerMesh({ tower }: { tower: PerimeterBuildingSpec }) {
               position={[0, baseY + bayH - 3.6, 0]}
               material={VENICE_MATERIALS.skylineLimestone}
             >
-              <boxGeometry args={[bayW + 0.14, 0.24, bayD + 0.14]} />
+              <boxGeometry args={[bayW + 0.26, 0.24, bayD + 0.26]} />
             </mesh>
             <mesh
               position={[0, baseY + bayH + 0.14, 0]}
@@ -1063,8 +1218,8 @@ function SkylineTowerMesh({ tower }: { tower: PerimeterBuildingSpec }) {
                       position={[0, 0, 0.025]}
                       material={
                         isLit
-                          ? VENICE_MATERIALS.windowWarmLit
-                          : VENICE_MATERIALS.windowDarkGlass
+                          ? WINDOW_LIT_DECAL_MAT
+                          : WINDOW_DARK_DECAL_MAT
                       }
                     >
                       <boxGeometry args={[0.92, 1.54, 0.05]} />

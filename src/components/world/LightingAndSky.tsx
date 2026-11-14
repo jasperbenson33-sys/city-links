@@ -1,9 +1,10 @@
 'use client';
 
 import React, { useEffect, useMemo, useRef } from 'react';
-import { useFrame } from '@react-three/fiber';
+import { useFrame, useThree } from '@react-three/fiber';
 import * as THREE from 'three';
 import { TOYBOX_MATERIALS } from '@/materials';
+import { resolveAnimTime } from './qaFreeze';
 
 interface CloudSpec {
   x: number;
@@ -14,6 +15,12 @@ interface CloudSpec {
   bobOffset: number;
 }
 
+/**
+ * The game camera far plane is 185m (tight depth range = zero z-fight), so the cloud bank is pulled in
+ * by `CLOUD_RANGE_SCALE` (positions AND sizes scale together, preserving the exact same sky silhouette).
+ */
+const CLOUD_RANGE_SCALE = 0.62;
+
 const CLOUD_SPECS: CloudSpec[] = [
   { x: -135, y: 32, z: -128, scale: 1.75, speed: 0.44, bobOffset: 0.0 },
   { x: -95, y: 38, z: -115, scale: 1.5, speed: 0.34, bobOffset: 1.3 },
@@ -21,12 +28,38 @@ const CLOUD_SPECS: CloudSpec[] = [
   { x: 148, y: 35, z: -82, scale: 1.8, speed: 0.4, bobOffset: 3.1 },
   { x: 156, y: 28, z: 32, scale: 1.55, speed: 0.46, bobOffset: 4.2 },
   { x: -148, y: 30, z: 48, scale: 1.65, speed: 0.38, bobOffset: 5.0 },
-];
+].map((c) => ({
+  ...c,
+  x: c.x * CLOUD_RANGE_SCALE,
+  y: c.y * CLOUD_RANGE_SCALE,
+  z: c.z * CLOUD_RANGE_SCALE,
+  scale: c.scale * CLOUD_RANGE_SCALE,
+}));
+
+/** Sky dome radius (< camera far 185) — the dome follows the camera so it can never be clipped. */
+const SKY_DOME_RADIUS = 150;
+
+/**
+ * Static, tightly fitted sun-shadow volume for the compact single hole.
+ * Box = playable 5th & Mercer corridor + courtyard (+ margin on the sun-facing side for casters),
+ * world metres.
+ */
+const SHADOW_FIT_BOX = {
+  minX: -27,
+  maxX: 44,
+  minZ: -34,
+  maxZ: 55,
+  minY: -0.5,
+  maxY: 16,
+};
 
 export interface LightingAndSkyProps {
   /** Show golden-hour sky dome, atmospheric perspective, and drifting clouds. False for isolated QA studio. */
   showHorizon?: boolean;
-  /** Sun shadow frustum half-extent (44 for full 72m street + courtyard, 12 for isolated QA turntable). */
+  /**
+   * Sun shadow frustum half-extent override (isolated QA turntable uses 12). When omitted on the
+   * full street, a static frustum is fitted tightly around the playable corridor + courtyard.
+   */
   shadowSpan?: number;
   /** World-space focus point for the directional sun shadow frustum. */
   shadowTarget?: [number, number, number];
@@ -39,8 +72,11 @@ export const LightingAndSky = React.memo(function LightingAndSky({
 }: LightingAndSkyProps) {
   const cloudsGroupRef = useRef<THREE.Group>(null);
   const elapsedRef = useRef(0);
+  const shadowBakeRemainingRef = useRef(5);
+  const prevSceneChildCountRef = useRef(-1);
+  const gl = useThree((s) => s.gl);
 
-  const resolvedSpan = shadowSpan ?? (showHorizon ? 44 : 12);
+  const resolvedSpan = shadowSpan ?? 12;
   const resolvedTarget: [number, number, number] =
     shadowTarget ?? (showHorizon ? [9, 0, 2] : [0, 0, 0]);
 
@@ -54,6 +90,46 @@ export const LightingAndSky = React.memo(function LightingAndSky({
     resolvedTarget[2] + sunOffset[2],
   ];
 
+  const useFittedFrustum = showHorizon && shadowSpan === undefined;
+
+  /** Static light-space extents (never changes frame-to-frame, so shadow texels cannot swim). */
+  const fitted = useMemo(() => {
+    const eye = new THREE.Vector3(sunPos[0], sunPos[1], sunPos[2]);
+    const tgt = new THREE.Vector3(resolvedTarget[0], resolvedTarget[1], resolvedTarget[2]);
+    const zAxis = eye.clone().sub(tgt).normalize();
+    const xAxis = new THREE.Vector3(0, 1, 0).cross(zAxis).normalize();
+    const yAxis = zAxis.clone().cross(xAxis).normalize();
+    const b = SHADOW_FIT_BOX;
+    let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+    const p = new THREE.Vector3();
+    for (const x of [b.minX, b.maxX]) {
+      for (const y of [b.minY, b.maxY]) {
+        for (const z of [b.minZ, b.maxZ]) {
+          p.set(x, y, z).sub(eye);
+          const lx = p.dot(xAxis);
+          const ly = p.dot(yAxis);
+          minX = Math.min(minX, lx);
+          maxX = Math.max(maxX, lx);
+          minY = Math.min(minY, ly);
+          maxY = Math.max(maxY, ly);
+        }
+      }
+    }
+    // Snap to whole metres so the fitted volume is a clean, reproducible number.
+    return {
+      left: Math.floor(minX),
+      right: Math.ceil(maxX),
+      bottom: Math.floor(minY),
+      top: Math.ceil(maxY),
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sunPos[0], sunPos[1], sunPos[2], resolvedTarget[0], resolvedTarget[1], resolvedTarget[2]]);
+
+  const shadowLeft = useFittedFrustum ? fitted.left : -resolvedSpan;
+  const shadowRight = useFittedFrustum ? fitted.right : resolvedSpan;
+  const shadowTop = useFittedFrustum ? fitted.top : resolvedSpan;
+  const shadowBottom = useFittedFrustum ? fitted.bottom : -resolvedSpan;
+
   const lightTargetObj = useMemo(() => new THREE.Object3D(), []);
   useEffect(() => {
     lightTargetObj.position.set(
@@ -63,6 +139,25 @@ export const LightingAndSky = React.memo(function LightingAndSky({
     );
     lightTargetObj.updateMatrixWorld();
   }, [lightTargetObj, resolvedTarget[0], resolvedTarget[1], resolvedTarget[2]]);
+
+  // W3-M1: In full-course mode (useFittedFrustum), bake the static 2048x2048 sun shadow map for 5 frames
+  // after mount (and re-arm if Suspense children attach), then lock autoUpdate = false so 3,912 static
+  // casters aren't re-submitted every frame. Restore autoUpdate = true on unmount or in /qa-gallery.
+  useEffect(() => {
+    if (!useFittedFrustum) {
+      gl.shadowMap.autoUpdate = true;
+      gl.shadowMap.needsUpdate = true;
+      return;
+    }
+    shadowBakeRemainingRef.current = 5;
+    prevSceneChildCountRef.current = -1;
+    gl.shadowMap.autoUpdate = true;
+    gl.shadowMap.needsUpdate = true;
+    return () => {
+      gl.shadowMap.autoUpdate = true;
+      gl.shadowMap.needsUpdate = true;
+    };
+  }, [gl, useFittedFrustum, shadowLeft, shadowRight, shadowTop, shadowBottom]);
 
   const skyDomeMaterial = useMemo(() => {
     return new THREE.ShaderMaterial({
@@ -81,8 +176,10 @@ export const LightingAndSky = React.memo(function LightingAndSky({
       vertexShader: /* glsl */ `
         varying vec3 vWorldDir;
         void main() {
-          vec4 worldPos = modelMatrix * vec4(position, 1.0);
-          vWorldDir = normalize(worldPos.xyz - cameraPosition);
+          // Dome rides on the camera inside the shader (cameraPosition is current at draw time:
+          // zero frame lag, never clipped by the 185m far plane).
+          vWorldDir = normalize(position);
+          vec4 worldPos = vec4(position + cameraPosition, 1.0);
           gl_Position = projectionMatrix * viewMatrix * worldPos;
         }
       `,
@@ -119,11 +216,36 @@ export const LightingAndSky = React.memo(function LightingAndSky({
     });
   }, []);
 
-  useFrame((_, delta) => {
+  useFrame(({ camera, gl: frameGl, scene }, delta) => {
+    if (useFittedFrustum) {
+      const childCount = scene.children.length;
+      if (
+        prevSceneChildCountRef.current !== -1 &&
+        childCount > prevSceneChildCountRef.current
+      ) {
+        shadowBakeRemainingRef.current = Math.max(
+          shadowBakeRemainingRef.current,
+          2,
+        );
+      }
+      prevSceneChildCountRef.current = childCount;
+
+      if (shadowBakeRemainingRef.current > 0) {
+        frameGl.shadowMap.autoUpdate = true;
+        frameGl.shadowMap.needsUpdate = true;
+        shadowBakeRemainingRef.current -= 1;
+      } else if (frameGl.shadowMap.autoUpdate) {
+        frameGl.shadowMap.autoUpdate = false;
+      }
+    }
+
     const group = cloudsGroupRef.current;
     if (!group || !showHorizon) return;
+    // Cloud bank rides with the camera (XZ) so every cloud stays <= ~115m away: never clipped by far=185.
+    group.position.set(camera.position.x, 0, camera.position.z);
     elapsedRef.current += Math.min(delta, 0.1);
-    const t = elapsedRef.current;
+    // `?qaFreezeParticles=1` pins the cloud clock to t = 4.0 for 0.00% stationary pixel delta.
+    const t = resolveAnimTime(elapsedRef.current);
     const children = group.children;
     for (let i = 0; i < children.length; i++) {
       const spec = CLOUD_SPECS[i];
@@ -138,7 +260,7 @@ export const LightingAndSky = React.memo(function LightingAndSky({
   return (
     <group name="curbside-lighting-and-sky">
       <color attach="background" args={[showHorizon ? '#EED7BA' : '#F4EFE6']} />
-      {showHorizon && <fog attach="fog" args={['#F5DEC2', 110, 320]} />}
+      {showHorizon && <fog attach="fog" args={['#F5DEC2', 95, 176]} />}
 
       <primitive object={lightTargetObj} />
 
@@ -150,14 +272,14 @@ export const LightingAndSky = React.memo(function LightingAndSky({
         intensity={2.35}
         color="#FFE5BA"
         shadow-mapSize={[2048, 2048]}
-        shadow-camera-left={-resolvedSpan}
-        shadow-camera-right={resolvedSpan}
-        shadow-camera-top={resolvedSpan}
-        shadow-camera-bottom={-resolvedSpan}
-        shadow-camera-near={4}
-        shadow-camera-far={135}
-        shadow-bias={-0.00035}
-        shadow-normalBias={0.03}
+        shadow-camera-left={shadowLeft}
+        shadow-camera-right={shadowRight}
+        shadow-camera-top={shadowTop}
+        shadow-camera-bottom={shadowBottom}
+        shadow-camera-near={2}
+        shadow-camera-far={130}
+        shadow-bias={-0.0004}
+        shadow-normalBias={0.035}
       />
 
       {/* Crisp Azure Sky / Warm Venetian Terracotta Ground Bounce */}
@@ -175,8 +297,12 @@ export const LightingAndSky = React.memo(function LightingAndSky({
 
       {showHorizon && (
         <>
-          <mesh material={skyDomeMaterial}>
-            <sphereGeometry args={[380, 28, 18]} />
+          <mesh
+            material={skyDomeMaterial}
+            renderOrder={-1000}
+            frustumCulled={false}
+          >
+            <sphereGeometry args={[SKY_DOME_RADIUS, 28, 18]} />
           </mesh>
 
           <group ref={cloudsGroupRef} name="drifting-clouds">

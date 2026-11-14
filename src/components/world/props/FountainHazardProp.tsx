@@ -4,6 +4,14 @@ import React, { useMemo, useRef } from 'react';
 import { useFrame } from '@react-three/fiber';
 import * as THREE from 'three';
 import { TOYBOX_MATERIALS } from '@/materials';
+import { isQaFreezeActive, resolveAnimTime } from '../qaFreeze';
+import { withPolygonOffset } from './propMaterials';
+
+// Cached polygonOffset variants (never mutate the shared palette materials).
+const WATER_MAT = withPolygonOffset(TOYBOX_MATERIALS.turquoiseWater, 1);
+const WATER_DEEP_MAT = withPolygonOffset(TOYBOX_MATERIALS.turquoiseWaterDeep, 1);
+const LILY_PAD_MAT = withPolygonOffset(TOYBOX_MATERIALS.lilyPadGreen, 1);
+const SPLASH_RING_MAT = withPolygonOffset(TOYBOX_MATERIALS.waterFoamWhite, 2);
 
 export interface FountainHazardPropProps {
   position?: [number, number, number];
@@ -86,7 +94,7 @@ export function FountainHazardProp({
     const pillarR = radius - 0.1;
     const pillars = Array.from({ length: 8 }, (_, idx) => {
       const a = Math.PI / 8 + (idx / 8) * Math.PI * 2;
-      return [Math.cos(a) * pillarR, 0.155, Math.sin(a) * pillarR] as [
+      return [Math.cos(a) * pillarR, 0.16, Math.sin(a) * pillarR] as [
         number,
         number,
         number,
@@ -98,7 +106,9 @@ export function FountainHazardProp({
 
   useFrame((_, delta) => {
     elapsedRef.current += Math.min(delta, 0.05);
-    const t = elapsedRef.current;
+    // Deterministic clock: frozen QA mode pins t = 4.0; every pose below is a pure function of t.
+    const frozen = isQaFreezeActive();
+    const t = resolveAnimTime(elapsedRef.current);
     const now =
       typeof performance !== 'undefined' ? performance.now() * 0.001 : t;
 
@@ -134,18 +144,18 @@ export function FountainHazardProp({
     }
 
     const dtSplash = now - lastSplashAt;
-    const splashActive = dtSplash >= 0 && dtSplash < 0.65;
+    const splashActive = !frozen && dtSplash >= 0 && dtSplash < 0.65;
     if (splashRingRef.current) {
-      splashRingRef.current.visible = splashActive;
       if (splashActive) {
         const p = dtSplash / 0.65;
         splashRingRef.current.scale.setScalar(0.4 + p * 1.45);
+      } else if (splashRingRef.current.scale.x !== 0) {
+        splashRingRef.current.scale.setScalar(0);
       }
     }
     if (splashGroupRef.current) {
-      splashGroupRef.current.visible = splashActive;
+      const children = splashGroupRef.current.children;
       if (splashActive) {
-        const children = splashGroupRef.current.children;
         for (let i = 0; i < children.length; i++) {
           const drop = children[i];
           const a = (i / SPLASH_DROP_COUNT) * Math.PI * 2;
@@ -154,12 +164,23 @@ export function FountainHazardProp({
           drop.position.set(Math.cos(a) * dist, 0.22 + h, Math.sin(a) * dist);
           drop.scale.setScalar(Math.max(0.01, 0.07 * (1 - dtSplash / 0.65)));
         }
+      } else {
+        for (let i = 0; i < children.length; i++) {
+          const drop = children[i];
+          if (drop && drop.scale.x !== 0) {
+            drop.scale.setScalar(0);
+          }
+        }
       }
     }
   });
 
   return (
-    <group name="fountain-hazard-prop" position={position}>
+    <group
+      name="fountain-hazard-prop"
+      position={position}
+      userData={{ occludableProp: true }}
+    >
       {/* Octagonal Limestone Basin Floor Slab Seated Flush at y = 0 */}
       <mesh
         receiveShadow
@@ -167,7 +188,7 @@ export function FountainHazardProp({
         rotation={[0, Math.PI / 8, 0]}
         material={TOYBOX_MATERIALS.poolWallLimestone}
       >
-        <cylinderGeometry args={[wallOuterR, wallOuterR, 0.05, 8]} />
+        <cylinderGeometry args={[wallOuterR - 0.012, wallOuterR - 0.012, 0.05, 8]} />
       </mesh>
 
       {/* Octagonal Carved Limestone Basin Wall (y: 0.00 -> 0.28) */}
@@ -197,7 +218,7 @@ export function FountainHazardProp({
           rotation={[0, (idx * Math.PI) / 4, 0]}
           material={TOYBOX_MATERIALS.limestoneTrim}
         >
-          <boxGeometry args={[0.14, 0.31, 0.14]} />
+          <boxGeometry args={[0.14, 0.32, 0.14]} />
         </mesh>
       ))}
 
@@ -207,7 +228,7 @@ export function FountainHazardProp({
         receiveShadow
         position={[0, waterLevelY, 0]}
         rotation={[0, Math.PI / 8, 0]}
-        material={TOYBOX_MATERIALS.turquoiseWater}
+        material={WATER_MAT}
       >
         <cylinderGeometry args={[innerR + 0.01, innerR + 0.01, 0.02, 8]} />
       </mesh>
@@ -215,16 +236,16 @@ export function FountainHazardProp({
       <mesh
         position={[0, waterLevelY - 0.015, 0]}
         rotation={[0, Math.PI / 8, 0]}
-        material={TOYBOX_MATERIALS.turquoiseWaterDeep}
+        material={WATER_DEEP_MAT}
       >
         <cylinderGeometry args={[innerR * 0.72, innerR * 0.72, 0.02, 8]} />
       </mesh>
 
       {/* Subtle Venice Lily Pad Accent */}
-      <group position={[innerR * 0.56, waterLevelY + 0.016, innerR * 0.38]}>
+      <group position={[innerR * 0.56, waterLevelY + 0.023, innerR * 0.38]}>
         <mesh
           rotation={[0, 0.5, 0]}
-          material={TOYBOX_MATERIALS.lilyPadGreen}
+          material={LILY_PAD_MAT}
         >
           <cylinderGeometry args={[0.14, 0.14, 0.014, 8]} />
         </mesh>
@@ -266,9 +287,9 @@ export function FountainHazardProp({
         <cylinderGeometry args={[0.56, 0.26, 0.18, 8]} />
       </mesh>
       <mesh
-        position={[0, 0.875, 0]}
+        position={[0, 0.885, 0]}
         rotation={[0, Math.PI / 8, 0]}
-        material={TOYBOX_MATERIALS.turquoiseWater}
+        material={WATER_MAT}
       >
         <cylinderGeometry args={[0.48, 0.48, 0.018, 8]} />
       </mesh>
@@ -291,9 +312,9 @@ export function FountainHazardProp({
         <cylinderGeometry args={[0.28, 0.13, 0.12, 8]} />
       </mesh>
       <mesh
-        position={[0, 1.195, 0]}
+        position={[0, 1.202, 0]}
         rotation={[0, Math.PI / 8, 0]}
-        material={TOYBOX_MATERIALS.turquoiseWater}
+        material={WATER_MAT}
       >
         <cylinderGeometry args={[0.23, 0.23, 0.016, 8]} />
       </mesh>
@@ -344,20 +365,27 @@ export function FountainHazardProp({
         ))}
       </group>
 
-      {/* Ball-In-Water Splash Ripple & Burst */}
+      {/* Ball-In-Water Splash Ripple & Burst (mounted visible={true}, scale={0} until splash) */}
       <mesh
         ref={splashRingRef}
-        visible={false}
-        position={[0, waterLevelY + 0.015, 0]}
+        visible={true}
+        scale={0}
+        castShadow={false}
+        frustumCulled={false}
+        position={[0, waterLevelY + 0.026, 0]}
         rotation={[-Math.PI * 0.5, 0, 0]}
-        material={TOYBOX_MATERIALS.waterFoamWhite}
+        material={SPLASH_RING_MAT}
       >
         <ringGeometry args={[0.22, 0.34, 16]} />
       </mesh>
-      <group ref={splashGroupRef} visible={false}>
+      <group ref={splashGroupRef} visible={true}>
         {Array.from({ length: SPLASH_DROP_COUNT }, (_, idx) => (
           <mesh
             key={`splash-${idx}`}
+            visible={true}
+            scale={0}
+            castShadow={false}
+            frustumCulled={false}
             material={TOYBOX_MATERIALS.waterBeadCyan}
           >
             <icosahedronGeometry args={[1, 0]} />

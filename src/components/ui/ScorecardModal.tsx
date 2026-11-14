@@ -1,8 +1,9 @@
 'use client';
 
-import React, { useEffect, useRef } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { useCurbsideStore } from '@/store';
 import { soundEngine } from '@/lib/sound';
+import { useQaFreeze } from './useQaFreeze';
 
 export interface ScorecardModalProps {
   /** Personal best strokes prior to completing this hole (for New Personal Best comparison) */
@@ -121,19 +122,24 @@ function getScoreRelativeToPar(strokes: number, par: number): ScoreBadgeMeta {
 }
 
 const CONFETTI_PIECES = [
-  { left: '10%', delay: '0ms', color: '#EF4444' },
-  { left: '22%', delay: '90ms', color: '#FACC15' },
-  { left: '35%', delay: '40ms', color: '#22C55E' },
-  { left: '49%', delay: '140ms', color: '#38BDF8' },
-  { left: '63%', delay: '60ms', color: '#F97316' },
-  { left: '76%', delay: '120ms', color: '#A855F7' },
-  { left: '88%', delay: '20ms', color: '#EF4444' },
+  { left: '8%', delay: '0ms', color: '#EF4444', sizeCls: 'h-2.5 w-1.5 rounded-full' },
+  { left: '16%', delay: '110ms', color: '#FACC15', sizeCls: 'h-2 w-2 rounded-full' },
+  { left: '24%', delay: '45ms', color: '#22C55E', sizeCls: 'h-3 w-1.5 rounded-sm' },
+  { left: '33%', delay: '150ms', color: '#38BDF8', sizeCls: 'h-2 w-2 rounded-full' },
+  { left: '42%', delay: '20ms', color: '#F97316', sizeCls: 'h-2.5 w-1.5 rounded-sm' },
+  { left: '50%', delay: '130ms', color: '#FACC15', sizeCls: 'h-2.5 w-2.5 rounded-full' },
+  { left: '59%', delay: '70ms', color: '#A855F7', sizeCls: 'h-3 w-1.5 rounded-sm' },
+  { left: '68%', delay: '165ms', color: '#22C55E', sizeCls: 'h-2 w-2 rounded-full' },
+  { left: '76%', delay: '95ms', color: '#EF4444', sizeCls: 'h-2.5 w-1.5 rounded-full' },
+  { left: '84%', delay: '35ms', color: '#38BDF8', sizeCls: 'h-2.5 w-1.5 rounded-sm' },
+  { left: '91%', delay: '125ms', color: '#F97316', sizeCls: 'h-2 w-2 rounded-full' },
 ];
 
 export function ScorecardModal({
   previousBest,
   previousDailyBest,
 }: ScorecardModalProps) {
+  const qaFreeze = useQaFreeze();
   const isHoleComplete = useCurbsideStore((s) => {
     const st = s as unknown as StoreCompat;
     return Boolean(
@@ -165,14 +171,46 @@ export function ScorecardModal({
   });
 
   const cardRef = useRef<HTMLElement | null>(null);
+  const [visible, setVisible] = useState(false);
+  const [entered, setEntered] = useState(false);
 
   useEffect(() => {
-    if (isHoleComplete) {
-      cardRef.current?.focus({ preventScroll: true });
+    if (!isHoleComplete) {
+      setVisible(false);
+      setEntered(false);
+      return;
     }
-  }, [isHoleComplete]);
+    if (qaFreeze) {
+      setVisible(true);
+      setEntered(true);
+      const rafFocus = window.requestAnimationFrame(() => {
+        cardRef.current?.focus({ preventScroll: true });
+      });
+      return () => window.cancelAnimationFrame(rafFocus);
+    }
 
-  if (!isHoleComplete) return null;
+    // Delay Scorecard reveal by ~240ms so the 150ms 3D cup-drop tween & celebration
+    // play at locked 60 FPS before the modal glides in, and defer focus past entrance.
+    let rafEnter = 0;
+    let rafFocus = 0;
+    const delayTimer = window.setTimeout(() => {
+      setVisible(true);
+      rafEnter = window.requestAnimationFrame(() => {
+        setEntered(true);
+        rafFocus = window.requestAnimationFrame(() => {
+          cardRef.current?.focus({ preventScroll: true });
+        });
+      });
+    }, 240);
+
+    return () => {
+      window.clearTimeout(delayTimer);
+      if (rafEnter) window.cancelAnimationFrame(rafEnter);
+      if (rafFocus) window.cancelAnimationFrame(rafFocus);
+    };
+  }, [isHoleComplete, qaFreeze]);
+
+  if (!isHoleComplete || !visible) return null;
 
   const priorBest = previousBest ?? previousDailyBest ?? null;
   const isNewPersonalBest =
@@ -183,11 +221,12 @@ export function ScorecardModal({
       : strokes;
 
   const scoreMeta = getScoreRelativeToPar(Math.max(1, strokes), par);
-  const showConfetti = scoreMeta.celebrate || isNewPersonalBest;
+  const showConfetti = !qaFreeze && (scoreMeta.celebrate || isNewPersonalBest);
 
   const handleReplay = () => {
     soundEngine.unlock();
     soundEngine.playUiClick(0.95);
+    setEntered(false);
     const st = useCurbsideStore.getState() as unknown as StoreCompat;
     if (st.replayHole) {
       st.replayHole();
@@ -202,7 +241,15 @@ export function ScorecardModal({
     <div
       data-hud-interactive="true"
       onPointerDown={(e) => e.stopPropagation()}
-      className="pointer-events-auto fixed inset-0 z-40 flex items-center justify-center bg-[#231914]/38 px-4 py-4 backdrop-blur-[3px]"
+      style={{
+        willChange: qaFreeze ? undefined : 'opacity',
+        transition: qaFreeze
+          ? 'none'
+          : 'opacity 180ms cubic-bezier(0.22, 1, 0.36, 1)',
+      }}
+      className={`pointer-events-auto fixed inset-0 z-40 flex items-center justify-center bg-[#231914]/50 px-4 py-4 ${
+        entered ? 'opacity-100' : 'opacity-0'
+      }`}
     >
       <section
         ref={cardRef}
@@ -210,22 +257,33 @@ export function ScorecardModal({
         role="dialog"
         aria-modal="true"
         aria-label={`Hole ${holeNumber} Scorecard`}
-        className="animate-modal-pop relative max-h-[calc(100dvh-2rem)] w-full max-w-[21.5rem] overflow-hidden overflow-y-auto overscroll-contain rounded-[1.85rem] border-2 border-[#E7C99E] bg-gradient-to-b from-[#FFFDF9] to-[#FFF3DD] p-5 text-center text-[#231914] shadow-[0_24px_54px_-12px_rgba(35,25,20,0.42)] focus:outline-none [@media(max-height:560px)]:p-3.5"
+        style={{
+          willChange: qaFreeze ? undefined : 'transform, opacity',
+          transition: qaFreeze
+            ? 'none'
+            : 'transform 220ms cubic-bezier(0.22, 1, 0.36, 1), opacity 200ms cubic-bezier(0.22, 1, 0.36, 1)',
+        }}
+        className={`relative max-h-[calc(100dvh-2rem)] w-full max-w-[21.5rem] overflow-hidden overflow-y-auto overscroll-contain rounded-[1.85rem] border-2 border-[#E7C99E] bg-gradient-to-b from-[#FFFDF9] to-[#FFF3DD] p-5 text-center text-[#231914] shadow-[0_24px_54px_-12px_rgba(35,25,20,0.42)] focus:outline-none [@media(max-height:560px)]:p-3.5 ${
+          entered
+            ? 'translate-y-0 scale-100 opacity-100'
+            : 'translate-y-3 scale-[0.94] opacity-0'
+        }`}
       >
         {/* Sunlit Confetti Flourish */}
         {showConfetti && (
           <div
             aria-hidden="true"
-            className="pointer-events-none absolute inset-x-0 top-0 h-28 overflow-hidden"
+            className="pointer-events-none absolute inset-x-0 top-0 h-32 overflow-hidden"
           >
             {CONFETTI_PIECES.map((piece, idx) => (
               <span
                 key={idx}
-                className="animate-confetti-flutter absolute top-0 h-2.5 w-1.5 rounded-full"
+                className={`animate-confetti-flutter absolute top-0 ${piece.sizeCls}`}
                 style={{
                   left: piece.left,
                   animationDelay: piece.delay,
                   backgroundColor: piece.color,
+                  willChange: 'transform, opacity',
                 }}
               />
             ))}
@@ -321,7 +379,12 @@ export function ScorecardModal({
           <button
             type="button"
             onClick={handleReplay}
-            className="flex min-h-[52px] w-full items-center justify-center gap-2 rounded-2xl bg-[#C23914] px-4 py-3 text-[15.5px] font-black tracking-tight text-white shadow-[0_10px_24px_-6px_rgba(194,57,20,0.48)] transition-[transform,background-color] duration-150 hover:bg-[#AB3110] active:scale-[0.97] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#231914]"
+            style={{ willChange: qaFreeze ? undefined : 'transform' }}
+            className={`flex min-h-[52px] w-full items-center justify-center gap-2 rounded-2xl bg-[#C23914] px-4 py-3 text-[15.5px] font-black tracking-tight text-white shadow-[0_10px_24px_-6px_rgba(194,57,20,0.48)] hover:bg-[#AB3110] active:scale-[0.97] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#231914] ${
+              qaFreeze
+                ? 'transition-none'
+                : 'transition-[transform,background-color] duration-150'
+            }`}
           >
             <span aria-hidden="true">↺</span>
             <span>Tee It Up Again</span>

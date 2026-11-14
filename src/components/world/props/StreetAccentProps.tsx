@@ -5,6 +5,22 @@ import { useFrame } from '@react-three/fiber';
 import * as THREE from 'three';
 import { buildCoaxialStreetlampSpec } from '@/lib/geometryHelpers';
 import { TOYBOX_MATERIALS } from '@/materials';
+import { withPolygonOffset, withSoftContrast } from './propMaterials';
+import { resolveAnimTime } from '../qaFreeze';
+
+// Anti-shimmer layered materials (cached clones; shared source materials are never mutated).
+const BOLLARD_BAND_MAT = withPolygonOffset(TOYBOX_MATERIALS.taxiAmber, 1);
+const PIT_GRATE_BAR_MAT = withPolygonOffset(
+  withSoftContrast(TOYBOX_MATERIALS.bistroCastIron),
+  1
+);
+const PIT_GRATE_HUB_MAT = withPolygonOffset(
+  withSoftContrast(TOYBOX_MATERIALS.bistroCastIron),
+  2
+);
+const LAMP_THIN_IRON_MAT = withSoftContrast(TOYBOX_MATERIALS.darkIron);
+const WINDOW_GLOW_MAT = withPolygonOffset(TOYBOX_MATERIALS.windowWarmGlow, 1);
+const WINDOW_GLASS_MAT = withPolygonOffset(TOYBOX_MATERIALS.windowSkyGlass, 2);
 
 export interface StreetBollardPropProps {
   position?: [number, number, number];
@@ -25,6 +41,7 @@ export function StreetBollardProp({
       name="street-bollard-prop"
       position={position}
       rotation={[0, rotationY, 0]}
+      userData={{ occludableProp: true }}
     >
       <mesh
         castShadow
@@ -42,8 +59,8 @@ export function StreetBollardProp({
       >
         <cylinderGeometry args={[0.095, 0.115, 0.68, 10]} />
       </mesh>
-      <mesh position={[0, 0.64, 0]} material={TOYBOX_MATERIALS.taxiAmber}>
-        <cylinderGeometry args={[0.104, 0.104, 0.08, 10]} />
+      <mesh position={[0, 0.64, 0]} material={BOLLARD_BAND_MAT}>
+        <cylinderGeometry args={[0.114, 0.114, 0.08, 10]} />
       </mesh>
       <mesh
         castShadow
@@ -89,7 +106,7 @@ function CircularTreePitRing({ outerRadius = 0.58 }: { outerRadius?: number }) {
       </mesh>
       <mesh
         receiveShadow
-        position={[0, 0.048, 0]}
+        position={[0, 0.03, 0]}
         material={TOYBOX_MATERIALS.cedarDark}
       >
         <cylinderGeometry
@@ -100,18 +117,18 @@ function CircularTreePitRing({ outerRadius = 0.58 }: { outerRadius?: number }) {
         <mesh
           key={`grate-x-${idx}`}
           receiveShadow
-          position={[off, 0.06, 0]}
-          material={TOYBOX_MATERIALS.bistroCastIron}
+          position={[off, 0.065, 0]}
+          material={PIT_GRATE_BAR_MAT}
         >
-          <boxGeometry args={[0.035, 0.014, outerRadius * 1.6]} />
+          <boxGeometry args={[0.036, 0.02, outerRadius * 1.6]} />
         </mesh>
       ))}
       <mesh
         receiveShadow
-        position={[0, 0.064, 0]}
-        material={TOYBOX_MATERIALS.bistroCastIron}
+        position={[0, 0.075, 0]}
+        material={PIT_GRATE_HUB_MAT}
       >
-        <cylinderGeometry args={[0.24, 0.24, 0.016, 12]} />
+        <cylinderGeometry args={[0.24, 0.24, 0.03, 12]} />
       </mesh>
     </group>
   );
@@ -129,7 +146,6 @@ export function StreetTreeProp({
   showWireframe = false,
 }: StreetTreePropProps) {
   const canopyRef = useRef<THREE.Group>(null);
-  const elapsedRef = useRef(0);
 
   const primaryFoliage =
     variant === 'sunny'
@@ -142,16 +158,21 @@ export function StreetTreeProp({
       ? TOYBOX_MATERIALS.foliageSunny
       : TOYBOX_MATERIALS.foliageEmerald;
 
-  useFrame((_, delta) => {
-    elapsedRef.current += Math.min(delta, 0.05);
-    const t = elapsedRef.current;
+  useFrame((state) => {
+    // Pose is a pure function of t (frozen to 4.0 under ?qaFreezeParticles=1).
+    const t = resolveAnimTime(state.clock.elapsedTime);
     if (!canopyRef.current) return;
     canopyRef.current.rotation.z = Math.sin(t * 1.4 + phase) * 0.026;
     canopyRef.current.rotation.x = Math.cos(t * 1.1 + phase) * 0.02;
   });
 
   return (
-    <group name="street-tree-prop" position={position} scale={scale}>
+    <group
+      name="street-tree-prop"
+      position={position}
+      scale={scale}
+      userData={{ occludableProp: true }}
+    >
       <CircularTreePitRing outerRadius={0.58} />
 
       <mesh
@@ -288,11 +309,9 @@ export function OverhangingStreetTreeProp({
   showWireframe = false,
 }: OverhangingStreetTreePropProps) {
   const canopyRef = useRef<THREE.Group>(null);
-  const elapsedRef = useRef(0);
 
-  useFrame((_, delta) => {
-    elapsedRef.current += Math.min(delta, 0.05);
-    const t = elapsedRef.current;
+  useFrame((state) => {
+    const t = resolveAnimTime(state.clock.elapsedTime);
     if (!canopyRef.current) return;
     canopyRef.current.rotation.z = Math.sin(t * 1.15 + phase) * 0.015;
     canopyRef.current.rotation.x = Math.cos(t * 0.95 + phase) * 0.012;
@@ -334,6 +353,7 @@ export function OverhangingStreetTreeProp({
       name="overhanging-street-tree-prop"
       position={position}
       rotation={[0, rotationY, 0]}
+      userData={{ occludableProp: true }}
     >
       <CircularTreePitRing outerRadius={0.6} />
 
@@ -434,6 +454,7 @@ export function StreetLampProp({
       name="street-lamp-prop"
       position={position}
       rotation={[0, rotationY, 0]}
+      userData={{ occludableProp: true }}
     >
       <mesh
         castShadow
@@ -479,7 +500,6 @@ export function StreetLampProp({
       ))}
 
       <mesh
-        castShadow
         position={spec.bracketArm.position}
         rotation={spec.bracketArm.rotation}
         material={TOYBOX_MATERIALS.darkIron}
@@ -494,17 +514,16 @@ export function StreetLampProp({
         />
       </mesh>
       <mesh
-        castShadow
         position={[
           0,
           spec.bracketArm.position[1] - 0.15,
           spec.bracketArm.position[2] * 0.56,
         ]}
         rotation={[-0.78, 0, 0]}
-        material={TOYBOX_MATERIALS.darkIron}
+        material={LAMP_THIN_IRON_MAT}
       >
         <cylinderGeometry
-          args={[0.018, 0.018, spec.bracketArm.length * 0.72, 6]}
+          args={[0.02, 0.02, spec.bracketArm.length * 0.72, 6]}
         />
       </mesh>
 
@@ -539,10 +558,10 @@ export function StreetLampProp({
               spec.lanternAssembly.globePosition[1],
               spec.lanternAssembly.globePosition[2] + Math.sin(a) * r,
             ]}
-            material={TOYBOX_MATERIALS.darkIron}
+            material={LAMP_THIN_IRON_MAT}
           >
             <cylinderGeometry
-              args={[0.008, 0.008, spec.lanternAssembly.globeRadius * 1.5, 4]}
+              args={[0.018, 0.018, spec.lanternAssembly.globeRadius * 1.48 + 0.04, 5]}
             />
           </mesh>
         );
@@ -641,14 +660,14 @@ export function CornerBuildingAccentProp({
       </mesh>
       <mesh
         castShadow
-        position={[0, wallHeight + 0.08, 0.04]}
+        position={[0, wallHeight + 0.07, 0.04]}
         material={TOYBOX_MATERIALS.limestoneTrim}
       >
-        <boxGeometry args={[width + 0.2, 0.16, 0.62]} />
+        <boxGeometry args={[width + 0.2, 0.18, 0.62]} />
       </mesh>
       <mesh
         position={[0, 1.42, 0.25]}
-        material={TOYBOX_MATERIALS.windowWarmGlow}
+        material={WINDOW_GLOW_MAT}
       >
         <boxGeometry args={[width * 0.62, 1.32, 0.06]} />
       </mesh>
@@ -667,8 +686,8 @@ export function CornerBuildingAccentProp({
             <boxGeometry args={[0.74, 1.12, 0.08]} />
           </mesh>
           <mesh
-            position={[0, 0, 0.025]}
-            material={TOYBOX_MATERIALS.windowSkyGlass}
+            position={[0, 0, 0.04]}
+            material={WINDOW_GLASS_MAT}
           >
             <boxGeometry args={[0.56, 0.94, 0.04]} />
           </mesh>

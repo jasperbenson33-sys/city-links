@@ -7,6 +7,32 @@ import { buildCoaxialWheelSpec } from '@/lib/geometryHelpers';
 import { TOYBOX_MATERIALS } from '@/materials';
 import { CoaxialWheelMeshGroup } from './HotdogCartProp';
 import { PROP_ACCENT_MATERIALS } from './propMaterials';
+import { isQaFreezeActive } from '../qaFreeze';
+
+/**
+ * Local cached polygon-offset clones (shared TOYBOX materials are never mutated).
+ * tier 1 => factor/units -1, tier 2 => -2, tier 3 => -3.
+ */
+const LAYERED_CACHE = new WeakMap<THREE.Material, Map<number, THREE.Material>>();
+function layered<T extends THREE.Material>(base: T, tier: 1 | 2 | 3): T {
+  let byTier = LAYERED_CACHE.get(base);
+  if (!byTier) {
+    byTier = new Map();
+    LAYERED_CACHE.set(base, byTier);
+  }
+  let m = byTier.get(tier);
+  if (!m) {
+    m = base.clone();
+    m.polygonOffset = true;
+    m.polygonOffsetFactor = -tier;
+    m.polygonOffsetUnits = -tier;
+    byTier.set(tier, m);
+  }
+  return m as T;
+}
+
+/** Minimum rendered radius for thin rods (>= 0.035m diameter, stylized). */
+const MIN_THIN_RADIUS = 0.0175;
 
 export interface DeliveryBoxVanPropProps {
   position?: [number, number, number];
@@ -120,7 +146,7 @@ export function DeliveryBoxVanProp({
       const t = (idx + 0.5) / count;
       const rz = -3.44 + t * (-0.9 - -3.44);
       const ry = 0.025 + t * (1.08 - 0.025);
-      return [0, ry + 0.008, rz] as [number, number, number];
+      return [0, ry + 0.004, rz] as [number, number, number];
     });
   }, []);
 
@@ -130,15 +156,17 @@ export function DeliveryBoxVanProp({
       const t = (idx + 0.5) / count;
       const rz = -0.9 + t * 1.8;
       const ry = 1.08 + t * 1.16;
-      return [0, ry + 0.008, rz] as [number, number, number];
+      return [0, ry + 0.004, rz] as [number, number, number];
     });
   }, []);
 
   useFrame(() => {
     if (!roofDeckRef.current) return;
-    const dt =
-      (typeof performance !== 'undefined' ? performance.now() * 0.001 : 0) -
-      lastRoofHitAt;
+    // Hit pop is wall-clock driven; suppressed under the QA freeze for pixel-identical frames.
+    const dt = isQaFreezeActive()
+      ? -1
+      : (typeof performance !== 'undefined' ? performance.now() * 0.001 : 0) -
+        lastRoofHitAt;
     if (dt >= 0 && dt < 0.55) {
       const pop = 1 + Math.sin(dt * 30.0) * 0.14 * Math.exp(-5.5 * dt);
       roofDeckRef.current.scale.set(1, pop, 1);
@@ -186,15 +214,14 @@ export function DeliveryBoxVanProp({
           receiveShadow
           position={ribPos}
           rotation={[-rampAngleRad, 0, 0]}
-          material={TOYBOX_MATERIALS.darkIron}
+          material={layered(TOYBOX_MATERIALS.darkIron, 1)}
         >
-          <boxGeometry args={[1.56, 0.012, 0.036]} />
+          <boxGeometry args={[1.56, 0.035, 0.036]} />
         </mesh>
       ))}
       {[-0.81, 0.81].map((rx, idx) => (
         <mesh
           key={`ramp-rail-${idx}`}
-          castShadow
           position={[rx, 0.565, -2.2]}
           rotation={[-rampAngleRad, 0, 0]}
           material={TOYBOX_MATERIALS.scaffoldingSafetyAmber}
@@ -216,20 +243,19 @@ export function DeliveryBoxVanProp({
           receiveShadow
           position={ribPos}
           rotation={[-kickerAngleRad, 0, 0]}
-          material={TOYBOX_MATERIALS.darkIron}
+          material={layered(TOYBOX_MATERIALS.darkIron, 1)}
         >
-          <boxGeometry args={[1.56, 0.012, 0.034]} />
+          <boxGeometry args={[1.56, 0.035, 0.036]} />
         </mesh>
       ))}
       {[-0.81, 0.81].map((rx, idx) => (
         <mesh
           key={`kicker-rail-${idx}`}
-          castShadow
           position={[rx, 1.685, 0]}
           rotation={[-kickerAngleRad, 0, 0]}
           material={TOYBOX_MATERIALS.scaffoldingSafetyAmber}
         >
-          <boxGeometry args={[0.04, 0.04, 2.08]} />
+          <boxGeometry args={[0.045, 0.045, 2.08]} />
         </mesh>
       ))}
 
@@ -273,22 +299,22 @@ export function DeliveryBoxVanProp({
             <boxGeometry args={[0.14, 1.48, 2.92]} />
           </mesh>
           <mesh
-            position={[wx > 0 ? 0.008 : -0.008, -0.22, 0]}
-            material={TOYBOX_MATERIALS.vanMintStripe}
+            position={[wx > 0 ? 0.015 : -0.015, -0.22, 0]}
+            material={layered(TOYBOX_MATERIALS.vanMintStripe, 1)}
           >
-            <boxGeometry args={[0.135, 0.22, 2.93]} />
+            <boxGeometry args={[0.15, 0.22, 2.95]} />
           </mesh>
           <mesh
-            position={[wx > 0 ? 0.075 : -0.075, 0.16, 0.15]}
-            material={TOYBOX_MATERIALS.terracottaTerrace}
+            position={[wx > 0 ? 0.0725 : -0.0725, 0.16, 0.15]}
+            material={layered(TOYBOX_MATERIALS.terracottaTerrace, 1)}
           >
-            <boxGeometry args={[0.02, 0.38, 1.1]} />
+            <boxGeometry args={[0.035, 0.38, 1.1]} />
           </mesh>
           <mesh
-            position={[wx > 0 ? 0.088 : -0.088, 0.16, 0.15]}
-            material={TOYBOX_MATERIALS.pastelCream}
+            position={[wx > 0 ? 0.0925 : -0.0925, 0.16, 0.15]}
+            material={layered(TOYBOX_MATERIALS.pastelCream, 2)}
           >
-            <boxGeometry args={[0.015, 0.24, 0.86]} />
+            <boxGeometry args={[0.035, 0.24, 0.86]} />
           </mesh>
         </group>
       ))}
@@ -297,10 +323,10 @@ export function DeliveryBoxVanProp({
       <mesh
         castShadow
         receiveShadow
-        position={[0, 1.48, 1.97]}
+        position={[0, 1.4775, 1.965]}
         material={TOYBOX_MATERIALS.vanCreamBody}
       >
-        <boxGeometry args={[1.94, 1.48, 0.1]} />
+        <boxGeometry args={[1.94, 1.475, 0.1]} />
       </mesh>
 
       {/* Rear Cargo Door Portal Header Lintel + Clearance Lights (z = -0.88, y: 2.02..2.24)
@@ -313,17 +339,17 @@ export function DeliveryBoxVanProp({
         >
           <boxGeometry args={[1.98, 0.22, 0.16]} />
         </mesh>
-        <mesh position={[0, 0.055, -0.005]} material={TOYBOX_MATERIALS.vanMintStripe}>
-          <boxGeometry args={[1.99, 0.09, 0.165]} />
+        <mesh position={[0, 0.055, 0]} material={layered(TOYBOX_MATERIALS.vanMintStripe, 1)}>
+          <boxGeometry args={[2.03, 0.09, 0.2]} />
         </mesh>
         {/* 3 Amber Commercial Truck Clearance Marker Lights */}
         {[-0.22, 0, 0.22].map((lx, idx) => (
           <mesh
             key={`clearance-lamp-${idx}`}
-            position={[lx, 0.055, -0.09]}
-            material={TOYBOX_MATERIALS.taxiAmber}
+            position={[lx, 0.055, -0.1025]}
+            material={layered(TOYBOX_MATERIALS.taxiAmber, 2)}
           >
-            <boxGeometry args={[0.075, 0.04, 0.02]} />
+            <boxGeometry args={[0.075, 0.04, 0.035]} />
           </mesh>
         ))}
       </group>
@@ -346,18 +372,17 @@ export function DeliveryBoxVanProp({
           </mesh>
           {/* Mint Continuation Stripe on Open Door */}
           <mesh
-            position={[side * 0.04, -0.18, 0.44]}
-            material={TOYBOX_MATERIALS.vanMintStripe}
+            position={[side * 0.0525, -0.18, 0.44]}
+            material={layered(TOYBOX_MATERIALS.vanMintStripe, 1)}
           >
-            <boxGeometry args={[0.064, 0.2, 0.87]} />
+            <boxGeometry args={[0.065, 0.2, 0.9]} />
           </mesh>
           {/* Vertical Chrome Cam-Lock Bar */}
           <mesh
-            castShadow
             position={[side * 0.072, 0, 0.72]}
-            material={TOYBOX_MATERIALS.chromeSilver}
+            material={layered(TOYBOX_MATERIALS.chromeSilver, 2)}
           >
-            <cylinderGeometry args={[0.014, 0.014, 1.12, 6]} />
+            <cylinderGeometry args={[MIN_THIN_RADIUS, MIN_THIN_RADIUS, 1.12, 6]} />
           </mesh>
           {/* 3 Brass Door Hinges Connecting Door to Rear Corner Pilaster */}
           {[-0.44, 0, 0.44].map((hy, hIdx) => (
@@ -393,24 +418,24 @@ export function DeliveryBoxVanProp({
           </mesh>
           {/* Red Brake Lens */}
           <mesh
-            position={[side * 0.93, 0.99, -0.915]}
-            material={TOYBOX_MATERIALS.hydrantCoral}
+            position={[side * 0.93, 0.99, -0.935]}
+            material={layered(TOYBOX_MATERIALS.hydrantCoral, 1)}
           >
-            <boxGeometry args={[0.08, 0.11, 0.03]} />
+            <boxGeometry args={[0.08, 0.11, 0.035]} />
           </mesh>
           {/* Amber Turn Signal Lens */}
           <mesh
-            position={[side * 0.93, 0.89, -0.915]}
-            material={TOYBOX_MATERIALS.taxiAmber}
+            position={[side * 0.93, 0.89, -0.935]}
+            material={layered(TOYBOX_MATERIALS.taxiAmber, 1)}
           >
-            <boxGeometry args={[0.08, 0.075, 0.03]} />
+            <boxGeometry args={[0.08, 0.075, 0.035]} />
           </mesh>
           {/* White Reverse Lens */}
           <mesh
-            position={[side * 0.93, 0.79, -0.915]}
-            material={PROP_ACCENT_MATERIALS.safetyConeWhite}
+            position={[side * 0.93, 0.79, -0.935]}
+            material={layered(PROP_ACCENT_MATERIALS.safetyConeWhite, 1)}
           >
-            <boxGeometry args={[0.08, 0.075, 0.03]} />
+            <boxGeometry args={[0.08, 0.075, 0.035]} />
           </mesh>
         </group>
       ))}
@@ -435,14 +460,14 @@ export function DeliveryBoxVanProp({
           position={[0, 2.16, 0]}
           material={TOYBOX_MATERIALS.vanCreamBody}
         >
-          <boxGeometry args={[1.98, 0.08, 1.12]} />
+          <boxGeometry args={[1.98, 0.08, 1.1]} />
         </mesh>
         <mesh
           ref={roofDeckRef}
           castShadow
           receiveShadow
           position={[0, 2.21, 0]}
-          material={TOYBOX_MATERIALS.vanRoofBounceDeck}
+          material={layered(TOYBOX_MATERIALS.vanRoofBounceDeck, 1)}
         >
           <boxGeometry args={[1.76, 0.06, 1.06]} />
         </mesh>
@@ -450,7 +475,6 @@ export function DeliveryBoxVanProp({
         {[-0.9, 0.9].map((rx, idx) => (
           <group key={`roof-rail-${idx}`} position={[rx, 2.26, 0]}>
             <mesh
-              castShadow
               rotation={[Math.PI * 0.5, 0, 0]}
               material={TOYBOX_MATERIALS.chromeSilver}
             >
@@ -462,7 +486,7 @@ export function DeliveryBoxVanProp({
                 position={[0, -0.025, pz]}
                 material={TOYBOX_MATERIALS.darkIron}
               >
-                <cylinderGeometry args={[0.016, 0.016, 0.05, 6]} />
+                <cylinderGeometry args={[MIN_THIN_RADIUS, MIN_THIN_RADIUS, 0.05, 6]} />
               </mesh>
             ))}
           </group>
@@ -505,10 +529,10 @@ export function DeliveryBoxVanProp({
         {[-0.93, 0.93].map((mx, idx) => (
           <mesh
             key={`cab-win-${idx}`}
-            position={[mx, 1.5, -0.06]}
-            material={TOYBOX_MATERIALS.windowSkyGlass}
+            position={[mx > 0 ? 0.9275 : -0.9275, 1.5, -0.06]}
+            material={layered(TOYBOX_MATERIALS.windowSkyGlass, 1)}
           >
-            <boxGeometry args={[0.03, 0.42, 0.62]} />
+            <boxGeometry args={[0.035, 0.42, 0.62]} />
           </mesh>
         ))}
         {[-0.97, 0.97].map((mx, idx) => (

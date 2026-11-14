@@ -35,6 +35,8 @@ function makeDataTexture(
   tex.magFilter = THREE.LinearFilter;
   tex.minFilter = THREE.LinearMipmapLinearFilter;
   tex.generateMipmaps = true;
+  // Anisotropic filtering keeps grout lines & grain stable (no crawl) at glancing orbit angles.
+  tex.anisotropy = 8;
   if (opts?.repeat) {
     tex.repeat.set(opts.repeat[0], opts.repeat[1]);
   }
@@ -129,31 +131,34 @@ export function createSubwayBrickTexture(): THREE.DataTexture {
 }
 
 /**
- * Crisp Coffee-Golf mowed emerald AstroTurf putting-green stripes (128x128 tileable).
+ * Crisp Coffee-Golf mowed emerald AstroTurf putting-green stripes (256x256 tileable).
+ * Fine per-texel blade grain at gentle natural amplitude paired with 8x anisotropic mipmaps.
  */
 export function createPuttingGreenStripeTexture(): THREE.DataTexture {
-  const size = 128;
+  const size = 256;
   const darkStripe = hexToRgb('#41B449');
   const lightStripe = hexToRgb('#59CA53');
 
   return makeDataTexture(size, (x, y) => {
-    const band = Math.floor(x / 32) % 2;
+    const band = Math.floor(x / 64) % 2;
     const base = band === 0 ? darkStripe : lightStripe;
-    const blade = (hash2D(x, y, 887) - 0.5) * 7;
+    const blade = (hash2D(x, y, 887) - 0.5) * 4.5;
     return [base[0] + blade, base[1] + blade, base[2] + blade];
   });
 }
 
 /**
- * Dark slate asphalt roadway aggregate micro-grain (128x128 tileable).
+ * Dark slate asphalt roadway aggregate micro-grain (256x256 tileable).
+ * Fine per-texel mineral aggregate (1.4cm/texel on 3.6m tile) at gentle amplitude so close-up
+ * tee views stay crisp while 8x anisotropic mipmapping prevents distant shimmer.
  */
 export function createAsphaltAggregateTexture(): THREE.DataTexture {
-  const size = 128;
+  const size = 256;
   const base = hexToRgb('#343B48');
 
   return makeDataTexture(size, (x, y) => {
     const r = hash2D(x, y, 991);
-    const delta = r > 0.86 ? 12 : r < 0.14 ? -9 : (r - 0.5) * 6;
+    const delta = r > 0.88 ? 6.5 : r < 0.12 ? -5.5 : (r - 0.5) * 4.0;
     return [base[0] + delta, base[1] + delta, base[2] + delta];
   });
 }

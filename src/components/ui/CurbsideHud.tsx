@@ -14,6 +14,7 @@ import { useCurbsideStore } from '@/store';
 import { soundEngine } from '@/lib/sound';
 import { ClubHeadIcon } from './ClubHeadIcon';
 import { ScorecardModal } from './ScorecardModal';
+import { useQaFreeze } from './useQaFreeze';
 
 type ShotPhase =
   | 'aiming'
@@ -349,7 +350,14 @@ export function CurbsideHud() {
     }
   };
 
+  const qaFreeze = useQaFreeze();
   const lie = formatLieDisplay(currentSurfaceTag, strokes, distanceToPinMeters);
+  const initialLieRef = useRef<string | null>(null);
+  if (initialLieRef.current === null) {
+    initialLieRef.current = lie.label;
+  }
+  const hasLieChanged = lie.label !== initialLieRef.current;
+
   const activeClubAccent = CLUB_SPECS[selectedClub]?.accentHex ?? '#FF6B4A';
   const showGestureHint =
     !isHoleComplete &&
@@ -362,9 +370,13 @@ export function CurbsideHud() {
     strokes === 0 && Math.abs(distanceToPinMeters - holeDistanceMeters) < 18
       ? holeDistanceMeters
       : distanceToPinMeters;
+  const transitionCls = qaFreeze
+    ? 'transition-none'
+    : 'transition-[transform,opacity,background-color,color,box-shadow] duration-[180ms] ease-[cubic-bezier(0.22,1,0.36,1)]';
 
   return (
     <div
+      data-qa-freeze={qaFreeze ? '1' : undefined}
       className="pointer-events-none fixed inset-0 z-20 flex flex-col justify-between overflow-hidden"
       style={{
         paddingTop:
@@ -419,9 +431,10 @@ export function CurbsideHud() {
               aria-pressed={isStreetScoutActive}
               title="Street Scout Peek"
               onClick={handleToggleStreetScout}
-              className={`flex h-11 w-11 items-center justify-center rounded-full transition-[transform,background-color,color] duration-150 active:scale-[0.93] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#231914] ${
+              style={{ willChange: qaFreeze ? undefined : 'transform, opacity' }}
+              className={`relative flex h-11 w-11 items-center justify-center rounded-full ${transitionCls} active:scale-[0.93] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#231914] ${
                 isStreetScoutActive
-                  ? 'bg-[#D95D39] text-[#FFFDF8] shadow-xs'
+                  ? 'scale-[1.03] bg-[#D95D39] text-[#FFFDF8] shadow-[0_2px_10px_-2px_rgba(217,93,57,0.55)]'
                   : 'text-[#231914] hover:bg-[#F5E6CE]/80'
               }`}
             >
@@ -454,7 +467,8 @@ export function CurbsideHud() {
               aria-pressed={!isMuted}
               title={isMuted ? 'Sound Off' : 'Sound On'}
               onClick={handleToggleMute}
-              className={`flex h-11 w-11 items-center justify-center rounded-full transition-[transform,background-color,color] duration-150 active:scale-[0.93] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#231914] ${
+              style={{ willChange: qaFreeze ? undefined : 'transform, opacity' }}
+              className={`flex h-11 w-11 items-center justify-center rounded-full ${transitionCls} active:scale-[0.93] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#231914] ${
                 isMuted
                   ? 'bg-[#EADAC2] text-[#4A3629]'
                   : 'text-[#231914] hover:bg-[#F5E6CE]/80'
@@ -509,7 +523,8 @@ export function CurbsideHud() {
               aria-label="Reset Hole"
               title="Reset Hole"
               onClick={handleReplayHole}
-              className="flex h-11 w-11 items-center justify-center rounded-full text-[#231914] transition-[transform,background-color] duration-150 hover:bg-[#F5E6CE]/80 active:scale-[0.93] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#231914]"
+              style={{ willChange: qaFreeze ? undefined : 'transform, opacity' }}
+              className={`flex h-11 w-11 items-center justify-center rounded-full text-[#231914] ${transitionCls} hover:bg-[#F5E6CE]/80 active:scale-[0.93] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#231914]`}
             >
               <svg
                 viewBox="0 0 24 24"
@@ -538,12 +553,14 @@ export function CurbsideHud() {
         {/* Sub-Row: Subtle Lie Pill (Left) + Stroke & Personal Best Badge (Right) */}
         <div className="pointer-events-none flex items-center justify-between gap-2">
           <div
+            key={lie.label}
             aria-label={`Current lie: ${lie.label}`}
-            className="pointer-events-none inline-flex items-center gap-1.5 rounded-full border border-[#E2C294]/90 bg-[#FFFDF8]/88 px-2.5 py-1 text-[11px] leading-none font-extrabold tracking-tight text-[#231914] shadow-[0_4px_12px_-4px_rgba(35,25,20,0.16)] backdrop-blur-sm"
+            style={{ willChange: qaFreeze ? undefined : 'transform, opacity' }}
+            className={`${!qaFreeze && hasLieChanged ? 'animate-toast-pop ' : ''}pointer-events-none inline-flex items-center gap-1.5 rounded-full border border-[#E2C294]/90 bg-[#FFFDF8]/88 px-2.5 py-1 text-[11px] leading-none font-extrabold tracking-tight text-[#231914] shadow-[0_4px_12px_-4px_rgba(35,25,20,0.16)] backdrop-blur-sm`}
           >
             <span
               aria-hidden="true"
-              className="inline-block h-2 w-2 rounded-full"
+              className={`inline-block h-2 w-2 rounded-full ${transitionCls}`}
               style={{ backgroundColor: lie.dotColor }}
             />
             <span>{lie.label}</span>
@@ -574,7 +591,8 @@ export function CurbsideHud() {
             key={lastEventBanner}
             role="status"
             aria-live="polite"
-            className="animate-toast-pop pointer-events-none mt-0.5 flex justify-center"
+            style={{ willChange: qaFreeze ? undefined : 'transform, opacity' }}
+            className={`${qaFreeze ? '' : 'animate-toast-pop '}pointer-events-none mt-0.5 flex justify-center`}
           >
             <div className="pointer-events-none inline-flex items-center gap-1.5 rounded-full border border-[#D95D39]/50 bg-[#FFFDF8]/96 px-3.5 py-1 text-[12px] font-black tracking-tight text-[#231914] shadow-[0_8px_20px_-6px_rgba(35,25,20,0.24)]">
               <span aria-hidden="true">
@@ -601,9 +619,12 @@ export function CurbsideHud() {
             </div>
           )}
 
-          {/* Tactile Pull Power Meter */}
+          {/* Tactile Pull Power Meter (GPU scaleX, zero width-layout thrashing) */}
           {isPulling && (
-            <div className="pointer-events-none flex flex-col items-center gap-1">
+            <div
+              style={{ willChange: qaFreeze ? undefined : 'transform, opacity' }}
+              className={`${qaFreeze ? '' : 'animate-toast-pop '}pointer-events-none flex flex-col items-center gap-1`}
+            >
               {aimPower < 0.08 && (
                 <span className="rounded-full bg-[#231914]/85 px-2.5 py-0.5 text-[10.5px] font-bold text-[#FFFDF8]">
                   Release near ball to cancel
@@ -612,10 +633,14 @@ export function CurbsideHud() {
               <div className="pointer-events-none flex items-center gap-2 rounded-full border border-[#E2C294] bg-[#FFFDF8]/90 px-2.5 py-1 shadow-sm">
                 <div className="h-2 w-36 overflow-hidden rounded-full bg-[#231914]/15">
                   <div
-                    className="h-full rounded-full transition-[width] duration-75 ease-out"
+                    className="h-full w-full origin-left rounded-full"
                     style={{
-                      width: `${Math.max(4, Math.min(100, aimPower * 100))}%`,
+                      transform: `scaleX(${Math.max(0.04, Math.min(1, aimPower))})`,
                       backgroundColor: activeClubAccent,
+                      willChange: qaFreeze ? undefined : 'transform',
+                      transition: qaFreeze
+                        ? 'none'
+                        : 'transform 120ms cubic-bezier(0.22, 1, 0.36, 1)',
                     }}
                   />
                 </div>
@@ -643,22 +668,23 @@ export function CurbsideHud() {
                   aria-label={`${meta.label} (${meta.badge})`}
                   aria-pressed={isSelected}
                   onClick={() => handleSelectClub(clubId)}
-                  style={
-                    isSelected
+                  style={{
+                    willChange: qaFreeze ? undefined : 'transform, opacity',
+                    ...(isSelected
                       ? {
                           boxShadow: `0 3px 10px -2px rgba(35,25,20,0.34), inset 0 0 0 2px ${meta.accentHex}`,
                         }
-                      : undefined
-                  }
-                  className={`flex min-h-[54px] flex-col items-center justify-center gap-0.5 rounded-[1.1rem] px-1 py-1.5 text-center leading-none transition-[transform,background-color,color,box-shadow] duration-150 active:scale-[0.96] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#231914] ${
+                      : {}),
+                  }}
+                  className={`relative flex min-h-[54px] flex-col items-center justify-center gap-0.5 rounded-[1.1rem] px-1 py-1.5 text-center leading-none ${transitionCls} active:scale-[0.96] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#231914] ${
                     isSelected
-                      ? 'bg-[#231914] text-[#FFFDF8]'
+                      ? 'scale-[1.015] bg-[#231914] text-[#FFFDF8]'
                       : 'text-[#231914] hover:bg-[#F5E6CE]/75'
                   }`}
                 >
                   <span
                     aria-hidden="true"
-                    className="inline-flex shrink-0 items-center justify-center"
+                    className={`inline-flex shrink-0 items-center justify-center ${transitionCls}`}
                     style={isSelected ? { color: meta.accentHex } : undefined}
                   >
                     <ClubHeadIcon club={clubId} className="h-4 w-4" />

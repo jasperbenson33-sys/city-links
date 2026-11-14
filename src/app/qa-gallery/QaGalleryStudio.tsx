@@ -169,10 +169,12 @@ function CameraPresetController({
   asset,
   view,
   resetTick,
+  qaFreeze,
 }: {
   asset: UnifiedQaAsset;
   view: CameraPresetView;
   resetTick: number;
+  qaFreeze: boolean;
 }) {
   const { camera } = useThree();
   const controlsRef = useRef<OrbitControlsImpl | null>(null);
@@ -192,7 +194,7 @@ function CameraPresetController({
     <OrbitControls
       ref={controlsRef}
       makeDefault
-      enableDamping
+      enableDamping={!qaFreeze}
       dampingFactor={0.08}
       minDistance={0.9}
       maxDistance={68}
@@ -277,6 +279,7 @@ function AabbAndAxleOverlay({
 function TurntableAssetStage({
   asset,
   autoTurntable,
+  qaFreeze,
   showWireframe,
   lastActionAt,
   forceSteam,
@@ -285,6 +288,7 @@ function TurntableAssetStage({
 }: {
   asset: UnifiedQaAsset;
   autoTurntable: boolean;
+  qaFreeze: boolean;
   showWireframe: boolean;
   lastActionAt: number;
   forceSteam: boolean;
@@ -292,11 +296,26 @@ function TurntableAssetStage({
   selectedClub: 'driver' | 'wedge' | 'skimmer' | 'putter';
 }) {
   const stageRef = useRef<THREE.Group>(null);
+  const gridRef = useRef<THREE.GridHelper>(null);
+
+  useEffect(() => {
+    const grid = gridRef.current;
+    if (!grid) return;
+    const mats = Array.isArray(grid.material) ? grid.material : [grid.material];
+    for (const mat of mats) {
+      mat.polygonOffset = true;
+      mat.polygonOffsetFactor = -1;
+      mat.polygonOffsetUnits = -1;
+      mat.depthWrite = false;
+      mat.needsUpdate = true;
+    }
+  }, [asset.id]);
 
   useFrame((_, delta) => {
     if (!stageRef.current) return;
+    if (qaFreeze) return;
     if (autoTurntable) {
-      stageRef.current.rotation.y += delta * 0.42;
+      stageRef.current.rotation.y += Math.min(delta, 0.05) * 0.42;
     } else {
       stageRef.current.rotation.y = 0;
     }
@@ -330,21 +349,28 @@ function TurntableAssetStage({
 
   return (
     <group>
-      {/* y = 0.00m Reference Datum Turntable Disk */}
-      <mesh receiveShadow position={[0, -0.04, 0]}>
+      {/* y = 0.00m Reference Datum Turntable Disk with polygonOffset & slight recess to avoid z-fighting with y = 0 wheel contact patches */}
+      <mesh receiveShadow position={[0, -0.044, 0]}>
         <cylinderGeometry args={[stageRadius, stageRadius + 0.16, 0.08, 32]} />
-        <meshStandardMaterial color="#d8d1c2" roughness={0.85} />
+        <meshStandardMaterial
+          color="#d8d1c2"
+          roughness={0.85}
+          polygonOffset
+          polygonOffsetFactor={2}
+          polygonOffsetUnits={2}
+        />
       </mesh>
 
-      {/* Measurement Grid Flush at y = 0.001m */}
+      {/* Measurement Grid Flush above datum disc without z-fighting */}
       <gridHelper
+        ref={gridRef}
         args={[
           Math.ceil(stageRadius * 2),
           Math.max(8, Math.ceil(stageRadius * 2)),
           '#64748b',
           '#b6bec9',
         ]}
-        position={[0, 0.001, 0]}
+        position={[0, 0.0015, 0]}
       />
 
       {/* Rotating Turntable Subject Group */}
@@ -400,6 +426,20 @@ export function QaGalleryStudio() {
   const urlAssetId = searchParams.get('asset');
   const urlViewRaw = searchParams.get('view');
   const urlWireframeRaw = searchParams.get('wireframe');
+  const qaFreeze = searchParams.get('qaFreezeParticles') === '1';
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    const w = window as unknown as { __CURBSIDE_QA_FREEZE__?: boolean };
+    if (qaFreeze) {
+      w.__CURBSIDE_QA_FREEZE__ = true;
+    }
+    return () => {
+      if (qaFreeze && w.__CURBSIDE_QA_FREEZE__ === true) {
+        delete w.__CURBSIDE_QA_FREEZE__;
+      }
+    };
+  }, [qaFreeze]);
 
   const initialAsset =
     ALL_QA_ASSETS.find((a) => a.id === urlAssetId) ?? ALL_QA_ASSETS[0]!;
@@ -692,8 +732,14 @@ export function QaGalleryStudio() {
         <div className="relative min-h-0 flex-1 bg-[#a8daf2]">
           <Canvas
             shadows={{ type: THREE.PCFShadowMap }}
-            dpr={[1, 2]}
-            camera={{ fov: 40, near: 0.1, far: 180, position: [5, 3, 5] }}
+            dpr={[1.5, 2]}
+            camera={{ fov: 40, near: 0.25, far: 120, position: [5, 3, 5] }}
+            gl={{
+              antialias: true,
+              powerPreference: 'high-performance',
+              toneMapping: THREE.ACESFilmicToneMapping,
+              toneMappingExposure: 1.05,
+            }}
           >
             <color attach="background" args={['#b3e2f7']} />
             <ambientLight intensity={0.72} color="#fff7eb" />
@@ -708,13 +754,14 @@ export function QaGalleryStudio() {
               color="#fff4db"
               shadow-mapSize-width={2048}
               shadow-mapSize-height={2048}
-              shadow-camera-near={1}
-              shadow-camera-far={70}
+              shadow-camera-near={2}
+              shadow-camera-far={65}
               shadow-camera-left={-18}
               shadow-camera-right={18}
               shadow-camera-top={18}
               shadow-camera-bottom={-18}
-              shadow-bias={-0.0005}
+              shadow-bias={-0.0004}
+              shadow-normalBias={0.035}
             />
             <directionalLight
               position={[-10, 8, -12]}
@@ -725,6 +772,7 @@ export function QaGalleryStudio() {
             <TurntableAssetStage
               asset={selectedAsset}
               autoTurntable={autoTurntable}
+              qaFreeze={qaFreeze}
               showWireframe={showWireframe}
               lastActionAt={lastActionAt}
               forceSteam={forceSteam}
@@ -736,6 +784,7 @@ export function QaGalleryStudio() {
               asset={selectedAsset}
               view={view}
               resetTick={resetTick}
+              qaFreeze={qaFreeze}
             />
           </Canvas>
 

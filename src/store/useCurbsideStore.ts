@@ -47,6 +47,7 @@ import {
 import { computeClubLaunchVelocity, resolveHorizontalAim } from '@/lib/aerodynamics';
 import { recommendClubForLie } from '@/lib/clubs';
 import { soundEngine } from '@/lib/sound';
+import { FOUNTAIN_DROP_DURATION_SEC } from '@/physics';
 
 export type ShotPhase =
   | 'aiming'
@@ -68,6 +69,13 @@ export interface PendingShotPayload {
 export interface PendingTeleportPayload {
   seq: number;
   position: Vec3Tuple;
+}
+
+export interface PendingFountainDropPayload {
+  seq: number;
+  from: Vec3Tuple;
+  to: Vec3Tuple;
+  durationSec: number;
 }
 
 export interface CurbsideState {
@@ -120,6 +128,7 @@ export interface CurbsideState {
   lastShot: ShotRecord | null;
   pendingShot: PendingShotPayload | null;
   pendingTeleport: PendingTeleportPayload | null;
+  pendingFountainDrop: PendingFountainDropPayload | null;
   pendingBallReset: boolean;
   soundEventSeq: number;
   lastSoundEvent: SoundEventPayload | null;
@@ -169,7 +178,8 @@ export interface CurbsideState {
   markBallResting: (pos: Vec3Tuple, opts?: { autoSelectClub?: boolean }) => void;
   teleportBall: (pos: Vec3Tuple, opts?: { keepStrokes?: boolean }) => void;
   consumeBallReset: () => void;
-  triggerFountainHazard: (dropPos?: Vec3Tuple) => void;
+  triggerFountainHazard: (dropPos?: Vec3Tuple, splashPos?: Vec3Tuple) => void;
+  completeFountainDrop: (seq?: number) => void;
   triggerWaterHazard: () => void;
   sinkHole: () => void;
   sinkFlag: (color?: FlagColor) => void;
@@ -307,6 +317,7 @@ function createInitialHoleSlice() {
     hasTakenFirstStroke: false,
     lastShot: null,
     pendingShot: null,
+    pendingFountainDrop: null,
     pendingBallReset: false,
     sunkFlags: {},
     sunkOrder: [] as FlagColor[],
@@ -474,9 +485,26 @@ export const useCurbsideStore = create<CurbsideState>((set, get) => ({
   },
 
   recordPropHit: (id, banner) => {
-    const now = Date.now();
+    const now =
+      typeof performance !== 'undefined'
+        ? performance.now() * 0.001
+        : Date.now() * 0.001;
     set((state) => {
-      const nextTimestamps = { ...state.propHitTimestamps, [id]: now };
+      const nextTimestamps: Record<string, number> = {
+        ...state.propHitTimestamps,
+        [id]: now,
+      };
+      if (id === 'hotdog-cart-corner') {
+        nextTimestamps['hotdog-cart-se-corner'] = now;
+        nextTimestamps['hotdog_cart_umbrella'] = now;
+      } else if (id === 'hydrant-corner-se') {
+        nextTimestamps['fire-hydrant-east-corner'] = now;
+        nextTimestamps['fire_hydrant_jet'] = now;
+      } else if (id === 'delivery-van-east') {
+        nextTimestamps['delivery_box_van'] = now;
+      } else if (id === 'fountain-courtyard-front') {
+        nextTimestamps['fountain_water_hazard'] = now;
+      }
       if (!banner) {
         return { propHitTimestamps: nextTimestamps };
       }
@@ -543,6 +571,7 @@ export const useCurbsideStore = create<CurbsideState>((set, get) => ({
     if (
       state.isHoleComplete ||
       state.shotPhase === 'ball_in_flight' ||
+      state.shotPhase === 'settling' ||
       state.shotPhase === 'fountain_drop'
     ) {
       return null;
@@ -683,6 +712,7 @@ export const useCurbsideStore = create<CurbsideState>((set, get) => ({
       isHoleComplete: false,
       isRoundComplete: false,
       pendingTeleport: { seq: nextSeq, position: [...pos] },
+      pendingFountainDrop: null,
       pendingBallReset: true,
       aimPreview: {
         ...state.aimPreview,
@@ -697,9 +727,12 @@ export const useCurbsideStore = create<CurbsideState>((set, get) => ({
     set({ pendingBallReset: false });
   },
 
-  triggerFountainHazard: (dropPos) => {
+  triggerFountainHazard: (dropPos, splashPos) => {
     const state = get();
     if (state.isHoleComplete || state.shotPhase === 'fountain_drop') return;
+    const fromPos: Vec3Tuple = splashPos
+      ? [...splashPos]
+      : [...state.ballPosition];
     const safeDrop: Vec3Tuple = dropPos
       ? [...dropPos]
       : [
@@ -719,14 +752,18 @@ export const useCurbsideStore = create<CurbsideState>((set, get) => ({
 
     soundEngine.playFountainSplash(0.95);
     trickToastCounter += 1;
+    const hitNow =
+      typeof performance !== 'undefined'
+        ? performance.now() * 0.001
+        : Date.now() * 0.001;
 
     set({
       strokes: nextStrokes,
       totalStrokes: nextStrokes,
       penaltyStrokes: nextPenalties,
-      shotPhase: 'aiming',
-      ballPhase: 'resting',
-      ballPosition: safeDrop,
+      shotPhase: 'fountain_drop',
+      ballPhase: 'hazard_drop',
+      ballPosition: fromPos,
       lastSafeBallPosition: safeDrop,
       lastSafeLie: safeDrop,
       distanceToPinMeters: computeDistance(safeDrop),
@@ -735,13 +772,23 @@ export const useCurbsideStore = create<CurbsideState>((set, get) => ({
       aimYaw: yawToCup,
       aimDirection: dirToCup,
       aimPower: 0,
+      propHitTimestamps: {
+        ...state.propHitTimestamps,
+        'fountain-courtyard-front': hitNow,
+        fountain_water_hazard: hitNow,
+      },
       lastEventBanner: 'Fountain Hazard +1',
       trickToast: {
         seq: trickToastCounter,
         kind: 'water_penalty',
         label: 'Fountain Hazard +1',
       },
-      pendingTeleport: { seq: nextSeq, position: safeDrop },
+      pendingFountainDrop: {
+        seq: nextSeq,
+        from: fromPos,
+        to: safeDrop,
+        durationSec: FOUNTAIN_DROP_DURATION_SEC,
+      },
       pendingBallReset: true,
       aimPreview: {
         isAiming: false,
@@ -749,6 +796,31 @@ export const useCurbsideStore = create<CurbsideState>((set, get) => ({
         clubId: 'putter',
         aimDirection: dirToCup,
       },
+    });
+  },
+
+  completeFountainDrop: (seq) => {
+    const state = get();
+    if (state.shotPhase !== 'fountain_drop') return;
+    const drop = state.pendingFountainDrop;
+    if (seq !== undefined && drop && drop.seq !== seq) return;
+    const targetPos: Vec3Tuple = drop
+      ? [...drop.to]
+      : [
+          FOUNTAIN_QUICK_DROP_POSITION[0],
+          FOUNTAIN_QUICK_DROP_POSITION[1] + BALL_RADIUS,
+          FOUNTAIN_QUICK_DROP_POSITION[2],
+        ];
+    set({
+      shotPhase: 'aiming',
+      ballPhase: 'resting',
+      ballPosition: targetPos,
+      lastSafeBallPosition: targetPos,
+      lastSafeLie: targetPos,
+      distanceToPinMeters: computeDistance(targetPos),
+      currentSurfaceTag: getMasterPlanSurfaceTagAt(targetPos[0], targetPos[2]),
+      pendingFountainDrop: null,
+      pendingBallReset: false,
     });
   },
 
@@ -778,12 +850,20 @@ export const useCurbsideStore = create<CurbsideState>((set, get) => ({
               ? 'Par!'
               : 'Holed Out!';
     trickToastCounter += 1;
+    const cuppedPos: Vec3Tuple = [
+      HOLE_1_CUP.position[0],
+      HOLE_1_CUP.position[1] - 0.08,
+      HOLE_1_CUP.position[2],
+    ];
 
     set({
       strokes: total,
       totalStrokes: total,
       shotPhase: 'holed_out',
       ballPhase: 'cupped',
+      ballPosition: cuppedPos,
+      lastSafeBallPosition: [...cuppedPos],
+      lastSafeLie: [...cuppedPos],
       isHoleComplete: true,
       isRoundComplete: true,
       personalBest: nextBest,

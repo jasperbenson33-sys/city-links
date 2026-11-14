@@ -5,6 +5,12 @@ import { useFrame } from '@react-three/fiber';
 import * as THREE from 'three';
 import { buildCoaxialHydrantSpec } from '@/lib/geometryHelpers';
 import { TOYBOX_MATERIALS } from '@/materials';
+import { isQaFreezeActive, resolveAnimTime } from '../qaFreeze';
+import { withPolygonOffset } from './propMaterials';
+
+// Cached polygonOffset variants for layered splash decals (never mutate shared materials).
+const PUDDLE_WATER_MAT = withPolygonOffset(TOYBOX_MATERIALS.turquoiseWater, 1);
+const PUDDLE_FOAM_MAT = withPolygonOffset(TOYBOX_MATERIALS.waterFoamWhite, 2);
 
 export interface FireHydrantJetPropProps {
   position?: [number, number, number];
@@ -105,7 +111,9 @@ export function FireHydrantJetProp({
 
   useFrame((_, delta) => {
     elapsedRef.current += Math.min(delta, 0.05);
-    const t = elapsedRef.current;
+    // Deterministic clock: frozen QA mode pins t = 4.0; every pose below is a pure function of t.
+    const frozen = isQaFreezeActive();
+    const t = resolveAnimTime(elapsedRef.current);
     const now =
       typeof performance !== 'undefined' ? performance.now() * 0.001 : t;
 
@@ -133,19 +141,26 @@ export function FireHydrantJetProp({
 
     const dtBurst = now - lastSurfAt;
     if (burstGroupRef.current) {
-      const active = dtBurst >= 0 && dtBurst < 0.85;
-      burstGroupRef.current.visible = active;
+      const active = !frozen && dtBurst >= 0 && dtBurst < 0.85;
+      const children = burstGroupRef.current.children;
       if (active) {
-        const children = burstGroupRef.current.children;
         for (let i = 0; i < children.length; i++) {
           const drop = children[i];
           const b = burstSpecs[i];
+          if (!drop || !b) continue;
           drop.position.set(
             impactCenter[0] + b.vx * dtBurst,
             impactCenter[1] + 0.08 + b.vy * dtBurst - 4.9 * dtBurst * dtBurst,
             impactCenter[2] + b.vz * dtBurst
           );
           drop.scale.setScalar(Math.max(0.015, 0.065 * (1 - dtBurst / 0.85)));
+        }
+      } else {
+        for (let i = 0; i < children.length; i++) {
+          const drop = children[i];
+          if (drop && drop.scale.x !== 0) {
+            drop.scale.setScalar(0);
+          }
         }
       }
     }
@@ -243,7 +258,7 @@ export function FireHydrantJetProp({
           <cylinderGeometry args={[0.068, 0.075, 0.1, 10]} />
         </mesh>
         <mesh
-          position={[0, 0, 0.045]}
+          position={[0, 0, 0.052]}
           rotation={[Math.PI * 0.5, 0, 0]}
           material={TOYBOX_MATERIALS.brassAccent}
         >
@@ -262,7 +277,6 @@ export function FireHydrantJetProp({
             <cylinderGeometry args={[cap.radius, cap.radius, cap.length, 10]} />
           </mesh>
           <mesh
-            castShadow
             position={cap.capPosition}
             rotation={cap.rotation}
             material={TOYBOX_MATERIALS.brassAccent}
@@ -294,28 +308,33 @@ export function FireHydrantJetProp({
       </group>
 
       {/* Animated Foam Splash Ring Over Storm Grate */}
-      <group position={impactCenter}>
+      <group position={[impactCenter[0], impactCenter[1] + 0.012, impactCenter[2]]}>
         <mesh
           ref={puddleRef}
+          position={[0, 0.016, 0]}
           rotation={[-Math.PI * 0.5, 0, 0]}
-          material={TOYBOX_MATERIALS.waterFoamWhite}
+          material={PUDDLE_FOAM_MAT}
         >
           <ringGeometry args={[0.06, 0.24, 14]} />
         </mesh>
         <mesh
-          position={[0, -0.004, 0]}
+          position={[0, 0, 0]}
           rotation={[-Math.PI * 0.5, 0, 0]}
-          material={TOYBOX_MATERIALS.turquoiseWater}
+          material={PUDDLE_WATER_MAT}
         >
           <circleGeometry args={[0.28, 14]} />
         </mesh>
       </group>
 
-      {/* Hydrant-Jet Boost Burst Droplets on Ball Hit */}
-      <group ref={burstGroupRef} visible={false}>
+      {/* Hydrant-Jet Boost Burst Droplets on Ball Hit (mounted visible={true}, scale={0} until hit) */}
+      <group ref={burstGroupRef} visible={true}>
         {burstSpecs.map((_, idx) => (
           <mesh
             key={`burst-${idx}`}
+            visible={true}
+            scale={0}
+            castShadow={false}
+            frustumCulled={false}
             material={
               idx % 2 === 0
                 ? TOYBOX_MATERIALS.waterBeadCyan

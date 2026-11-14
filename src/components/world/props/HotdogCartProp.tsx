@@ -9,6 +9,32 @@ import {
   type CoaxialWheelSpec,
 } from '@/lib/geometryHelpers';
 import { CONFETTI_TOYBOX_MATERIALS, TOYBOX_MATERIALS } from '@/materials';
+import { isQaFreezeActive, resolveAnimTime } from '../qaFreeze';
+
+/**
+ * Local cached polygon-offset clones (shared TOYBOX materials are never mutated).
+ * tier 1 => factor/units -1, tier 2 => -2, tier 3 => -3.
+ */
+const LAYERED_CACHE = new WeakMap<THREE.Material, Map<number, THREE.Material>>();
+function layered<T extends THREE.Material>(base: T, tier: 1 | 2 | 3): T {
+  let byTier = LAYERED_CACHE.get(base);
+  if (!byTier) {
+    byTier = new Map();
+    LAYERED_CACHE.set(base, byTier);
+  }
+  let m = byTier.get(tier);
+  if (!m) {
+    m = base.clone();
+    m.polygonOffset = true;
+    m.polygonOffsetFactor = -tier;
+    m.polygonOffsetUnits = -tier;
+    byTier.set(tier, m);
+  }
+  return m as T;
+}
+
+/** Minimum rendered radius for thin rods (>= 0.035m diameter, stylized). */
+const MIN_THIN_RADIUS = 0.0175;
 
 export interface HotdogCartPropProps {
   position?: [number, number, number];
@@ -96,7 +122,6 @@ export function CoaxialWheelMeshGroup({
       </mesh>
 
       <mesh
-        castShadow
         position={spec.rim.position}
         rotation={spec.rim.rotation}
         material={rimMaterial}
@@ -130,10 +155,9 @@ export function CoaxialWheelMeshGroup({
       </mesh>
 
       <mesh
-        castShadow
         position={spec.hubcap.outboardPosition}
         rotation={spec.hubcap.rotation}
-        material={hubMaterial}
+        material={layered(hubMaterial, 1)}
       >
         <cylinderGeometry
           args={[
@@ -147,7 +171,7 @@ export function CoaxialWheelMeshGroup({
       <mesh
         position={spec.hubcap.inboardPosition}
         rotation={spec.hubcap.rotation}
-        material={TOYBOX_MATERIALS.darkIron}
+        material={layered(TOYBOX_MATERIALS.darkIron, 1)}
       >
         <cylinderGeometry
           args={[
@@ -166,7 +190,7 @@ export function CoaxialWheelMeshGroup({
           rotation={spec.hub.rotation}
           material={TOYBOX_MATERIALS.darkIron}
         >
-          <cylinderGeometry args={[0.011, 0.011, 0.022, 6]} />
+          <cylinderGeometry args={[MIN_THIN_RADIUS, MIN_THIN_RADIUS, 0.035, 6]} />
         </mesh>
       ))}
 
@@ -188,12 +212,18 @@ export function CoaxialWheelMeshGroup({
       {spec.spokes.map((spoke) => (
         <mesh
           key={spoke.index}
-          castShadow
           position={spoke.position}
           rotation={spoke.rotation}
           material={rimMaterial}
         >
-          <cylinderGeometry args={[spoke.radius, spoke.radius, spoke.length, 6]} />
+          <cylinderGeometry
+            args={[
+              Math.max(spoke.radius, MIN_THIN_RADIUS),
+              Math.max(spoke.radius, MIN_THIN_RADIUS),
+              spoke.length,
+              6,
+            ]}
+          />
         </mesh>
       ))}
     </group>
@@ -220,7 +250,6 @@ export function HotdogCartProp({
   const bellRef = useRef<THREE.Group>(null);
   const steamGroupRef = useRef<THREE.Group>(null);
   const confettiGroupRef = useRef<THREE.Group>(null);
-  const elapsedRef = useRef(0);
 
   const wheelSpec = useMemo(
     () =>
@@ -318,11 +347,12 @@ export function HotdogCartProp({
     };
   }, [awningSpec.center, pitchDeg]);
 
-  useFrame((_, delta) => {
-    elapsedRef.current += Math.min(delta, 0.05);
-    const t = elapsedRef.current;
+  useFrame((state) => {
+    // Absolute clock (no frame-rate dependent accumulation); pinned when ?qaFreezeParticles=1.
+    const t = resolveAnimTime(state.clock.elapsedTime);
     const now = typeof performance !== 'undefined' ? performance.now() * 0.001 : t;
-    const dt = now - lastHitAt;
+    // Hit reactions are wall-clock driven; suppress them entirely under the QA freeze.
+    const dt = isQaFreezeActive() ? -1 : now - lastHitAt;
 
     if (awningBounceRef.current) {
       if (dt >= 0 && dt < 0.72) {
@@ -362,18 +392,27 @@ export function HotdogCartProp({
 
     if (confettiGroupRef.current) {
       const active = dt >= 0 && dt < 1.1;
-      confettiGroupRef.current.visible = active;
+      const children = confettiGroupRef.current.children;
       if (active) {
-        const children = confettiGroupRef.current.children;
+        const fade = dt > 0.85 ? Math.max(0.05, (1.1 - dt) / 0.25) : 1;
         for (let i = 0; i < children.length; i++) {
           const piece = children[i];
           const spec = confettiSpecs[i];
+          if (!piece || !spec) continue;
           piece.position.set(
             spec.vx * dt * 0.62,
             2.28 + spec.vy * dt - 4.9 * dt * dt,
             spec.vz * dt * 0.62
           );
           piece.rotation.set(dt * spec.rotSpeed, dt * spec.rotSpeed * 0.8, 0);
+          piece.scale.setScalar(fade);
+        }
+      } else {
+        for (let i = 0; i < children.length; i++) {
+          const piece = children[i];
+          if (piece && piece.scale.x !== 0) {
+            piece.scale.setScalar(0);
+          }
         }
       }
     }
@@ -387,6 +426,7 @@ export function HotdogCartProp({
       name="hotdog-cart-prop"
       position={position}
       rotation={[0, rotationY, 0]}
+      userData={{ occludableProp: true }}
     >
       {/* Twin Coaxial Spoked Wheels Seated Flush at y = 0 */}
       <CoaxialWheelMeshGroup
@@ -431,7 +471,6 @@ export function HotdogCartProp({
             <cylinderGeometry args={[0.055, 0.065, 0.03, 10]} />
           </mesh>
           <mesh
-            castShadow
             position={[0, 0.24, 0]}
             material={TOYBOX_MATERIALS.darkIron}
           >
@@ -453,14 +492,13 @@ export function HotdogCartProp({
         castShadow
         receiveShadow
         position={[0, 0.82, 0]}
-        material={TOYBOX_MATERIALS.awningCoral}
+        material={layered(TOYBOX_MATERIALS.awningCoral, 1)}
       >
-        <boxGeometry args={[1.35, 0.2, 1.69]} />
+        <boxGeometry args={[1.37, 0.2, 1.71]} />
       </mesh>
       <mesh
-        castShadow
-        position={[0, 1.12, 0]}
-        material={TOYBOX_MATERIALS.brassAccent}
+        position={[0, 1.115, 0]}
+        material={layered(TOYBOX_MATERIALS.brassAccent, 2)}
       >
         <boxGeometry args={[1.38, 0.04, 1.72]} />
       </mesh>
@@ -492,11 +530,10 @@ export function HotdogCartProp({
           <cylinderGeometry args={[0.032, 0.038, 0.16, 10]} />
         </mesh>
         <mesh
-          castShadow
           position={[0.01, 0.19, -0.22]}
           material={TOYBOX_MATERIALS.hydrantCoral}
         >
-          <coneGeometry args={[0.016, 0.04, 8]} />
+          <coneGeometry args={[0.0185, 0.04, 8]} />
         </mesh>
         <mesh
           castShadow
@@ -506,11 +543,10 @@ export function HotdogCartProp({
           <cylinderGeometry args={[0.032, 0.038, 0.16, 10]} />
         </mesh>
         <mesh
-          castShadow
           position={[0.01, 0.19, -0.02]}
           material={TOYBOX_MATERIALS.taxiAmber}
         >
-          <coneGeometry args={[0.016, 0.04, 8]} />
+          <coneGeometry args={[0.0185, 0.04, 8]} />
         </mesh>
         <mesh
           castShadow
@@ -524,7 +560,6 @@ export function HotdogCartProp({
       {/* Rear Push Bar (-Z) */}
       <group position={[0, 1.04, -0.95]}>
         <mesh
-          castShadow
           position={[-0.48, 0, 0.06]}
           rotation={[Math.PI * 0.5, 0, 0]}
           material={TOYBOX_MATERIALS.darkIron}
@@ -532,7 +567,6 @@ export function HotdogCartProp({
           <cylinderGeometry args={[0.02, 0.02, 0.14, 8]} />
         </mesh>
         <mesh
-          castShadow
           position={[0.48, 0, 0.06]}
           rotation={[Math.PI * 0.5, 0, 0]}
           material={TOYBOX_MATERIALS.darkIron}
@@ -540,7 +574,6 @@ export function HotdogCartProp({
           <cylinderGeometry args={[0.02, 0.02, 0.14, 8]} />
         </mesh>
         <mesh
-          castShadow
           rotation={[0, 0, Math.PI * 0.5]}
           material={TOYBOX_MATERIALS.chromeSilver}
         >
@@ -601,7 +634,6 @@ export function HotdogCartProp({
       {/* Brass Vendor Bell on Front Left Counter */}
       <group ref={bellRef} position={[-0.48, cartDeckY + 0.08, 0.74]}>
         <mesh
-          castShadow
           position={[0, -0.05, 0]}
           material={TOYBOX_MATERIALS.darkIron}
         >
@@ -616,7 +648,6 @@ export function HotdogCartProp({
       {cornerStanchions.posts.map((post, idx) => (
         <group key={`corner-stanchion-${idx}`}>
           <mesh
-            castShadow
             position={[post.x, post.midY, post.z]}
             material={TOYBOX_MATERIALS.chromeSilver}
           >
@@ -642,7 +673,6 @@ export function HotdogCartProp({
         (purlin, idx) => (
           <mesh
             key={`purlin-${idx}`}
-            castShadow
             position={[0, purlin.y - 0.015, purlin.z]}
             rotation={[0, 0, Math.PI * 0.5]}
             material={TOYBOX_MATERIALS.chromeSilver}
@@ -654,7 +684,6 @@ export function HotdogCartProp({
       {[-0.64, 0.64].map((rx, idx) => (
         <mesh
           key={`rafter-${idx}`}
-          castShadow
           position={[rx, cornerStanchions.rafter.y, cornerStanchions.rafter.z]}
           rotation={[Math.PI * 0.5 + cornerStanchions.rafter.pitchRad, 0, 0]}
           material={TOYBOX_MATERIALS.chromeSilver}
@@ -682,13 +711,20 @@ export function HotdogCartProp({
                     : TOYBOX_MATERIALS.awningCoral
                 }
               >
-                <boxGeometry args={panel.size} />
+                {/* Spec pads each stripe by +4mm which overlaps neighbours coplanarly (z-fight).
+                    Cream stripes shrink 4mm and coral stripes keep the pad so edges abut exactly. */}
+                <boxGeometry
+                  args={[
+                    panel.isAlternateStripe ? panel.size[0] - 0.008 : panel.size[0],
+                    panel.size[1],
+                    panel.size[2],
+                  ]}
+                />
               </mesh>
             ))}
 
             {/* Front Valance Drop Apron */}
             <mesh
-              castShadow
               receiveShadow
               position={awningSpec.frontValance.position}
               rotation={awningSpec.frontValance.rotation}
@@ -713,16 +749,20 @@ export function HotdogCartProp({
         ))}
       </group>
 
-      {/* Joyful Confetti Burst on Awning Bounce */}
-      <group ref={confettiGroupRef} visible={false}>
+      {/* Joyful Confetti Burst on Awning Bounce (mounted visible={true}, scale={0} until hit) */}
+      <group ref={confettiGroupRef} visible={true}>
         {confettiSpecs.map((_, idx) => (
           <mesh
             key={`confetti-${idx}`}
+            visible={true}
+            scale={0}
+            castShadow={false}
+            frustumCulled={false}
             material={
               CONFETTI_TOYBOX_MATERIALS[idx % CONFETTI_TOYBOX_MATERIALS.length]
             }
           >
-            <boxGeometry args={[0.075, 0.02, 0.11]} />
+            <boxGeometry args={[0.075, 0.035, 0.11]} />
           </mesh>
         ))}
       </group>

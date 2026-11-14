@@ -121,6 +121,76 @@ export function buildRectSlabGeometry(
 }
 
 /**
+ * Builds a rectangular slab with a rectangular window cut out of it (e.g. the fringe collar
+ * with the putting-green footprint removed) so the two layers never share a plan area and
+ * their tops can never z-fight.
+ */
+export function buildRectSlabWithRectHoleGeometry(
+  bounds: RectBoundsXZ,
+  hole: RectBoundsXZ,
+  bottomY: number,
+  topY: number,
+  uvTileScaleMeters: number,
+): THREE.BufferGeometry {
+  const { minX, maxX, minZ, maxZ } = bounds;
+  const shape = new THREE.Shape();
+  shape.moveTo(minX, -maxZ);
+  shape.lineTo(maxX, -maxZ);
+  shape.lineTo(maxX, -minZ);
+  shape.lineTo(minX, -minZ);
+  shape.closePath();
+
+  const inside =
+    hole.minX > minX && hole.maxX < maxX && hole.minZ > minZ && hole.maxZ < maxZ;
+  if (inside) {
+    const path = new THREE.Path();
+    // CW in (x, -z) for hole winding
+    path.moveTo(hole.minX, -hole.maxZ);
+    path.lineTo(hole.minX, -hole.minZ);
+    path.lineTo(hole.maxX, -hole.minZ);
+    path.lineTo(hole.maxX, -hole.maxZ);
+    path.closePath();
+    shape.holes.push(path);
+  }
+
+  return buildExtrudedWorldSlab(shape, bottomY, topY, uvTileScaleMeters, 4);
+}
+
+/**
+ * Builds a rectangular slab with any number of polygonal windows (vertices in world `[x, z]`)
+ * carved through it. Used to remove the terrace under the turf / fringe / border / patio
+ * layers so no two horizontal faces ever share plan area at the same height.
+ */
+export function buildRectSlabWithPolygonHolesGeometry(
+  bounds: RectBoundsXZ,
+  holes: ReadonlyArray<ReadonlyArray<readonly [number, number]>>,
+  bottomY: number,
+  topY: number,
+  uvTileScaleMeters: number,
+): THREE.BufferGeometry {
+  const { minX, maxX, minZ, maxZ } = bounds;
+  const shape = new THREE.Shape();
+  shape.moveTo(minX, -maxZ);
+  shape.lineTo(maxX, -maxZ);
+  shape.lineTo(maxX, -minZ);
+  shape.lineTo(minX, -minZ);
+  shape.closePath();
+
+  for (const poly of holes) {
+    if (poly.length < 3) continue;
+    const path = new THREE.Path();
+    poly.forEach(([x, z], i) => {
+      if (i === 0) path.moveTo(x, -z);
+      else path.lineTo(x, -z);
+    });
+    path.closePath();
+    shape.holes.push(path);
+  }
+
+  return buildExtrudedWorldSlab(shape, bottomY, topY, uvTileScaleMeters, 4);
+}
+
+/**
  * Builds `zone-west-5th-sidewalk` with rectangular notches carved out for the two
  * West Sidewalk ADA ramp aprons so zero coplanar overlapping surfaces occur.
  */

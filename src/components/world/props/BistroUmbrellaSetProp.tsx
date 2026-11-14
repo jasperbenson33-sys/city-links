@@ -6,6 +6,32 @@ import * as THREE from 'three';
 import { buildCoaxialUmbrellaSpec } from '@/lib/geometryHelpers';
 import { TOYBOX_MATERIALS } from '@/materials';
 import { PROP_ACCENT_MATERIALS } from './propMaterials';
+import { isQaFreezeActive, resolveAnimTime } from '../qaFreeze';
+
+/**
+ * Local cached polygon-offset clones (shared TOYBOX materials are never mutated).
+ * tier 1 => factor/units -1, tier 2 => -2, tier 3 => -3.
+ */
+const LAYERED_CACHE = new WeakMap<THREE.Material, Map<number, THREE.Material>>();
+function layered<T extends THREE.Material>(base: T, tier: 1 | 2 | 3): T {
+  let byTier = LAYERED_CACHE.get(base);
+  if (!byTier) {
+    byTier = new Map();
+    LAYERED_CACHE.set(base, byTier);
+  }
+  let m = byTier.get(tier);
+  if (!m) {
+    m = base.clone();
+    m.polygonOffset = true;
+    m.polygonOffsetFactor = -tier;
+    m.polygonOffsetUnits = -tier;
+    byTier.set(tier, m);
+  }
+  return m as T;
+}
+
+/** Minimum rendered radius for thin rods (>= 0.035m diameter, stylized). */
+const MIN_THIN_RADIUS = 0.0175;
 
 export type BistroUmbrellaVariant = 'mint' | 'terracotta' | 'ochre';
 
@@ -51,7 +77,6 @@ export function BistroUmbrellaSetProp({
   showWireframe = false,
 }: BistroUmbrellaSetPropProps) {
   const canopyRef = useRef<THREE.Group>(null);
-  const elapsedRef = useRef(0);
 
   const umbrellaSpec = useMemo(
     () =>
@@ -68,14 +93,15 @@ export function BistroUmbrellaSetProp({
     []
   );
 
-  useFrame((_, delta) => {
-    elapsedRef.current += Math.min(delta, 0.05);
-    const t = elapsedRef.current;
+  useFrame((state) => {
+    // Absolute clock (no frame-rate dependent accumulation); pinned when ?qaFreezeParticles=1.
+    const t = resolveAnimTime(state.clock.elapsedTime);
     if (!canopyRef.current) return;
+    const frozen = isQaFreezeActive();
     const dt =
       (typeof performance !== 'undefined' ? performance.now() * 0.001 : t) -
       lastHitAt;
-    if (dt >= 0 && dt < 0.75) {
+    if (!frozen && dt >= 0 && dt < 0.75) {
       const decay = Math.exp(-5.6 * dt);
       const wave = Math.cos(dt * 24.0);
       canopyRef.current.scale.set(
@@ -98,6 +124,7 @@ export function BistroUmbrellaSetProp({
       name="bistro-umbrella-set-prop"
       position={position}
       rotation={[0, rotationY, 0]}
+      userData={{ occludableProp: true }}
     >
       {/* Coaxial Cast-Iron Umbrella Stand Flush at y = 0 */}
       <mesh
@@ -137,13 +164,12 @@ export function BistroUmbrellaSetProp({
         castShadow
         receiveShadow
         position={[0, 0.735, 0]}
-        material={TOYBOX_MATERIALS.bistroTableTop}
+        material={layered(TOYBOX_MATERIALS.bistroTableTop, 1)}
       >
         <cylinderGeometry args={[0.42, 0.42, 0.03, 14]} />
       </mesh>
       <mesh
-        castShadow
-        position={[0, 0.715, 0]}
+        position={[0, 0.7125, 0]}
         material={TOYBOX_MATERIALS.bistroCastIron}
       >
         <cylinderGeometry args={[0.435, 0.435, 0.015, 14]} />
@@ -151,12 +177,11 @@ export function BistroUmbrellaSetProp({
 
       {/* Espresso Saucer & Cup on Table */}
       <group position={[0.16, 0.75, 0.12]}>
-        <mesh castShadow material={TOYBOX_MATERIALS.awningCream}>
+        <mesh material={TOYBOX_MATERIALS.awningCream}>
           <cylinderGeometry args={[0.055, 0.04, 0.014, 10]} />
         </mesh>
         <mesh
-          castShadow
-          position={[0, 0.025, 0]}
+          position={[0, 0.02, 0]}
           material={TOYBOX_MATERIALS.awningCream}
         >
           <cylinderGeometry args={[0.032, 0.024, 0.038, 10]} />
@@ -186,11 +211,10 @@ export function BistroUmbrellaSetProp({
           ).map(([lx, lz], lIdx) => (
             <mesh
               key={`leg-${lIdx}`}
-              castShadow
               position={[lx, 0.22, lz]}
               material={TOYBOX_MATERIALS.bistroCastIron}
             >
-              <cylinderGeometry args={[0.012, 0.01, 0.44, 6]} />
+              <cylinderGeometry args={[0.0185, 0.0175, 0.44, 6]} />
             </mesh>
           ))}
           {/* Seat Ring & Warm Cedar Cushion */}
@@ -205,29 +229,27 @@ export function BistroUmbrellaSetProp({
           <mesh
             castShadow
             receiveShadow
-            position={[0, 0.47, 0]}
-            material={palette.primary}
+            position={[0, 0.4725, 0]}
+            material={layered(palette.primary, 1)}
           >
-            <cylinderGeometry args={[0.17, 0.175, 0.024, 10]} />
+            <cylinderGeometry args={[0.17, 0.175, 0.025, 10]} />
           </mesh>
           {/* Backrest Uprights & Curved Rail */}
           {[-0.13, 0.13].map((bx, bIdx) => (
             <mesh
               key={`post-${bIdx}`}
-              castShadow
               position={[bx, 0.65, -0.15]}
               rotation={[-0.08, 0, 0]}
               material={TOYBOX_MATERIALS.bistroCastIron}
             >
-              <cylinderGeometry args={[0.012, 0.012, 0.4, 6]} />
+              <cylinderGeometry args={[0.0175, 0.0175, 0.4, 6]} />
             </mesh>
           ))}
           <mesh
-            castShadow
             position={[0, 0.81, -0.165]}
             material={TOYBOX_MATERIALS.bistroCastIron}
           >
-            <boxGeometry args={[0.3, 0.08, 0.024]} />
+            <boxGeometry args={[0.3, 0.08, 0.036]} />
           </mesh>
         </group>
       ))}
@@ -285,9 +307,9 @@ export function BistroUmbrellaSetProp({
               rib.position[2],
             ]}
             rotation={rib.rotation}
-            material={TOYBOX_MATERIALS.cedarWood}
+            material={layered(TOYBOX_MATERIALS.cedarWood, 1)}
           >
-            <cylinderGeometry args={[rib.radius, rib.radius, rib.length, 6]} />
+            <cylinderGeometry args={[Math.max(rib.radius, MIN_THIN_RADIUS), Math.max(rib.radius, MIN_THIN_RADIUS), rib.length, 6]} />
           </mesh>
         ))}
         {umbrellaSpec.stretchers.map((st) => (
@@ -299,9 +321,9 @@ export function BistroUmbrellaSetProp({
               st.position[2],
             ]}
             rotation={st.rotation}
-            material={TOYBOX_MATERIALS.brassAccent}
+            material={layered(TOYBOX_MATERIALS.brassAccent, 2)}
           >
-            <cylinderGeometry args={[st.radius, st.radius, st.length, 6]} />
+            <cylinderGeometry args={[Math.max(st.radius, MIN_THIN_RADIUS), Math.max(st.radius, MIN_THIN_RADIUS), st.length, 6]} />
           </mesh>
         ))}
 

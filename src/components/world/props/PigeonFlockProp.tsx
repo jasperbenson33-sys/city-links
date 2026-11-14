@@ -5,6 +5,7 @@ import { useFrame } from '@react-three/fiber';
 import * as THREE from 'three';
 import { TOYBOX_MATERIALS } from '@/materials';
 import { useCurbsideStore } from '@/store/useCurbsideStore';
+import { isQaFreezeActive, resolveAnimTime } from '../qaFreeze';
 import { PROP_ACCENT_MATERIALS } from './propMaterials';
 
 export interface PigeonFlockPropProps {
@@ -101,11 +102,16 @@ export function PigeonFlockProp({
   }
 
   useFrame((_, delta) => {
-    elapsedRef.current += Math.min(delta, 0.05);
-    const t = elapsedRef.current;
+    // Deterministic clock: frozen QA mode pins t = 4.0 and never advances the live accumulator.
+    const frozen = isQaFreezeActive();
+    if (!frozen) elapsedRef.current += Math.min(delta, 0.05);
+    const t = resolveAnimTime(elapsedRef.current);
     if (!birdsGroupRef.current) return;
 
-    const liveBallPos = ballPosition ?? useCurbsideStore.getState().ballPosition;
+    // Frozen mode ignores the live ball (gameplay-driven) so frames are pixel-identical.
+    const liveBallPos = frozen
+      ? ballPosition
+      : (ballPosition ?? useCurbsideStore.getState().ballPosition);
     const cosR = Math.cos(rotationY);
     const sinR = Math.sin(rotationY);
 
@@ -125,7 +131,11 @@ export function PigeonFlockProp({
       const wantScatter = forceScatter || ballDist < SCATTER_TRIGGER_DIST;
       const elapsed = t - st.phaseStart;
 
-      if (st.phase === 'ground') {
+      if (frozen) {
+        // Stateless deterministic pose: grounded pecking, or mid-hover when scatter is forced.
+        st.phase = wantScatter ? 'hovering' : 'ground';
+        st.phaseStart = t;
+      } else if (st.phase === 'ground') {
         if (wantScatter) {
           st.phase = 'taking-off';
           st.phaseStart = t - (i % 3) * 0.06;
@@ -214,16 +224,16 @@ export function PigeonFlockProp({
           rw.position.set(0.072, 0.12, -0.015);
           lw.rotation.set(0, 0, flap + 0.35);
           rw.rotation.set(0, 0, -flap - 0.35);
-          lw.scale.set(1.6, 0.7, 1.0);
-          rw.scale.set(1.6, 0.7, 1.0);
+          lw.scale.set(0.9, 0.7, 1.0);
+          rw.scale.set(0.9, 0.7, 1.0);
         } else {
           // Folded flush and tapered snugly along the rounded torso flanks
-          lw.position.set(-0.044, 0.1, -0.022);
-          rw.position.set(0.044, 0.1, -0.022);
+          lw.position.set(-0.042, 0.1, -0.022);
+          rw.position.set(0.042, 0.1, -0.022);
           lw.rotation.set(-0.22, -0.14, -0.26);
           rw.rotation.set(-0.22, 0.14, 0.26);
-          lw.scale.set(0.6, 0.9, 1.0);
-          rw.scale.set(0.6, 0.9, 1.0);
+          lw.scale.set(0.9, 0.9, 1.0);
+          rw.scale.set(0.9, 0.9, 1.0);
         }
       }
     }
@@ -244,16 +254,16 @@ export function PigeonFlockProp({
           >
             {/* Webbed Coral Feet Planted Flush at y = 0.00m */}
             <mesh
-              position={[-0.024, 0.006, 0.015]}
+              position={[-0.024, 0.008, 0.015]}
               material={TOYBOX_MATERIALS.pigeonBeakFeet}
             >
-              <boxGeometry args={[0.02, 0.012, 0.036]} />
+              <boxGeometry args={[0.036, 0.016, 0.044]} />
             </mesh>
             <mesh
-              position={[0.024, 0.006, 0.015]}
+              position={[0.024, 0.008, 0.015]}
               material={TOYBOX_MATERIALS.pigeonBeakFeet}
             >
-              <boxGeometry args={[0.02, 0.012, 0.036]} />
+              <boxGeometry args={[0.036, 0.016, 0.044]} />
             </mesh>
 
             {/* Twin Slender Legs */}
@@ -261,13 +271,13 @@ export function PigeonFlockProp({
               position={[-0.024, 0.038, 0]}
               material={TOYBOX_MATERIALS.pigeonBeakFeet}
             >
-              <cylinderGeometry args={[0.006, 0.006, 0.056, 5]} />
+              <cylinderGeometry args={[0.0185, 0.0185, 0.056, 5]} />
             </mesh>
             <mesh
               position={[0.024, 0.038, 0]}
               material={TOYBOX_MATERIALS.pigeonBeakFeet}
             >
-              <cylinderGeometry args={[0.006, 0.006, 0.056, 5]} />
+              <cylinderGeometry args={[0.0185, 0.0185, 0.056, 5]} />
             </mesh>
 
             {/* Plump Faceted Grey Body */}
@@ -311,7 +321,7 @@ export function PigeonFlockProp({
                 rotation={[Math.PI * 0.5, 0, 0]}
                 material={TOYBOX_MATERIALS.pigeonBeakFeet}
               >
-                <coneGeometry args={[0.012, 0.032, 5]} />
+                <coneGeometry args={[0.0185, 0.034, 5]} />
               </mesh>
             </group>
 
@@ -320,35 +330,32 @@ export function PigeonFlockProp({
               ref={(el) => {
                 leftWingsRef.current[idx] = el;
               }}
-              castShadow
-              position={[-0.044, 0.1, -0.022]}
+              position={[-0.042, 0.1, -0.022]}
               rotation={[-0.22, -0.14, -0.26]}
-              scale={[0.6, 0.9, 1.0]}
+              scale={[0.9, 0.9, 1.0]}
               material={TOYBOX_MATERIALS.pigeonWing}
             >
-              <boxGeometry args={[0.022, 0.052, 0.128]} />
+              <boxGeometry args={[0.04, 0.052, 0.128]} />
             </mesh>
             <mesh
               ref={(el) => {
                 rightWingsRef.current[idx] = el;
               }}
-              castShadow
-              position={[0.044, 0.1, -0.022]}
+              position={[0.042, 0.1, -0.022]}
               rotation={[-0.22, 0.14, 0.26]}
-              scale={[0.6, 0.9, 1.0]}
+              scale={[0.9, 0.9, 1.0]}
               material={TOYBOX_MATERIALS.pigeonWing}
             >
-              <boxGeometry args={[0.022, 0.052, 0.128]} />
+              <boxGeometry args={[0.04, 0.052, 0.128]} />
             </mesh>
 
             {/* Charcoal Tail Fan */}
             <mesh
-              castShadow
               position={[0, 0.088, -0.118]}
               rotation={[-0.3, 0, 0]}
               material={PROP_ACCENT_MATERIALS.pigeonWingBar}
             >
-              <boxGeometry args={[0.062, 0.016, 0.088]} />
+              <boxGeometry args={[0.062, 0.036, 0.088]} />
             </mesh>
           </group>
         ))}

@@ -2,7 +2,31 @@
 
 import React from 'react';
 import { TOYBOX_MATERIALS } from '@/materials';
-import { PROP_ACCENT_MATERIALS } from './propMaterials';
+import {
+  PROP_ACCENT_MATERIALS,
+  withPolygonOffset,
+  withSoftContrast,
+} from './propMaterials';
+
+/* Anti-shimmer layered-decal materials (cached clones; shared sources never mutated). */
+const DECAL = {
+  coneWhite: withPolygonOffset(PROP_ACCENT_MATERIALS.safetyConeWhite, 1),
+  chalkboardFace: withPolygonOffset(PROP_ACCENT_MATERIALS.chalkboardSlate, 1),
+  chalkHeader: withPolygonOffset(TOYBOX_MATERIALS.awningCoral, 2),
+  chalkLine: withSoftContrast(withPolygonOffset(PROP_ACCENT_MATERIALS.chalkCream, 2)),
+  soilBed: withPolygonOffset(TOYBOX_MATERIALS.cedarDark, 1),
+  tunnelFloorPan: withPolygonOffset(PROP_ACCENT_MATERIALS.subwayTunnelVoid, 1),
+  tileGreenBand: withPolygonOffset(PROP_ACCENT_MATERIALS.subwayTileGreenBand, 1),
+  tileSeam: withPolygonOffset(PROP_ACCENT_MATERIALS.mortarCement, 1),
+  stepNosing: withSoftContrast(withPolygonOffset(PROP_ACCENT_MATERIALS.subwaySignDark, 1)),
+  signPlate: withPolygonOffset(PROP_ACCENT_MATERIALS.subwaySignDark, 1),
+  signStripe: withSoftContrast(withPolygonOffset(PROP_ACCENT_MATERIALS.chalkCream, 2)),
+  bulletCoral: withPolygonOffset(TOYBOX_MATERIALS.awningCoral, 2),
+  bulletAmber: withPolygonOffset(TOYBOX_MATERIALS.taxiAmber, 2),
+};
+
+/** Lifts every stair tread so the lowest one clears the tunnel floor pan by > 1.5cm. */
+const STEP_LIFT = 0.016;
 
 /* ============================================================================
  * 1. Hazard Cone (`hazard_cone`, localSize: [0.26, 0.68, 0.26])
@@ -49,15 +73,15 @@ export function HazardConeProp({
       {/* Twin Reflective White Collar Bands */}
       <mesh
         position={[0, 0.34, 0]}
-        material={PROP_ACCENT_MATERIALS.safetyConeWhite}
+        material={DECAL.coneWhite}
       >
-        <cylinderGeometry args={[0.08, 0.091, 0.085, 8]} />
+        <cylinderGeometry args={[0.082, 0.094, 0.085, 8]} />
       </mesh>
       <mesh
         position={[0, 0.49, 0]}
-        material={PROP_ACCENT_MATERIALS.safetyConeWhite}
+        material={DECAL.coneWhite}
       >
-        <cylinderGeometry args={[0.056, 0.066, 0.07, 8]} />
+        <cylinderGeometry args={[0.064, 0.075, 0.07, 8]} />
       </mesh>
 
       {showWireframe && (
@@ -129,26 +153,26 @@ export function MenuAFrameBoardProp({
           </mesh>
           {/* Dark Matte Chalkboard Face */}
           <mesh
-            position={[0, 0.04, side * 0.016]}
-            material={PROP_ACCENT_MATERIALS.chalkboardSlate}
+            position={[0, 0.04, side * 0.026]}
+            material={DECAL.chalkboardFace}
           >
             <boxGeometry args={[0.5, 0.78, 0.014]} />
           </mesh>
           {/* Stylized Menu Chalk Lines & Coral Header Ribbon */}
           <mesh
-            position={[0, 0.3, side * 0.024]}
-            material={TOYBOX_MATERIALS.awningCoral}
+            position={[0, 0.3, side * 0.044]}
+            material={DECAL.chalkHeader}
           >
             <boxGeometry args={[0.38, 0.07, 0.008]} />
           </mesh>
           {[0.14, 0.02, -0.1, -0.22].map((ly, lIdx) => (
             <mesh
               key={`line-${lIdx}`}
-              position={[lIdx === 1 ? -0.04 : 0, ly, side * 0.024]}
-              material={PROP_ACCENT_MATERIALS.chalkCream}
+              position={[lIdx === 1 ? -0.04 : 0, ly, side * 0.044]}
+              material={DECAL.chalkLine}
             >
               <boxGeometry
-                args={[lIdx % 2 === 0 ? 0.36 : 0.28, 0.026, 0.008]}
+                args={[lIdx % 2 === 0 ? 0.36 : 0.28, 0.036, 0.008]}
               />
             </mesh>
           ))}
@@ -157,7 +181,6 @@ export function MenuAFrameBoardProp({
 
       {/* Brass Top Hinge Bar & Mid-Height Side Stay Chains */}
       <mesh
-        castShadow
         position={[0, 1.02, 0]}
         rotation={[0, 0, Math.PI * 0.5]}
         material={TOYBOX_MATERIALS.brassAccent}
@@ -170,7 +193,7 @@ export function MenuAFrameBoardProp({
           position={[cx, 0.34, 0]}
           material={TOYBOX_MATERIALS.brassAccent}
         >
-          <boxGeometry args={[0.014, 0.016, 0.28]} />
+          <boxGeometry args={[0.036, 0.036, 0.28]} />
         </mesh>
       ))}
 
@@ -296,7 +319,7 @@ export function SubwayBenchProp({
           key={`back-slat-${idx}`}
           castShadow
           receiveShadow
-          position={[0, by, -0.245 - idx * 0.015]}
+          position={[0, by, -0.23 - idx * 0.015]}
           rotation={[-0.12, 0, 0]}
           material={PROP_ACCENT_MATERIALS.oakBenchSlats}
         >
@@ -361,16 +384,15 @@ export function TrashReceptacleProp({
       {/* Exterior Slatted Forest-Green Wrought-Iron Rib Basket */}
       {Array.from({ length: 10 }, (_, idx) => {
         const a = (idx / 10) * Math.PI * 2;
-        const r = 0.23;
+        const r = 0.232;
         return (
           <mesh
             key={`rib-${idx}`}
-            castShadow
             position={[Math.cos(a) * r, 0.37, Math.sin(a) * r]}
             rotation={[0, -a, 0]}
             material={TOYBOX_MATERIALS.subwayIronGreen}
           >
-            <boxGeometry args={[0.024, 0.64, 0.036]} />
+            <boxGeometry args={[0.036, 0.66, 0.036]} />
           </mesh>
         );
       })}
@@ -389,11 +411,10 @@ export function TrashReceptacleProp({
         return (
           <mesh
             key={`hood-post-${idx}`}
-            castShadow
             position={[Math.cos(a) * r, 0.77, Math.sin(a) * r]}
             material={TOYBOX_MATERIALS.subwayIronGreen}
           >
-            <cylinderGeometry args={[0.016, 0.016, 0.14, 6]} />
+            <cylinderGeometry args={[0.018, 0.018, 0.14, 6]} />
           </mesh>
         );
       })}
@@ -486,8 +507,8 @@ export function PlanterHedgeProp({
       {/* Recessed Mulch / Soil Bed */}
       <mesh
         receiveShadow
-        position={[0, 0.375, 0]}
-        material={TOYBOX_MATERIALS.cedarDark}
+        position={[0, 0.385, 0]}
+        material={DECAL.soilBed}
       >
         <boxGeometry args={[width - 0.16, 0.04, depth - 0.16]} />
       </mesh>
@@ -606,10 +627,10 @@ export function SubwayPortalProp({
 
       {/* Deep Recessed #0E1418 Tunnel Chute Floor Pan */}
       <mesh
-        position={[0, 0.007, -0.045]}
-        material={PROP_ACCENT_MATERIALS.subwayTunnelVoid}
+        position={[0, 0.008, -0.045]}
+        material={DECAL.tunnelFloorPan}
       >
-        <boxGeometry args={[2.78, 0.014, 2.65]} />
+        <boxGeometry args={[2.78, 0.016, 2.65]} />
       </mesh>
 
       {/* Left & Right Carved Stone Knee Walls (x = +/- 1.62) */}
@@ -666,20 +687,19 @@ export function SubwayPortalProp({
           {/* Classic IRT Forest-Green Glazed Mosaic Trim Stripe */}
           <mesh
             position={[side * 1.334, 0.62, 0.04]}
-            material={PROP_ACCENT_MATERIALS.subwayTileGreenBand}
+            material={DECAL.tileGreenBand}
           >
-            <boxGeometry args={[0.018, 0.08, 2.48]} />
+            <boxGeometry args={[0.024, 0.08, 2.48]} />
           </mesh>
           {/* Subtle Horizontal Tile Course Shadow Seam */}
           <mesh
-            position={[side * 1.335, 0.36, 0.04]}
-            material={PROP_ACCENT_MATERIALS.mortarCement}
+            position={[side * 1.332, 0.36, 0.04]}
+            material={DECAL.tileSeam}
           >
-            <boxGeometry args={[0.012, 0.014, 2.48]} />
+            <boxGeometry args={[0.02, 0.036, 2.48]} />
           </mesh>
           {/* Sloped Side Brass Handrail Reinforcing Descent Perspective */}
           <mesh
-            castShadow
             position={[side * 1.26, 0.51, 0.01]}
             rotation={[Math.PI * 0.5 - railTiltRad, 0, 0]}
             material={TOYBOX_MATERIALS.brassAccent}
@@ -696,7 +716,7 @@ export function SubwayPortalProp({
               position={[side * 1.3, bk.y, bk.z]}
               material={TOYBOX_MATERIALS.brassAccent}
             >
-              <boxGeometry args={[0.09, 0.024, 0.028]} />
+              <boxGeometry args={[0.09, 0.036, 0.036]} />
             </mesh>
           ))}
         </group>
@@ -815,17 +835,17 @@ export function SubwayPortalProp({
         <group key={`stair-step-${idx}`}>
           <mesh
             receiveShadow
-            position={[0, 0.004 + step.h * 0.5, step.z]}
+            position={[0, 0.004 + (step.h + STEP_LIFT) * 0.5, step.z]}
             material={step.mat}
           >
-            <boxGeometry args={[2.64, step.h, 0.39]} />
+            <boxGeometry args={[2.64, step.h + STEP_LIFT, 0.39]} />
           </mesh>
           {/* High-Contrast Safety Nosing Strip at Top Leading Edge of Each Step */}
           <mesh
-            position={[0, 0.006 + step.h, step.z + 0.175]}
-            material={PROP_ACCENT_MATERIALS.subwaySignDark}
+            position={[0, 0.005 + step.h + STEP_LIFT, step.z + 0.175]}
+            material={DECAL.stepNosing}
           >
-            <boxGeometry args={[2.64, 0.008, 0.035]} />
+            <boxGeometry args={[2.64, 0.03, 0.036]} />
           </mesh>
         </group>
       ))}
@@ -847,9 +867,9 @@ export function SubwayPortalProp({
           <sphereGeometry args={[0.036, 10, 8]} />
         </mesh>
         {[
-          { z: 0.96, topY: 0.75, baseY: 0.07 },
-          { z: 0.02, topY: 0.57, baseY: 0.05 },
-          { z: -0.92, topY: 0.39, baseY: 0.02 },
+          { z: 0.96, topY: 0.75, baseY: 0.07 + STEP_LIFT },
+          { z: 0.02, topY: 0.57, baseY: 0.05 + STEP_LIFT },
+          { z: -0.92, topY: 0.39, baseY: 0.02 + STEP_LIFT },
         ].map((post, pIdx) => {
           const postH = post.topY - post.baseY;
           return (
@@ -920,29 +940,25 @@ export function SubwayPortalProp({
         {/* Dark Enamel Station Nameplate */}
         <mesh
           position={[0, 0, 0.145]}
-          material={PROP_ACCENT_MATERIALS.subwaySignDark}
+          material={DECAL.signPlate}
         >
           <boxGeometry args={[2.9, 0.24, 0.03]} />
         </mesh>
         {/* Cream Stripe + White Subway Route Bullet Accents */}
         <mesh
-          position={[0, -0.07, 0.164]}
-          material={PROP_ACCENT_MATERIALS.chalkCream}
+          position={[0, -0.07, 0.165]}
+          material={DECAL.signStripe}
         >
-          <boxGeometry args={[2.68, 0.025, 0.01]} />
+          <boxGeometry args={[2.68, 0.036, 0.02]} />
         </mesh>
         {[-1.12, -0.88].map((bx, idx) => (
           <mesh
             key={`bullet-${idx}`}
             position={[bx, 0.03, 0.165]}
             rotation={[Math.PI * 0.5, 0, 0]}
-            material={
-              idx === 0
-                ? TOYBOX_MATERIALS.awningCoral
-                : TOYBOX_MATERIALS.taxiAmber
-            }
+            material={idx === 0 ? DECAL.bulletCoral : DECAL.bulletAmber}
           >
-            <cylinderGeometry args={[0.072, 0.072, 0.014, 12]} />
+            <cylinderGeometry args={[0.072, 0.072, 0.02, 12]} />
           </mesh>
         ))}
         {/* Peaked Pediment Crest */}

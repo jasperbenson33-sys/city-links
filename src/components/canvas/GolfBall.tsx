@@ -1,11 +1,20 @@
 'use client';
 
-import { useCallback, useEffect, useMemo, useRef, type MutableRefObject } from 'react';
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  type MutableRefObject,
+  type RefObject,
+} from 'react';
 import * as THREE from 'three';
-import { useFrame } from '@react-three/fiber';
+import { useFrame, useThree } from '@react-three/fiber';
 import {
   BallCollider,
   RigidBody,
+  useAfterPhysicsStep,
+  useBeforePhysicsStep,
   type CollisionEnterPayload,
   type RapierRigidBody,
 } from '@react-three/rapier';
@@ -25,6 +34,7 @@ import {
 } from '@/config/courseMasterPlan';
 import { computeAwningBounceVelocity } from '@/lib/geometryHelpers';
 import { stepBallAerodynamics } from '@/lib/aerodynamics';
+import { isQaFreezeActive, resolveAnimTime } from '@/components/world/qaFreeze';
 import { getClubProfile } from '@/lib/clubs';
 import {
   computeDeterministicUmbrellaBounce,
@@ -32,20 +42,53 @@ import {
   evaluateMasterPlanGutterAtPoint,
   isPointInFountainBasin,
   isPointInSteamBay,
+  sampleFountainDropArcPoint,
 } from '@/physics';
 import { soundEngine } from '@/lib/sound';
 import { useCurbsideStore } from '@/store';
 
 export interface GolfBallProps {
   ballWorldPositionRef?: MutableRefObject<THREE.Vector3>;
+  ballMeshRef?: RefObject<THREE.Object3D | null>;
 }
 
-export function GolfBall({ ballWorldPositionRef }: GolfBallProps = {}) {
+const REST_SPEED_THRESHOLD_MPS = 0.025;
+const REST_HYSTERESIS_SECONDS = 0.25;
+const COULOMB_CREEP_STOP_SPEED_MPS = 0.30;
+const COULOMB_CREEP_DECEL_MPS2 = 1.05;
+const CUP_DROP_TWEEN_SECONDS = 0.15;
+
+// Memoized static prop descriptors so 120Hz physics steps do zero per-step array scans
+const HOTDOG_AWNING_META = COURSE_PROPS.find(
+  (p) => p.id === 'hotdog-cart-corner',
+)?.hotdogAwningMeta;
+const STEAM_GRATE_PROP = COURSE_PROPS.find(
+  (p) => p.id === 'steam-grate-corner',
+);
+const DELIVERY_VAN_PROP = COURSE_PROPS.find(
+  (p) => p.id === 'delivery-van-east',
+);
+const BISTRO_UMBRELLA_PROPS = COURSE_PROPS.filter(
+  (p) => p.type === 'bistro_umbrella_set',
+);
+const PIGEON_FLOCK_PROP = COURSE_PROPS.find(
+  (p) => p.type === 'pigeon_flock',
+);
+
+export function GolfBall({
+  ballWorldPositionRef,
+  ballMeshRef,
+}: GolfBallProps = {}) {
+  const clock = useThree((s) => s.clock);
   const bodyRef = useRef<RapierRigidBody | null>(null);
+  const localBallMeshRef = useRef<THREE.Mesh | null>(null);
   const shadowRef = useRef<THREE.Mesh | null>(null);
+  const scratchWorldVecRef = useRef(new THREE.Vector3());
 
   const lastShotSeqRef = useRef(0);
   const lastTeleportSeqRef = useRef(0);
+  const lastFountainDropSeqRef = useRef(0);
+  const fountainDropElapsedRef = useRef(0);
   const lastSteamPopShotSeqRef = useRef(-1);
   const steamPopCheckPendingRef = useRef(false);
   const gutterEntryShotSeqRef = useRef(-1);
@@ -64,9 +107,14 @@ export function GolfBall({ ballWorldPositionRef }: GolfBallProps = {}) {
   const pigeonCooldownRef = useRef(0);
   const lipOutCooldownRef = useRef(0);
   const curbAudioCooldownRef = useRef(0);
+  const cupDropTweenRef = useRef<{
+    from: Vec3Tuple;
+    to: Vec3Tuple;
+    elapsed: number;
+    duration: number;
+  } | null>(null);
 
   const shotPhase = useCurbsideStore((s) => s.shotPhase);
-  const pendingShot = useCurbsideStore((s) => s.pendingShot);
   const pendingTeleport = useCurbsideStore((s) => s.pendingTeleport);
   const selectedClub = useCurbsideStore((s) => s.selectedClub);
 
@@ -87,51 +135,156 @@ export function GolfBall({ ballWorldPositionRef }: GolfBallProps = {}) {
     [],
   );
 
-  // Sync teleport requests (Reset Hole, Fountain Hazard Drop, QA Debug Teleport)
-  useEffect(() => {
-    if (!pendingTeleport || pendingTeleport.seq === lastTeleportSeqRef.current) {
-      return;
-    }
-    lastTeleportSeqRef.current = pendingTeleport.seq;
-    const rb = bodyRef.current;
-    if (!rb) return;
-    const [x, y, z] = pendingTeleport.position;
-    rb.setTranslation({ x, y, z }, true);
-    rb.setLinvel({ x: 0, y: 0, z: 0 }, true);
-    rb.setAngvel({ x: 0, y: 0, z: 0 }, true);
-    prevVelRef.current = [0, 0, 0];
-    flightElapsedRef.current = 0;
-    lowSpeedTimeRef.current = 0;
-    lastSteamPopShotSeqRef.current = -1;
-    steamPopCheckPendingRef.current = false;
-    gutterEntryShotSeqRef.current = -1;
-    useCurbsideStore.getState().consumeBallReset();
-  }, [pendingTeleport]);
+  const assignBallMeshRef = useCallback(
+    (node: THREE.Mesh | null) => {
+      localBallMeshRef.current = node;
+      if (ballMeshRef) {
+        (ballMeshRef as MutableRefObject<THREE.Object3D | null>).current = node;
+      }
+    },
+    [ballMeshRef],
+  );
 
-  // Sync shot launches (Pull-and-Flick release or window.__CURBSIDE_DEBUG__.fireShot)
-  useEffect(() => {
-    if (!pendingShot || pendingShot.seq === lastShotSeqRef.current) {
-      return;
-    }
-    lastShotSeqRef.current = pendingShot.seq;
-    const rb = bodyRef.current;
-    if (!rb) return;
-    const [vx, vy, vz] = pendingShot.launchVelocity;
-    const pos = rb.translation();
-    const groundY = getMasterPlanGroundElevationAt(pos.x, pos.z);
-    if (pos.y < groundY + BALL_RADIUS) {
-      rb.setTranslation(
-        { x: pos.x, y: groundY + BALL_RADIUS + 0.004, z: pos.z },
-        true,
-      );
-    }
-    rb.setLinvel({ x: vx, y: vy, z: vz }, true);
-    rb.setAngvel({ x: 0, y: 0, z: 0 }, true);
-    prevVelRef.current = [vx, vy, vz];
+  const syncVisualTransform = useCallback(
+    (x: number, y: number, z: number) => {
+      if (localBallMeshRef.current) {
+        localBallMeshRef.current.position.set(0, 0, 0);
+        localBallMeshRef.current.updateMatrixWorld(true);
+      }
+      const rbGroup = localBallMeshRef.current?.parent;
+      if (rbGroup) {
+        rbGroup.position.set(x, y, z);
+        rbGroup.quaternion.set(0, 0, 0, 1);
+        rbGroup.updateMatrixWorld(true);
+      }
+      if (ballWorldPositionRef) {
+        ballWorldPositionRef.current.set(x, y, z);
+      }
+    },
+    [ballWorldPositionRef],
+  );
+
+  const resetReactionGuards = useCallback((resetShotSequences: boolean) => {
+    awningCooldownRef.current = 0;
+    vanKickerCooldownRef.current = 0;
+    vanLaunchCooldownRef.current = 0;
+    gutterBoostCooldownRef.current = 0;
+    steamCooldownRef.current = 0;
+    umbrellaCooldownRef.current = 0;
+    pigeonCooldownRef.current = 0;
+    lipOutCooldownRef.current = 0;
+    curbAudioCooldownRef.current = 0;
     flightElapsedRef.current = 0;
     lowSpeedTimeRef.current = 0;
+    telemetryAccumRef.current = 0;
     steamPopCheckPendingRef.current = false;
-  }, [pendingShot]);
+    if (resetShotSequences) {
+      lastSteamPopShotSeqRef.current = -1;
+      gutterEntryShotSeqRef.current = -1;
+      cupDropTweenRef.current = null;
+      if (localBallMeshRef.current) {
+        localBallMeshRef.current.position.set(0, 0, 0);
+        localBallMeshRef.current.updateMatrixWorld(true);
+      }
+    }
+  }, []);
+
+  const lockBodyAtRest = useCallback(
+    (rb: RapierRigidBody, x: number, y: number, z: number) => {
+      if (!rb.isEnabled()) {
+        rb.setEnabled(true);
+      }
+      rb.resetForces(false);
+      rb.resetTorques(false);
+      rb.setRotation({ x: 0, y: 0, z: 0, w: 1 }, false);
+      rb.setTranslation({ x, y, z }, false);
+      rb.setLinvel({ x: 0, y: 0, z: 0 }, false);
+      rb.setAngvel({ x: 0, y: 0, z: 0 }, false);
+      if (!rb.isSleeping()) {
+        rb.sleep();
+      }
+      prevVelRef.current = [0, 0, 0];
+      syncVisualTransform(x, y, z);
+    },
+    [syncVisualTransform],
+  );
+
+  // Start cleanly asleep on tee so static frames have zero micro-buzz
+  useEffect(() => {
+    const rb = bodyRef.current;
+    if (!rb) return;
+    resetReactionGuards(true);
+    lockBodyAtRest(rb, initialPos[0], initialPos[1], initialPos[2]);
+  }, [initialPos, lockBodyAtRest, resetReactionGuards]);
+
+  const applyPendingTeleport = useCallback(
+    (
+      rb: RapierRigidBody,
+      teleport: NonNullable<
+        ReturnType<typeof useCurbsideStore.getState>['pendingTeleport']
+      >,
+    ) => {
+      if (teleport.seq === lastTeleportSeqRef.current) return;
+      lastTeleportSeqRef.current = teleport.seq;
+      const [x, y, z] = teleport.position;
+      resetReactionGuards(true);
+      lockBodyAtRest(rb, x, y, z);
+      useCurbsideStore.getState().consumeBallReset();
+    },
+    [lockBodyAtRest, resetReactionGuards],
+  );
+
+  const applyPendingShot = useCallback(
+    (
+      rb: RapierRigidBody,
+      shot: NonNullable<
+        ReturnType<typeof useCurbsideStore.getState>['pendingShot']
+      >,
+    ) => {
+      if (shot.seq === lastShotSeqRef.current) return;
+      lastShotSeqRef.current = shot.seq;
+      cupDropTweenRef.current = null;
+      if (!rb.isEnabled()) {
+        rb.setEnabled(true);
+      }
+      resetReactionGuards(false);
+      const [vx, vy, vz] = shot.launchVelocity;
+      const pos = rb.translation();
+      const groundY = getMasterPlanGroundElevationAt(pos.x, pos.z);
+      const startY = Math.max(pos.y, groundY + BALL_RADIUS + 0.002);
+      rb.resetForces(false);
+      rb.resetTorques(false);
+      rb.setRotation({ x: 0, y: 0, z: 0, w: 1 }, false);
+      rb.wakeUp();
+      rb.setTranslation({ x: pos.x, y: startY, z: pos.z }, true);
+      rb.setLinvel({ x: vx, y: vy, z: vz }, true);
+      rb.setAngvel({ x: 0, y: 0, z: 0 }, true);
+      syncVisualTransform(pos.x, startY, pos.z);
+      prevVelRef.current = [vx, vy, vz];
+    },
+    [resetReactionGuards, syncVisualTransform],
+  );
+
+  // Immediately reflect teleports visually even outside active physics stepping
+  useEffect(() => {
+    const rb = bodyRef.current;
+    if (!rb || !pendingTeleport) return;
+    applyPendingTeleport(rb, pendingTeleport);
+  }, [applyPendingTeleport, pendingTeleport]);
+
+  // Execute queued teleports and shot launches synchronously right before Rapier's 120Hz step
+  // so trajectory outcomes are invariant to post-teleport settle timing (e.g. 85ms vs 600ms).
+  useBeforePhysicsStep(() => {
+    const rb = bodyRef.current;
+    if (!rb) return;
+    const state = useCurbsideStore.getState();
+    if (state.pendingTeleport) {
+      applyPendingTeleport(rb, state.pendingTeleport);
+    }
+    if (state.pendingShot) {
+      applyPendingShot(rb, state.pendingShot);
+    }
+  });
 
   const handleCollisionEnter = useCallback((payload: CollisionEnterPayload) => {
     const rb = bodyRef.current;
@@ -145,24 +298,25 @@ export function GolfBall({ ballWorldPositionRef }: GolfBallProps = {}) {
       | { propId?: string }
       | undefined;
     const propId = userData?.propId;
+    const preV = prevVelRef.current;
+    const preSpeed = Math.hypot(preV[0], preV[1], preV[2]);
 
     if (propId === 'hotdog-cart-awning' && awningCooldownRef.current <= 0) {
-      const awningMeta = COURSE_PROPS.find(
-        (p) => p.id === 'hotdog-cart-corner',
-      )?.hotdogAwningMeta;
-      if (awningMeta) {
+      if (HOTDOG_AWNING_META) {
         awningCooldownRef.current = 0.4;
-        const preV = prevVelRef.current;
         const bounced = computeAwningBounceVelocity(
           preV,
-          awningMeta.worldNormal,
-          awningMeta.restitution,
+          HOTDOG_AWNING_META.worldNormal,
+          HOTDOG_AWNING_META.restitution,
         );
         rb.setLinvel(
           { x: bounced[0], y: bounced[1], z: bounced[2] },
           true,
         );
-        soundEngine.playAwningCushion(0.95);
+        soundEngine.playAwningCushion({
+          impactSpeed: preSpeed,
+          surfaceKey: 'hotdog-cart-awning',
+        });
         state.recordPropHit('hotdog-cart-corner', 'Awning Cushion!');
         return;
       }
@@ -175,26 +329,41 @@ export function GolfBall({ ballWorldPositionRef }: GolfBallProps = {}) {
         { x: curV.x * 0.55, y: Math.min(curV.y, -1.2), z: curV.z * 0.55 },
         true,
       );
-      soundEngine.playCurbBank(0.55);
+      soundEngine.playCurbBank({
+        impactSpeed: Math.hypot(curV.x, curV.y, curV.z),
+        surfaceKey: 'tree-overhang-east',
+      });
       return;
     }
 
-    // Play curb/wall clack when impacting hard horizontally
+    if (propId === 'cup-rim' && preSpeed > 0.45) {
+      lipOutCooldownRef.current = Math.max(lipOutCooldownRef.current, 0.2);
+      soundEngine.play('cup_rattle', {
+        impactSpeed: preSpeed,
+        surfaceKey: 'cup-rim',
+      });
+      return;
+    }
+
+    // Play velocity-scaled curb/wall clack when impacting hard horizontally
     if (curbAudioCooldownRef.current <= 0) {
-      const preV = prevVelRef.current;
       const postV = rb.linvel();
       const dvx = postV.x - preV[0];
       const dvz = postV.z - preV[2];
       const horizDelta = Math.hypot(dvx, dvz);
       if (horizDelta > 2.1) {
-        curbAudioCooldownRef.current = 0.18;
-        soundEngine.playCurbBank(Math.min(1, horizDelta / 12));
+        curbAudioCooldownRef.current = 0.06;
+        soundEngine.playCurbBank({
+          impactSpeed: horizDelta,
+          surfaceKey: propId ?? 'curb-wall',
+        });
       }
     }
   }, []);
 
-  useFrame((rootState, rawDelta) => {
-    const dt = Math.min(rawDelta, 0.05);
+  // Deterministic fixed-timestep (1/120s) physics integration & rest-hysteresis clamp
+  useAfterPhysicsStep((world) => {
+    const dt = world.timestep > 0 ? world.timestep : 1 / 120;
     const rb = bodyRef.current;
     if (!rb) return;
 
@@ -210,47 +379,33 @@ export function GolfBall({ ballWorldPositionRef }: GolfBallProps = {}) {
     curbAudioCooldownRef.current = Math.max(0, curbAudioCooldownRef.current - dt);
 
     const store = useCurbsideStore.getState();
-    const pos = rb.translation();
-    const vel = rb.linvel();
-    if (ballWorldPositionRef) {
-      ballWorldPositionRef.current.set(pos.x, pos.y, pos.z);
-    }
 
-    // Update ground contact shadow under the golf ball
-    if (shadowRef.current) {
-      const gY = getMasterPlanGroundElevationAt(pos.x, pos.z);
-      const heightAbove = Math.max(0, pos.y - BALL_RADIUS - gY);
-      const scale = Math.max(0.45, 1.0 - heightAbove * 0.08);
-      shadowRef.current.position.set(pos.x, gY + 0.012, pos.z);
-      shadowRef.current.scale.set(scale, scale, 1);
-      const mat = shadowRef.current.material as THREE.MeshBasicMaterial;
-      mat.opacity = Math.max(0.12, 0.34 - heightAbove * 0.035);
-    }
-
-    // Keep ball rock-steady at rest (and cleanly nestled in recessed cup well when holed out)
+    // Keep resting/holed/fountain-arc rigid bodies strictly asleep so zero micro-buzz occurs
     if (
       store.shotPhase === 'aiming' ||
       store.shotPhase === 'pulling' ||
-      store.shotPhase === 'holed_out'
+      store.shotPhase === 'holed_out' ||
+      store.shotPhase === 'fountain_drop'
     ) {
       if (store.shotPhase === 'holed_out') {
         const cup = HOLE_1_CUP.position;
-        if (Math.abs(pos.y - (cup[1] - 0.08)) > 0.01) {
-          rb.setTranslation(
-            { x: cup[0], y: cup[1] - 0.08, z: cup[2] },
-            true,
-          );
+        if (!cupDropTweenRef.current && rb.isEnabled()) {
+          lockBodyAtRest(rb, cup[0], cup[1] - 0.08, cup[2]);
+          rb.setEnabled(false);
+        }
+      } else if (store.shotPhase !== 'fountain_drop') {
+        const p = rb.translation();
+        const v = rb.linvel();
+        if (
+          !rb.isEnabled() ||
+          !rb.isSleeping() ||
+          Math.abs(v.x) > 1e-4 ||
+          Math.abs(v.y) > 1e-4 ||
+          Math.abs(v.z) > 1e-4
+        ) {
+          lockBodyAtRest(rb, p.x, p.y, p.z);
         }
       }
-      if (
-        Math.abs(vel.x) > 0.001 ||
-        Math.abs(vel.y) > 0.001 ||
-        Math.abs(vel.z) > 0.001
-      ) {
-        rb.setLinvel({ x: 0, y: 0, z: 0 }, true);
-        rb.setAngvel({ x: 0, y: 0, z: 0 }, true);
-      }
-      prevVelRef.current = [0, 0, 0];
       return;
     }
 
@@ -258,6 +413,8 @@ export function GolfBall({ ballWorldPositionRef }: GolfBallProps = {}) {
       return;
     }
 
+    const pos = rb.translation();
+    const vel = rb.linvel();
     flightElapsedRef.current += dt;
     let vx = vel.x;
     let vy = vel.y;
@@ -272,27 +429,21 @@ export function GolfBall({ ballWorldPositionRef }: GolfBallProps = {}) {
       pos.z < wb.minZ - 6 ||
       pos.z > wb.maxZ + 6
     ) {
-      rb.setTranslation(
-        {
-          x: store.lastSafeBallPosition[0],
-          y: store.lastSafeBallPosition[1],
-          z: store.lastSafeBallPosition[2],
-        },
-        true,
-      );
-      rb.setLinvel({ x: 0, y: 0, z: 0 }, true);
-      rb.setAngvel({ x: 0, y: 0, z: 0 }, true);
+      const [rx, ry, rz] = store.lastSafeBallPosition;
+      lockBodyAtRest(rb, rx, ry, rz);
       store.markBallResting(store.lastSafeBallPosition, { autoSelectClub: false });
       return;
     }
 
-    // 2. Fountain water basin check -> +1 penalty quick-drop
+    // 2. Fountain water basin check -> brisk < 0.6s parabolic drop arc +1 penalty
     if (isPointInFountainBasin(pos.x, pos.y, pos.z)) {
-      store.triggerFountainHazard();
+      lockBodyAtRest(rb, pos.x, pos.y, pos.z);
+      fountainDropElapsedRef.current = 0;
+      store.triggerFountainHazard(undefined, [pos.x, pos.y, pos.z]);
       return;
     }
 
-    // 3. Hole 1 Cup capture & high-speed lip-out check
+    // 3. Hole 1 recessed Cup capture & realistic high-speed lip-out check
     const cupPos = HOLE_1_CUP.position;
     const dxCup = pos.x - cupPos[0];
     const dzCup = pos.z - cupPos[2];
@@ -301,37 +452,60 @@ export function GolfBall({ ballWorldPositionRef }: GolfBallProps = {}) {
 
     if (
       distToCupXZ <= CUP_RADIUS &&
-      pos.y <= cupPos[1] + BALL_RADIUS + 0.24 &&
-      pos.y >= cupPos[1] - 0.15
+      pos.y <= cupPos[1] + BALL_RADIUS + 0.14 &&
+      pos.y >= cupPos[1] - 0.18
     ) {
-      if (horizSpeed <= 4.35 && vy <= 1.2) {
-        rb.setTranslation(
-          { x: cupPos[0], y: cupPos[1] - 0.08, z: cupPos[2] },
-          true,
-        );
-        rb.setLinvel({ x: 0, y: 0, z: 0 }, true);
-        rb.setAngvel({ x: 0, y: 0, z: 0 }, true);
+      const genuinelyDroppedInWell =
+        pos.y <= cupPos[1] + 0.085 && horizSpeed <= 4.35 && Math.abs(vy) <= 2.4;
+      const slowEdgeDrop =
+        distToCupXZ <= CUP_RADIUS * 0.72 &&
+        horizSpeed < 1.25 &&
+        pos.y <= cupPos[1] + BALL_RADIUS + 0.03;
+
+      if (lipOutCooldownRef.current <= 0 && (genuinelyDroppedInWell || slowEdgeDrop)) {
+        const capturedPos: Vec3Tuple = [pos.x, pos.y, pos.z];
+        const cuppedPos: Vec3Tuple = [cupPos[0], cupPos[1] - 0.08, cupPos[2]];
+        // Decouple physics so cupBottomCollider (top ~0.64m for ball center) cannot fight the 0.52m resting depth.
+        lockBodyAtRest(rb, cuppedPos[0], cuppedPos[1], cuppedPos[2]);
+        rb.setEnabled(false);
+        if (!isQaFreezeActive()) {
+          cupDropTweenRef.current = {
+            from: capturedPos,
+            to: cuppedPos,
+            elapsed: 0,
+            duration: CUP_DROP_TWEEN_SECONDS,
+          };
+          syncVisualTransform(capturedPos[0], capturedPos[1], capturedPos[2]);
+        } else {
+          cupDropTweenRef.current = null;
+        }
         store.sinkHole();
         return;
-      } else if (lipOutCooldownRef.current <= 0 && horizSpeed > 4.35) {
+      } else if (
+        lipOutCooldownRef.current <= 0 &&
+        horizSpeed > 4.35 &&
+        pos.y > cupPos[1] + 0.06
+      ) {
         lipOutCooldownRef.current = 0.35;
-        // Realistic cup rim lip-out deflection
-        const rimAngle = (dxCup * vz - dzCup * vx >= 0 ? 1 : -1) * 0.68;
+        // Grazing fast putt skips/deflects across cup lip instead of teleporting down
+        const rimAngle = (dxCup * vz - dzCup * vx >= 0 ? 1 : -1) * 0.55;
         const ca = Math.cos(rimAngle);
         const sa = Math.sin(rimAngle);
-        const rx = (vx * ca - vz * sa) * 0.65;
-        const rz = (vx * sa + vz * ca) * 0.65;
+        const rx = (vx * ca - vz * sa) * 0.72;
+        const rz = (vx * sa + vz * ca) * 0.72;
         vx = rx;
         vz = rz;
-        vy = Math.max(vy, 0.7);
+        vy = Math.max(vy, 0.85);
         rb.setLinvel({ x: vx, y: vy, z: vz }, true);
-        soundEngine.play('cup_rattle', { intensity: 0.9 });
+        soundEngine.play('cup_rattle', {
+          impactSpeed: horizSpeed,
+          surfaceKey: 'cup-rim',
+        });
       }
     }
 
     // 4. Subway Steam Grate rhythmic upward pop -> forward +X carry over Fountain onto front green fringe
-    const grate = COURSE_PROPS.find((p) => p.id === 'steam-grate-corner');
-    const steamMeta = grate?.steamLiftMeta;
+    const steamMeta = STEAM_GRATE_PROP?.steamLiftMeta;
     const currentShotSeq = store.pendingShot?.seq ?? 0;
     if (
       steamMeta &&
@@ -343,13 +517,15 @@ export function GolfBall({ ballWorldPositionRef }: GolfBallProps = {}) {
     ) {
       const cycle = steamMeta.cycleSeconds || 3.2;
       const activeWindow = steamMeta.activeSeconds || 1.6;
-      const elapsedSteamActive = rootState.clock.elapsedTime % cycle < activeWindow;
+      const sharedSteamTime = resolveAnimTime(clock.elapsedTime);
+      const elapsedSteamActive = sharedSteamTime % cycle < activeWindow;
       const steamActive =
         store.forceSteamActive !== null
           ? store.forceSteamActive
           : elapsedSteamActive;
 
       if (steamActive) {
+        const entrySpeed = Math.hypot(vx, vy, vz);
         steamCooldownRef.current = 1.25;
         lastSteamPopShotSeqRef.current = currentShotSeq;
         steamPopCheckPendingRef.current = true;
@@ -362,7 +538,10 @@ export function GolfBall({ ballWorldPositionRef }: GolfBallProps = {}) {
         vz = vz * 0.82;
         rb.setLinvel({ x: vx, y: vy, z: vz }, true);
         rb.setAngvel({ x: 0, y: 0, z: 0 }, true);
-        soundEngine.playSteamPop(1.0);
+        soundEngine.playSteamPop({
+          impactSpeed: entrySpeed,
+          surfaceKey: 'steam-grate-corner',
+        });
         store.recordPropHit('steam-grate-corner', 'Subway Steam Pop!');
       }
     }
@@ -382,10 +561,9 @@ export function GolfBall({ ballWorldPositionRef }: GolfBallProps = {}) {
     }
 
     // 5. Delivery Van ramp climb & roof launch
-    const vanProp = COURSE_PROPS.find((p) => p.id === 'delivery-van-east');
-    const vanMeta = vanProp?.vanRampMeta;
+    const vanMeta = DELIVERY_VAN_PROP?.vanRampMeta;
     const kickerBounds = vanMeta?.roofAccessKickerSpec?.boundsXZ;
-    const vanReactive = vanProp?.reactive;
+    const vanReactive = DELIVERY_VAN_PROP?.reactive;
     if (vanMeta) {
       // Smoothly assist upward momentum along the interior roof-access kicker (1.08m -> 2.24m)
       if (
@@ -414,13 +592,17 @@ export function GolfBall({ ballWorldPositionRef }: GolfBallProps = {}) {
           Math.abs(pos.y - zcy) <= hy + 0.45 &&
           Math.abs(pos.z - zcz) <= hz
         ) {
+          const entrySpeed = Math.hypot(vx, vy, vz);
           vanLaunchCooldownRef.current = 0.9;
           const boost = vanReactive.boostVelocity ?? [-0.8, 5.6, -13.4];
           vx = boost[0];
           vy = boost[1];
           vz = boost[2];
           rb.setLinvel({ x: vx, y: vy, z: vz }, true);
-          soundEngine.playGutterBoost(0.88);
+          soundEngine.playGutterBoost({
+            impactSpeed: entrySpeed,
+            surfaceKey: 'delivery-van-east',
+          });
           store.recordPropHit('delivery-van-east', 'Van Roof Launch!');
         }
       }
@@ -447,46 +629,57 @@ export function GolfBall({ ballWorldPositionRef }: GolfBallProps = {}) {
       ) {
         gutterEntryShotSeqRef.current = currentShotSeq;
         gutterBoostCooldownRef.current = 1.1;
-        soundEngine.playGutterBoost(1.0);
+        soundEngine.playGutterBoost({
+          impactSpeed: Math.hypot(vx, vy, vz),
+          surfaceKey: 'hydrant-corner-se',
+        });
         store.recordPropHit('hydrant-corner-se', 'Storm Gutter Boost!');
       }
       rb.setLinvel({ x: vx, y: vy, z: vz }, true);
     }
 
-    // 7. Bistro Umbrella canopy trampoline & Crosswalk Pigeon scatter
-    const umbrella = COURSE_PROPS.find((p) => p.id === 'bistro-umbrella');
-    if (umbrella && umbrellaCooldownRef.current <= 0) {
-      const ux = pos.x - umbrella.position[0];
-      const uz = pos.z - umbrella.position[2];
-      const uDistXZ = Math.hypot(ux, uz);
-      if (uDistXZ <= 1.25 && pos.y >= 1.9 && pos.y <= 2.9 && vy < 0) {
-        umbrellaCooldownRef.current = 0.5;
-        const bounced = computeDeterministicUmbrellaBounce(
-          [pos.x, pos.y, pos.z],
-          [vx, vy, vz],
-          [umbrella.position[0], umbrella.position[1] + 2.25, umbrella.position[2]],
-          1.25,
-          0.58,
-        );
-        vx = bounced[0];
-        vy = bounced[1];
-        vz = bounced[2];
-        rb.setLinvel({ x: vx, y: vy, z: vz }, true);
-        soundEngine.playAwningCushion(0.9);
-        store.recordPropHit('bistro-umbrella', 'Umbrella Bounce!');
+    // 7. Bistro Umbrella canopy trampolines & Plaza Pigeon scatter (matched by prop.type)
+    if (umbrellaCooldownRef.current <= 0 && vy < 0) {
+      for (const umbrella of BISTRO_UMBRELLA_PROPS) {
+        const ux = pos.x - umbrella.position[0];
+        const uz = pos.z - umbrella.position[2];
+        const uDistXZ = Math.hypot(ux, uz);
+        if (uDistXZ <= 1.25 && pos.y >= 1.9 && pos.y <= 3.3) {
+          const entrySpeed = Math.hypot(vx, vy, vz);
+          umbrellaCooldownRef.current = 0.5;
+          const bounced = computeDeterministicUmbrellaBounce(
+            [pos.x, pos.y, pos.z],
+            [vx, vy, vz],
+            [umbrella.position[0], umbrella.position[1] + 2.25, umbrella.position[2]],
+            1.25,
+            0.58,
+          );
+          vx = bounced[0];
+          vy = bounced[1];
+          vz = bounced[2];
+          rb.setLinvel({ x: vx, y: vy, z: vz }, true);
+          soundEngine.playAwningCushion({
+            impactSpeed: entrySpeed,
+            surfaceKey: umbrella.id,
+          });
+          store.recordPropHit(umbrella.id, 'Umbrella Bounce!');
+          break;
+        }
       }
     }
 
-    const pigeons = COURSE_PROPS.find((p) => p.id === 'pigeons-crosswalk-flock');
-    if (pigeons && pigeonCooldownRef.current <= 0) {
+    if (PIGEON_FLOCK_PROP && pigeonCooldownRef.current <= 0) {
       const dPigeon = Math.hypot(
-        pos.x - pigeons.position[0],
-        pos.z - pigeons.position[2],
+        pos.x - PIGEON_FLOCK_PROP.position[0],
+        pos.z - PIGEON_FLOCK_PROP.position[2],
       );
-      if (dPigeon <= 2.3 && pos.y <= pigeons.position[1] + 1.4 && horizSpeed > 1.0) {
+      if (dPigeon <= 2.3 && pos.y <= PIGEON_FLOCK_PROP.position[1] + 1.4 && horizSpeed > 1.0) {
         pigeonCooldownRef.current = 3.5;
-        soundEngine.playPigeonScatter(0.8);
-        store.recordPropHit('pigeons-crosswalk-flock');
+        soundEngine.playPigeonScatter({
+          impactSpeed: horizSpeed,
+          surfaceKey: PIGEON_FLOCK_PROP.id,
+        });
+        store.recordPropHit(PIGEON_FLOCK_PROP.id);
       }
     }
 
@@ -515,25 +708,35 @@ export function GolfBall({ ballWorldPositionRef }: GolfBallProps = {}) {
     vx = nextV[0];
     vy = nextV[1];
     vz = nextV[2];
-    rb.setLinvel({ x: vx, y: vy, z: vz }, true);
 
+    // Smooth final rolling arrest so exponential roll damping doesn't creep for seconds below 0.30 m/s
+    const isPhysicallySupported = pos.y <= expectedSupportY + BALL_RADIUS + 0.08;
+    if (isPhysicallySupported && !airborne && !gutterEval.inCornerBoostZone) {
+      const hSpeed = Math.hypot(vx, vz);
+      if (hSpeed > 0 && hSpeed < COULOMB_CREEP_STOP_SPEED_MPS) {
+        const drop = Math.min(hSpeed, COULOMB_CREEP_DECEL_MPS2 * dt);
+        const factor = (hSpeed - drop) / hSpeed;
+        vx *= factor;
+        vz *= factor;
+      }
+    }
+
+    rb.setLinvel({ x: vx, y: vy, z: vz }, true);
     prevVelRef.current = [vx, vy, vz];
 
-    // Update live HUD distance / lie telemetry at ~9Hz while flying/rolling (zero 60Hz world re-renders)
+    // Update live HUD distance / lie telemetry at ~9Hz while flying/rolling
     telemetryAccumRef.current += dt;
     if (telemetryAccumRef.current >= 0.11) {
       telemetryAccumRef.current = 0;
       store.updateBallTelemetry([pos.x, pos.y, pos.z], surfaceTag);
     }
 
-    // 9. Strict grounded rest detection (never settle in mid-air!)
-    const nextHorizSpeed = Math.hypot(vx, vz);
-    const isPhysicallySupported = pos.y <= expectedSupportY + BALL_RADIUS + 0.08;
+    // 9. Strict grounded rest-hysteresis clamp (linearSpeed < 0.025 m/s continuously for 0.25s)
+    const linearSpeed = Math.hypot(vx, vy, vz);
     if (
       flightElapsedRef.current > 0.25 &&
       isPhysicallySupported &&
-      nextHorizSpeed < 0.22 &&
-      Math.abs(vy) < 0.3 &&
+      linearSpeed < REST_SPEED_THRESHOLD_MPS &&
       !gutterEval.inCornerBoostZone
     ) {
       lowSpeedTimeRef.current += dt;
@@ -543,33 +746,112 @@ export function GolfBall({ ballWorldPositionRef }: GolfBallProps = {}) {
 
     if (
       isPhysicallySupported &&
-      (lowSpeedTimeRef.current >= 0.22 || flightElapsedRef.current >= 12.0)
+      (lowSpeedTimeRef.current >= REST_HYSTERESIS_SECONDS ||
+        flightElapsedRef.current >= 12.0)
     ) {
-      const restY = Math.max(expectedSupportY + BALL_RADIUS, pos.y);
-      rb.setTranslation({ x: pos.x, y: restY, z: pos.z }, true);
-      rb.setLinvel({ x: 0, y: 0, z: 0 }, true);
-      rb.setAngvel({ x: 0, y: 0, z: 0 }, true);
-      prevVelRef.current = [0, 0, 0];
+      // Avoid 1-frame upward pop if resting slightly inside collider contact skin
+      const restY = Math.max(expectedSupportY + BALL_RADIUS - 0.002, pos.y);
       lowSpeedTimeRef.current = 0;
+      lockBodyAtRest(rb, pos.x, restY, pos.z);
       store.markBallResting([pos.x, restY, pos.z]);
+    }
+  });
+
+  // Visual frame loop: advance Fountain Drop parabolic arc, sync interpolated ball & contact shadow
+  useFrame((_, rawDelta) => {
+    const dt = Math.min(rawDelta, 0.05);
+    const rb = bodyRef.current;
+    const store = useCurbsideStore.getState();
+
+    // Brisk < 0.6s parabolic Fountain Drop arc animation
+    if (store.shotPhase === 'fountain_drop' && store.pendingFountainDrop && rb) {
+      const drop = store.pendingFountainDrop;
+      if (lastFountainDropSeqRef.current !== drop.seq) {
+        lastFountainDropSeqRef.current = drop.seq;
+        fountainDropElapsedRef.current = 0;
+      }
+      fountainDropElapsedRef.current += dt;
+      const duration = Math.min(0.58, Math.max(0.25, drop.durationSec));
+      const progress = Math.min(1, fountainDropElapsedRef.current / duration);
+      const [ax, ay, az] = sampleFountainDropArcPoint(
+        drop.from,
+        drop.to,
+        progress,
+        0.92,
+      );
+      lockBodyAtRest(rb, ax, ay, az);
+      if (progress >= 1) {
+        lockBodyAtRest(rb, drop.to[0], drop.to[1], drop.to[2]);
+        store.completeFountainDrop(drop.seq);
+      }
+    }
+
+    // Smooth 150ms visual drop tween from cup-edge capture into cup well in world space
+    const dropTween = cupDropTweenRef.current;
+    if (dropTween) {
+      if (isQaFreezeActive() || store.shotPhase !== 'holed_out') {
+        cupDropTweenRef.current = null;
+        if (store.shotPhase === 'holed_out') {
+          syncVisualTransform(dropTween.to[0], dropTween.to[1], dropTween.to[2]);
+        } else if (localBallMeshRef.current) {
+          localBallMeshRef.current.position.set(0, 0, 0);
+          localBallMeshRef.current.updateMatrixWorld(true);
+        }
+      } else {
+        dropTween.elapsed += dt;
+        const t = Math.min(1, dropTween.elapsed / dropTween.duration);
+        const xzEase = 1 - Math.pow(1 - t, 2.2);
+        const yEase = Math.pow(t, 1.35);
+        const wx = THREE.MathUtils.lerp(dropTween.from[0], dropTween.to[0], xzEase);
+        const wy = THREE.MathUtils.lerp(dropTween.from[1], dropTween.to[1], yEase);
+        const wz = THREE.MathUtils.lerp(dropTween.from[2], dropTween.to[2], xzEase);
+        syncVisualTransform(wx, wy, wz);
+        if (t >= 1) {
+          cupDropTweenRef.current = null;
+          syncVisualTransform(dropTween.to[0], dropTween.to[1], dropTween.to[2]);
+        }
+      }
+    }
+
+    // Read Rapier-interpolated rendered mesh matrix so shadow & camera match rendered sphere identically
+    const worldVec = scratchWorldVecRef.current;
+    if (localBallMeshRef.current) {
+      localBallMeshRef.current.getWorldPosition(worldVec);
+    } else if (rb) {
+      const t = rb.translation();
+      worldVec.set(t.x, t.y, t.z);
+    } else {
+      worldVec.set(...store.ballPosition);
+    }
+
+    if (ballWorldPositionRef) {
+      ballWorldPositionRef.current.copy(worldVec);
+    }
+
+    if (shadowRef.current) {
+      const gY = getMasterPlanGroundElevationAt(worldVec.x, worldVec.z);
+      const heightAbove = Math.max(0, worldVec.y - BALL_RADIUS - gY);
+      const scale = Math.max(0.45, 1.0 - heightAbove * 0.08);
+      // 0.022m clears raised green (+0.018m), curbs (+0.019m), and decals (+0.015m)
+      shadowRef.current.position.set(worldVec.x, gY + 0.022, worldVec.z);
+      shadowRef.current.scale.set(scale, scale, 1);
+      const mat = shadowRef.current.material as THREE.MeshBasicMaterial;
+      mat.opacity = Math.max(0.12, 0.34 - heightAbove * 0.035);
     }
   });
 
   const isMoving =
     shotPhase === 'ball_in_flight' || shotPhase === 'settling';
-  const isHoledOut = shotPhase === 'holed_out';
-  const isKinematicOrStatic =
-    isHoledOut || shotPhase === 'aiming' || shotPhase === 'pulling';
 
   return (
     <>
       <RigidBody
         ref={bodyRef}
         type="dynamic"
-        gravityScale={isKinematicOrStatic ? 0 : 1}
+        gravityScale={1}
         ccd={true}
         colliders={false}
-        canSleep={false}
+        canSleep={true}
         position={initialPos}
         mass={1}
         linearDamping={0.01}
@@ -580,11 +862,11 @@ export function GolfBall({ ballWorldPositionRef }: GolfBallProps = {}) {
       >
         <BallCollider
           args={[BALL_RADIUS]}
-          sensor={isHoledOut}
           friction={0.06}
           restitution={0.26}
+          contactSkin={0.002}
         />
-        <mesh castShadow receiveShadow>
+        <mesh ref={assignBallMeshRef} castShadow={false} receiveShadow>
           <sphereGeometry args={[BALL_RADIUS, 32, 32]} />
           <meshStandardMaterial
             color="#FFFFFF"
@@ -601,7 +883,7 @@ export function GolfBall({ ballWorldPositionRef }: GolfBallProps = {}) {
       {/* Soft contact ground shadow beneath ball for instant elevation readability */}
       <mesh
         ref={shadowRef}
-        position={[initialPos[0], COURSE_MASTER_PLAN.teePosition[1] + 0.012, initialPos[2]]}
+        position={[initialPos[0], COURSE_MASTER_PLAN.teePosition[1] + 0.022, initialPos[2]]}
         rotation={[-Math.PI / 2, 0, 0]}
       >
         <circleGeometry args={[BALL_RADIUS * 1.15, 24]} />
@@ -610,6 +892,9 @@ export function GolfBall({ ballWorldPositionRef }: GolfBallProps = {}) {
           transparent
           opacity={0.32}
           depthWrite={false}
+          polygonOffset
+          polygonOffsetFactor={-3}
+          polygonOffsetUnits={-3}
         />
       </mesh>
     </>
