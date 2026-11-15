@@ -417,11 +417,12 @@ export function CurbsideHud() {
           <div
             data-hud-interactive="true"
             onPointerDown={(e) => e.stopPropagation()}
-            className="pointer-events-auto inline-flex shrink-0 items-center rounded-full border border-[#E2C294] bg-[#FFFDF8]/92 p-0.5 shadow-[0_6px_18px_-6px_rgba(35,25,20,0.2)] backdrop-blur-sm"
+            className={`${isHoleComplete ? 'pointer-events-none' : 'pointer-events-auto'} inline-flex shrink-0 items-center rounded-full border border-[#E2C294] bg-[#FFFDF8]/92 p-0.5 shadow-[0_6px_18px_-6px_rgba(35,25,20,0.2)] backdrop-blur-sm`}
           >
             {/* 1-Tap Street Scout Peek Toggle */}
             <button
               type="button"
+              tabIndex={isHoleComplete ? -1 : undefined}
               aria-label={
                 isStreetScoutActive
                   ? 'Exit Street Scout Peek'
@@ -462,6 +463,7 @@ export function CurbsideHud() {
             {/* Sound Mute Toggle */}
             <button
               type="button"
+              tabIndex={isHoleComplete ? -1 : undefined}
               aria-label={isMuted ? 'Unmute Sound' : 'Mute Sound'}
               aria-pressed={!isMuted}
               title={isMuted ? 'Sound Off' : 'Sound On'}
@@ -519,6 +521,7 @@ export function CurbsideHud() {
             {/* Quick Reset-Hole Button */}
             <button
               type="button"
+              tabIndex={isHoleComplete ? -1 : undefined}
               aria-label="Reset Hole"
               title="Reset Hole"
               onClick={handleReplayHole}

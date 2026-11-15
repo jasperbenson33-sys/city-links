@@ -1,7 +1,11 @@
 'use client';
 
 import React from 'react';
-import { COURSE_MASTER_PLAN, COURSE_PROPS } from '@/config/courseMasterPlan';
+import {
+  COURSE_MASTER_PLAN,
+  COURSE_PROPS,
+  TEE_SET_LOCAL_BOUNDS,
+} from '@/config/courseMasterPlan';
 import type { CoursePropSpec, PlacedProp, PropType } from '@/types/course';
 import { HotdogCartProp, CoaxialWheelMeshGroup } from './HotdogCartProp';
 import { FireHydrantJetProp } from './FireHydrantJetProp';
@@ -564,9 +568,9 @@ export const PROP_QA_REGISTRY: PropQAGalleryEntry[] = [
     category: 'street-architecture',
     description:
       'Compact brass-trimmed welcome tee pad & tour stand bag grounded flush on asphalt at TEE_POSITION [0, 0, 27.52].',
-    localSize: [2.55, 1.0, 1.08],
-    localBoundsMin: [-1.59, 0, -0.54],
-    localBoundsMax: [0.96, 1.0, 0.54],
+    localSize: [...TEE_SET_LOCAL_BOUNDS.size],
+    localBoundsMin: [...TEE_SET_LOCAL_BOUNDS.min],
+    localBoundsMax: [...TEE_SET_LOCAL_BOUNDS.max],
     coaxialAxles: [],
   },
   {

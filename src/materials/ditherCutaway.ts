@@ -91,8 +91,9 @@ export function createDitherCutawayMaterial(
           '#include <clipping_planes_fragment>',
           /* glsl */ `
           #include <clipping_planes_fragment>
+          if (opacity <= 0.006) discard;
           float cutawayFade = opacity / ${baseOpLit};
-          if (cutawayFade <= 0.002) discard;
+          if (cutawayFade <= 0.006) discard;
           if (cutawayFade < 0.998) {
             float ignThreshold = curbsideScreenIGN(gl_FragCoord.xy);
             if (cutawayFade <= ignThreshold) discard;

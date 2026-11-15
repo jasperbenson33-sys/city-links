@@ -3,6 +3,10 @@
 import React, { useRef } from 'react';
 import { useFrame } from '@react-three/fiber';
 import * as THREE from 'three';
+import {
+  TEE_SET_LOCAL_BOUNDS,
+  TEE_STAND_BAG_OFFSET,
+} from '@/config/courseMasterPlan';
 import { TOYBOX_MATERIALS } from '@/materials';
 import { PROP_ACCENT_MATERIALS } from './propMaterials';
 import { resolveAnimTime } from '../qaFreeze';
@@ -107,9 +111,14 @@ export const GolfBagAndTeeProp = React.memo(function GolfBagAndTeeProp({
         <sphereGeometry args={[0.055, 10, 8]} />
       </mesh>
 
-      {/* Miniature Tour Stand Bag (base & twin rubber stand feet flush on y = 0) */}
+      {/* Miniature Tour Stand Bag (base & twin rubber stand feet flush on y = 0; tightBallRayOnly cutaway) */}
       {showBag && (
-        <group position={[-1.14, 0, 0.18]} rotation={[0, 0.45, 0]}>
+        <group
+          name="tee-stand-bag-group"
+          position={TEE_STAND_BAG_OFFSET}
+          rotation={[0, 0.45, 0]}
+          userData={{ occludableProp: true, tightBallRayOnly: true }}
+        >
           {/* Solid Rubber Base Cup Seated Flush at y = 0.00m */}
           <mesh
             castShadow
@@ -259,10 +268,14 @@ export const GolfBagAndTeeProp = React.memo(function GolfBagAndTeeProp({
 
       {showWireframe && (
         <mesh
-          position={[-0.32, 0.5, 0]}
+          position={[
+            (TEE_SET_LOCAL_BOUNDS.min[0] + TEE_SET_LOCAL_BOUNDS.max[0]) * 0.5,
+            TEE_SET_LOCAL_BOUNDS.size[1] * 0.5,
+            (TEE_SET_LOCAL_BOUNDS.min[2] + TEE_SET_LOCAL_BOUNDS.max[2]) * 0.5,
+          ]}
           material={TOYBOX_MATERIALS.qaBoundsWireframe}
         >
-          <boxGeometry args={[2.55, 1.0, 1.08]} />
+          <boxGeometry args={[...TEE_SET_LOCAL_BOUNDS.size]} />
         </mesh>
       )}
     </group>

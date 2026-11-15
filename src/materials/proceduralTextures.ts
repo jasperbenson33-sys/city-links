@@ -127,7 +127,7 @@ export function createCourtyardPaverTexture(): THREE.DataTexture {
     hexToRgb('#F6EAD3'),
     hexToRgb('#E7D7B9'),
   ];
-  const grout = hexToRgb('#D3C2A6');
+  const grout = hexToRgb('#DBCBB0');
 
   return makeDataTexture(size, (x, y) => {
     const row = Math.floor(y / cell);
@@ -141,9 +141,9 @@ export function createCourtyardPaverTexture(): THREE.DataTexture {
       edgeDistanceInCell(lx, cell),
       edgeDistanceInCell(ly, cell),
     );
-    const stoneMask = smoothstep(1.2, 3.4, minEdge);
+    const stoneMask = smoothstep(1.0, 4.2, minEdge);
     const bevelHighlight =
-      smoothstep(2.0, 4.2, minEdge) * (1 - smoothstep(4.2, 7.5, minEdge)) * 4.0;
+      smoothstep(2.2, 4.8, minEdge) * (1 - smoothstep(4.8, 8.2, minEdge)) * 3.0;
 
     const tone = tones[(row * 3 + col * 5) % tones.length]!;
     const grain =

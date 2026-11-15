@@ -19,6 +19,8 @@ import {
   OUTER_CITY_GROUND_SKIRT,
   STREET_SCOUT_CAMERA_PRESET,
   TEE_POSITION,
+  TEE_SET_LOCAL_BOUNDS,
+  TEE_STAND_BAG_OFFSET,
   VAN_LOADING_ZONE,
 } from '@/config/courseMasterPlan';
 import {
@@ -421,6 +423,51 @@ test('2. Collision & Diegetic Zoning Audit: 0 solid/skyline AABB overlaps + flus
     assert.ok(
       alignmentDot > 0.95,
       `Streetlamp "${lampProp.id}" lantern arm must point inward toward corridor (dot=${alignmentDot.toFixed(3)})`,
+    );
+  }
+
+  // 2i. Pass 2 Micro-Polish: Tee stand-bag offset (-1.42m West) clears tee pad & curbs, and two-tier fountain clears off-axis green sightlines
+  assert.ok(
+    TEE_STAND_BAG_OFFSET[0] <= -1.4,
+    `TEE_STAND_BAG_OFFSET.x (${TEE_STAND_BAG_OFFSET[0]}) must sit >= 1.40m West of tee ball`,
+  );
+  assert.ok(
+    TEE_POSITION[0] + TEE_SET_LOCAL_BOUNDS.min[0] >= -3.55 + 1.5,
+    'Tee stand bag must stay >= 1.5m inside 5th Ave asphalt roadway away from West curb',
+  );
+  assert.ok(
+    TEE_POSITION[2] + TEE_SET_LOCAL_BOUNDS.max[2] <= 28.2 - 0.12,
+    'Tee mat & stand bag must stay >= 0.12m clear of South tee backstop curb',
+  );
+
+  const fountainProp = props.find((p) => p.id === 'fountain-courtyard-front')!;
+  assert.equal(
+    fountainProp.solidColliders.length,
+    2,
+    'Fountain must define a 2-tier CAD envelope (low 2.50m x 0.34m basin + narrow 1.12m central spire)',
+  );
+  assert.ok(
+    Math.abs(fountainProp.solidColliders[0].max[1] - (ELEVATIONS.COURTYARD_GREEN_Y + 0.34)) < 1e-6,
+    'Fountain Tier 1 basin collider top must match y = +0.94m',
+  );
+  const offAxisPuttCam: Vec3Tuple = [18.9, ELEVATIONS.COURTYARD_GREEN_Y + 2.08, -20.8];
+  const offAxisPuttBall: Vec3Tuple = [23.6, ELEVATIONS.COURTYARD_GREEN_Y + BALL_RADIUS, -20.8];
+  const puttRayDist = Math.hypot(
+    offAxisPuttBall[0] - offAxisPuttCam[0],
+    offAxisPuttBall[1] - offAxisPuttCam[1],
+    offAxisPuttBall[2] - offAxisPuttCam[2],
+  );
+  const puttRayDir: Vec3Tuple = [
+    (offAxisPuttBall[0] - offAxisPuttCam[0]) / puttRayDist,
+    (offAxisPuttBall[1] - offAxisPuttCam[1]) / puttRayDist,
+    (offAxisPuttBall[2] - offAxisPuttCam[2]) / puttRayDist,
+  ];
+  for (const tierBox of fountainProp.solidColliders) {
+    const hit = intersectRayAABB3D(offAxisPuttCam, puttRayDir, tierBox, puttRayDist);
+    assert.equal(
+      hit.hit,
+      false,
+      'Putt sightline looking cleanly over outer fountain basin (z=-20.8) must not hit 2-tier fountain envelope',
     );
   }
 });

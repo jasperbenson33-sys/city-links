@@ -39,6 +39,7 @@ export interface CameraRigProps {
 
 interface MaterialFadeSnapshot {
   mesh: THREE.Mesh;
+  origCastShadow: boolean;
   origMaterial: THREE.Material | THREE.Material[];
   fadeMaterial: THREE.Material | THREE.Material[];
   fadeLeafMaterials: Array<{
@@ -47,11 +48,20 @@ interface MaterialFadeSnapshot {
   }>;
 }
 
+interface OccludableBox {
+  min: Vec3Tuple;
+  max: Vec3Tuple;
+  padBottom: number;
+  padTop: number;
+}
+
 interface OccludableEntry {
   object: THREE.Object3D;
   aabb: { min: Vec3Tuple; max: Vec3Tuple };
+  testBoxes: OccludableBox[];
   isProp: boolean;
   isLowProp: boolean;
+  tightBallRayOnly: boolean;
   enterMarginXZ: number;
   exitMarginXZ: number;
   nearLensEnterMargin: number;
@@ -69,6 +79,9 @@ const OCCLUDE_ENTER_MARGIN_XZ = 0.55;
 const OCCLUDE_EXIT_MARGIN_XZ = 0.72;
 const OCCLUDE_PROP_ENTER_MARGIN_XZ = 0.18;
 const OCCLUDE_PROP_EXIT_MARGIN_XZ = 0.28;
+const OCCLUDE_FOUNTAIN_ENTER_MARGIN_XZ = 0.12;
+const OCCLUDE_FOUNTAIN_EXIT_MARGIN_XZ = 0.20;
+const OCCLUDE_PROP_FULL_FADE_DIST = 4.4;
 const OCCLUDE_HOLD_SECONDS = 0.25;
 const OCCLUDE_OPACITY_SNAP_EPS = 0.002;
 const OCCLUDE_NEAR_LENS_ENTER_MARGIN = 0.65;
@@ -111,6 +124,7 @@ function shortestAngleDelta(fromRad: number, toRad: number): number {
 function resolveObjectAabb(
   obj: THREE.Object3D,
 ): { min: Vec3Tuple; max: Vec3Tuple } | null {
+  obj.updateMatrixWorld(true);
   const userAabb = obj.userData?.aabb as
     | { min: Vec3Tuple; max: Vec3Tuple }
     | undefined;
@@ -153,6 +167,64 @@ function resolveObjectAabb(
   return declaredAabb ?? meshAabb;
 }
 
+function isFountainObject(obj: THREE.Object3D): boolean {
+  return (
+    obj.name === 'fountain-hazard-prop' ||
+    obj.userData?.propId === 'fountain-courtyard-front'
+  );
+}
+
+function resolveOccludableBoxes(
+  obj: THREE.Object3D,
+  fallbackAabb: { min: Vec3Tuple; max: Vec3Tuple },
+  isProp: boolean,
+  isLowProp: boolean,
+  tightBallRayOnly: boolean,
+): OccludableBox[] {
+  if (isFountainObject(obj)) {
+    const fountainSpec = COURSE_PROPS.find(
+      (p) => p.id === 'fountain-courtyard-front',
+    );
+    const basinBox = fountainSpec?.solidColliders?.[0];
+    const spireBox = fountainSpec?.solidColliders?.[1];
+    if (basinBox && spireBox) {
+      // Split Tier 2 at lower-bowl rim (+0.56m above basin) vs narrow upper finial (+0.28m radius)
+      // so elevated sightlines over the basin or outer bowl never clip a false square corner.
+      const lowerBowlTopY = Math.min(spireBox.max[1], basinBox.max[1] + 0.56);
+      const centerX = (spireBox.min[0] + spireBox.max[0]) * 0.5;
+      const centerZ = (spireBox.min[2] + spireBox.max[2]) * 0.5;
+      return [
+        { min: basinBox.min, max: basinBox.max, padBottom: 0.04, padTop: 0 },
+        {
+          min: spireBox.min,
+          max: [spireBox.max[0], lowerBowlTopY, spireBox.max[2]],
+          padBottom: 0,
+          padTop: 0,
+        },
+        {
+          min: [centerX - 0.28, lowerBowlTopY, centerZ - 0.28],
+          max: [centerX + 0.28, spireBox.max[1], centerZ + 0.28],
+          padBottom: 0,
+          padTop: 0,
+        },
+      ];
+    }
+  }
+
+  if (tightBallRayOnly) {
+    return [{ min: fallbackAabb.min, max: fallbackAabb.max, padBottom: 0, padTop: 0 }];
+  }
+
+  return [
+    {
+      min: fallbackAabb.min,
+      max: fallbackAabb.max,
+      padBottom: isLowProp ? 0.04 : isProp ? 0.15 : 0.4,
+      padTop: isLowProp ? 0 : isProp ? 0.28 : 0.75,
+    },
+  ];
+}
+
 function createFadeLeafMaterial(orig: THREE.Material): {
   clone: THREE.Material;
   origOpacity: number;
@@ -178,6 +250,7 @@ function createFadeLeafMaterial(orig: THREE.Material): {
         shader.fragmentShader = shader.fragmentShader.replace(
           '#include <alphatest_fragment>',
           `#include <alphatest_fragment>
+if (opacity <= 0.006) discard;
 if (opacity < 0.998) {
   float ign = fract(52.9829189 * fract(dot(floor(gl_FragCoord.xy), vec2(0.06711056, 0.00583715))));
   if (opacity <= ign + 0.001) discard;
@@ -186,7 +259,7 @@ if (opacity < 0.998) {
       }
     };
     c.customProgramCacheKey = () =>
-      prevCacheKey ? `${prevCacheKey}|curbside-ign-cutaway-v1` : 'curbside-ign-cutaway-v1';
+      prevCacheKey ? `${prevCacheKey}|curbside-ign-cutaway-v2` : 'curbside-ign-cutaway-v2';
   }
   c.needsUpdate = true;
   return { clone: c, origOpacity: orig.opacity };
@@ -212,6 +285,7 @@ function cloneMaterialsForOcclusion(
       });
       snapshots.push({
         mesh,
+        origCastShadow: mesh.castShadow,
         origMaterial: origList,
         fadeMaterial: fadeList,
         fadeLeafMaterials,
@@ -221,6 +295,7 @@ function cloneMaterialsForOcclusion(
       const { clone, origOpacity } = createFadeLeafMaterial(orig);
       snapshots.push({
         mesh,
+        origCastShadow: mesh.castShadow,
         origMaterial: orig,
         fadeMaterial: clone,
         fadeLeafMaterials: [
@@ -251,6 +326,12 @@ function applyEntryOpacity(entry: OccludableEntry, nextOpacity: number): void {
       }
     } else if (entry.showingFadeMaterial) {
       snap.mesh.material = snap.origMaterial;
+    }
+    if (entry.isProp) {
+      const nextCastShadow = snap.origCastShadow && nextOpacity > 0.25;
+      if (snap.mesh.castShadow !== nextCastShadow) {
+        snap.mesh.castShadow = nextCastShadow;
+      }
     }
   }
   entry.showingFadeMaterial = shouldUseFade;
@@ -376,6 +457,7 @@ export function CameraRig({
       for (const entry of occludablesRef.current) {
         for (const snap of entry.snapshots) {
           snap.mesh.material = snap.origMaterial;
+          snap.mesh.castShadow = snap.origCastShadow;
           if (Array.isArray(snap.fadeMaterial)) {
             for (const m of snap.fadeMaterial) m.dispose();
           } else {
@@ -834,6 +916,7 @@ export function CameraRig({
     // 2. Discover occludable buildings, delivery van & tall/hedge props ONCE after mount,
     // completely decoupled from scene.children.length so shot guide visibility changes never hitch.
     if (!hasIndexedOccludablesRef.current) {
+      scene.updateMatrixWorld(true);
       const known = knownObjectsRef.current;
       const newlyAdded: OccludableEntry[] = [];
 
@@ -844,21 +927,47 @@ export function CameraRig({
         const isProp = obj.userData?.occludableProp === true;
         if (isBuilding || isVehicle || isProp) {
           known.add(obj);
+          const fountainFlag = isFountainObject(obj);
+          const tightBallRayOnly =
+            isProp && obj.userData?.tightBallRayOnly === true;
           const aabb = resolveObjectAabb(obj);
           if (aabb) {
             const heightY = aabb.max[1] - aabb.min[1];
-            const isLowProp = isProp && heightY < LOW_PROP_HEIGHT_THRESHOLD;
-            const entry: OccludableEntry = {
-              object: obj,
+            const isLowProp =
+              isProp &&
+              (fountainFlag ||
+                tightBallRayOnly ||
+                heightY < LOW_PROP_HEIGHT_THRESHOLD);
+            const testBoxes = resolveOccludableBoxes(
+              obj,
               aabb,
               isProp,
               isLowProp,
-              enterMarginXZ: isProp
-                ? OCCLUDE_PROP_ENTER_MARGIN_XZ
-                : OCCLUDE_ENTER_MARGIN_XZ,
-              exitMarginXZ: isProp
-                ? OCCLUDE_PROP_EXIT_MARGIN_XZ
-                : OCCLUDE_EXIT_MARGIN_XZ,
+              tightBallRayOnly,
+            );
+            const enterMarginXZ = tightBallRayOnly
+              ? 0
+              : fountainFlag
+                ? OCCLUDE_FOUNTAIN_ENTER_MARGIN_XZ
+                : isProp
+                  ? OCCLUDE_PROP_ENTER_MARGIN_XZ
+                  : OCCLUDE_ENTER_MARGIN_XZ;
+            const exitMarginXZ = tightBallRayOnly
+              ? 0.03
+              : fountainFlag
+                ? OCCLUDE_FOUNTAIN_EXIT_MARGIN_XZ
+                : isProp
+                  ? OCCLUDE_PROP_EXIT_MARGIN_XZ
+                  : OCCLUDE_EXIT_MARGIN_XZ;
+            const entry: OccludableEntry = {
+              object: obj,
+              aabb,
+              testBoxes,
+              isProp,
+              isLowProp,
+              tightBallRayOnly,
+              enterMarginXZ,
+              exitMarginXZ,
               nearLensEnterMargin: isProp
                 ? OCCLUDE_PROP_NEAR_LENS_ENTER
                 : OCCLUDE_NEAR_LENS_ENTER_MARGIN,
@@ -914,66 +1023,93 @@ export function CameraRig({
       by + 0.25 - camOrigin[1],
       bz - camOrigin[2],
     );
-    const camToBallDist = rayDirRef.current.length();
-    const disableFade = Boolean(store.cameraAuditStationId);
-
-    if (camToBallDist > 0.05) {
-      rayDirRef.current.divideScalar(camToBallDist);
-      const dirTuple: Vec3Tuple = [
+    const wallCamToBallDist = rayDirRef.current.length();
+    let wallDirTuple: Vec3Tuple | null = null;
+    let wallRayMaxDist = 0;
+    if (wallCamToBallDist > 0.05) {
+      rayDirRef.current.divideScalar(wallCamToBallDist);
+      wallDirTuple = [
         rayDirRef.current.x,
         rayDirRef.current.y,
         rayDirRef.current.z,
       ];
       // Stop ray slightly before the ball so background buildings behind the ball NEVER fade
-      const rayMaxDist = Math.max(0.2, camToBallDist - 0.55);
+      wallRayMaxDist = Math.max(0.2, wallCamToBallDist - 0.55);
+    }
 
+    // Aim prop occlusion rays directly at ball crown (by + BALL_RADIUS) so perimeter
+    // hedges and low courtyard rims cleanly seen over never graze false stipple fades.
+    rayDirRef.current.set(
+      bx - camOrigin[0],
+      by + BALL_RADIUS - camOrigin[1],
+      bz - camOrigin[2],
+    );
+    const propCamToBallDist = rayDirRef.current.length();
+    let propDirTuple: Vec3Tuple | null = null;
+    let propRayMaxDist = 0;
+    if (propCamToBallDist > 0.05) {
+      rayDirRef.current.divideScalar(propCamToBallDist);
+      propDirTuple = [
+        rayDirRef.current.x,
+        rayDirRef.current.y,
+        rayDirRef.current.z,
+      ];
+      propRayMaxDist = Math.max(0.2, propCamToBallDist - 0.55);
+    }
+
+    const disableFade = Boolean(store.cameraAuditStationId);
+
+    if (wallDirTuple || propDirTuple) {
       for (const entry of occludablesRef.current) {
+        const dirTuple = entry.isProp ? propDirTuple : wallDirTuple;
+        const rayMaxDist = entry.isProp ? propRayMaxDist : wallRayMaxDist;
         let hitNow = false;
         let hitDist = rayMaxDist;
-        if (!disableFade) {
+        if (!disableFade && dirTuple) {
           const marginXZ = entry.isFaded
             ? entry.exitMarginXZ
             : entry.enterMarginXZ;
           const nearLensMargin = entry.isFaded
             ? Math.max(marginXZ, entry.nearLensExitMargin)
             : Math.max(marginXZ, entry.nearLensEnterMargin);
-          const padBottom = entry.isLowProp ? 0.05 : entry.isProp ? 0.15 : 0.4;
-          const padTop = entry.isLowProp ? 0.06 : entry.isProp ? 0.28 : 0.75;
-          // Skip omnidirectional near-lens trigger on low props (< 1.55m) so flanking waist-high
-          // props only fade when the camera->ball sightline ray genuinely intersects them.
+          // Skip omnidirectional near-lens trigger on low props & tight-ray tee props so
+          // flanking props stay 100% solid unless the camera->ball ray directly pierces them.
           const nearOrInsideLens =
             !entry.isLowProp &&
+            !entry.tightBallRayOnly &&
             camOrigin[0] >= entry.aabb.min[0] - nearLensMargin &&
             camOrigin[0] <= entry.aabb.max[0] + nearLensMargin &&
             camOrigin[1] >= entry.aabb.min[1] - 0.2 &&
-            camOrigin[1] <= entry.aabb.max[1] + padTop &&
+            camOrigin[1] <= entry.aabb.max[1] + (entry.isProp ? 0.28 : 0.75) &&
             camOrigin[2] >= entry.aabb.min[2] - nearLensMargin &&
             camOrigin[2] <= entry.aabb.max[2] + nearLensMargin;
           if (nearOrInsideLens) {
             hitNow = true;
             hitDist = 0;
           } else {
-            const expandedAabb = {
-              min: [
-                entry.aabb.min[0] - marginXZ,
-                entry.aabb.min[1] - padBottom,
-                entry.aabb.min[2] - marginXZ,
-              ] as Vec3Tuple,
-              max: [
-                entry.aabb.max[0] + marginXZ,
-                entry.aabb.max[1] + padTop,
-                entry.aabb.max[2] + marginXZ,
-              ] as Vec3Tuple,
-            };
-            const hit = intersectRayAABB3D(
-              camOrigin,
-              dirTuple,
-              expandedAabb,
-              rayMaxDist,
-            );
-            if (hit.hit && hit.tMin <= rayMaxDist) {
-              hitNow = true;
-              hitDist = Math.max(0, hit.tMin);
+            for (const box of entry.testBoxes) {
+              const expandedAabb = {
+                min: [
+                  box.min[0] - marginXZ,
+                  box.min[1] - box.padBottom,
+                  box.min[2] - marginXZ,
+                ] as Vec3Tuple,
+                max: [
+                  box.max[0] + marginXZ,
+                  box.max[1] + box.padTop,
+                  box.max[2] + marginXZ,
+                ] as Vec3Tuple,
+              };
+              const hit = intersectRayAABB3D(
+                camOrigin,
+                dirTuple,
+                expandedAabb,
+                rayMaxDist,
+              );
+              if (hit.hit && hit.tMin <= rayMaxDist) {
+                hitNow = true;
+                hitDist = Math.min(hitDist, Math.max(0, hit.tMin));
+              }
             }
           }
         }
@@ -981,12 +1117,15 @@ export function CameraRig({
         if (hitNow) {
           entry.isFaded = true;
           entry.clearHoldSec = 0;
-          // Ramp near-lens foreground obstructions (< 1.9m) smoothly down to 0.00 so nothing ghosts over the lens
-          const lensFactor = THREE.MathUtils.clamp(
-            (hitDist - 0.85) / 1.05,
-            0,
-            1,
-          );
+          // Ramp occluding props all the way to 0.00 inside 4.4m (zero IGN stipple dandruff on the green),
+          // while tall buildings/vehicles retain 0.06 silhouette context beyond 1.9m.
+          const lensFactor = entry.isProp
+            ? THREE.MathUtils.clamp(
+                (hitDist - OCCLUDE_PROP_FULL_FADE_DIST) / 0.8,
+                0,
+                1,
+              )
+            : THREE.MathUtils.clamp((hitDist - 0.85) / 1.05, 0, 1);
           entry.lastTargetOpacity = FADE_MIN_OPACITY * lensFactor;
         } else if (entry.isFaded) {
           entry.clearHoldSec += dt;

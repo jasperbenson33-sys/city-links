@@ -210,7 +210,7 @@ export const VENICE_MATERIALS = {
     roughness: 0.82,
     metalness: 0.02,
   }),
-  courtyardRampCourseAccent: matteMat('#C9B69A', {
+  courtyardRampCourseAccent: matteMat('#D1BFA3', {
     roughness: 0.84,
     metalness: 0.02,
     polygonOffset: true,
@@ -302,10 +302,15 @@ export const VENICE_MATERIALS = {
     emissive: '#FFB347',
     emissiveIntensity: 0.54,
   }),
-  shutterSageDefault: matteMat('#2F6F5E', { roughness: 0.72, metalness: 0.03 }),
-  shutterEspresso: matteMat('#4A352C', { roughness: 0.76, metalness: 0.03 }),
-  wroughtIron: matteMat('#3D3739', { roughness: 0.56, metalness: 0.18 }),
-  copperDrainpipe: matteMat('#8C5E45', { roughness: 0.48, metalness: 0.24 }),
+  shutterSageDefault: matteMat('#357664', { roughness: 0.76, metalness: 0.02 }),
+  shutterEspresso: matteMat('#523C33', { roughness: 0.78, metalness: 0.02 }),
+  wroughtIron: matteMat('#494244', {
+    roughness: 0.62,
+    metalness: 0.12,
+    emissive: '#2A2321',
+    emissiveIntensity: 0.08,
+  }),
+  copperDrainpipe: matteMat('#8C5E45', { roughness: 0.5, metalness: 0.2 }),
   pergolaCedar: matteMat('#7A4B2E', { roughness: 0.78, metalness: 0.03 }),
   pergolaVineLeaf: matteMat('#499346', {
     roughness: 0.76,
@@ -323,16 +328,21 @@ export const VENICE_MATERIALS = {
     metalness: 0.02,
     flatShading: true,
   }),
-  signagePlaqueBg: matteMat('#FAF1DE', { roughness: 0.72, metalness: 0.02 }),
-  signagePlaqueInk: matteMat('#3A2920', { roughness: 0.78, metalness: 0.02 }),
+  signagePlaqueBg: matteMat('#F4E9D4', { roughness: 0.78, metalness: 0.02 }),
+  signagePlaqueInk: matteMat('#433127', { roughness: 0.8, metalness: 0.02 }),
 
   // === Overhead Catenary Café String Lights & Distant Horizon ===
-  stringLightCord: matteMat('#4A403A', { roughness: 0.78, metalness: 0.05 }),
+  stringLightCord: matteMat('#564B44', {
+    roughness: 0.84,
+    metalness: 0.03,
+    emissive: '#2E2520',
+    emissiveIntensity: 0.06,
+  }),
   stringLightBulbGlow: new THREE.MeshStandardMaterial({
-    color: '#FFF7D6',
-    emissive: '#FFBE55',
-    emissiveIntensity: 1.45,
-    roughness: 0.44,
+    color: '#FFF6D4',
+    emissive: '#FFBD54',
+    emissiveIntensity: 1.18,
+    roughness: 0.52,
     metalness: 0.0,
   }),
   skylineTerracotta: matteMat('#D18A72', { roughness: 0.9, metalness: 0.02 }),
@@ -496,8 +506,8 @@ export const TOYBOX_MATERIALS = {
   darkIron: VENICE_MATERIALS.wroughtIron,
   galvanizedSteel: matteMat('#9BAAB9', { roughness: 0.46, metalness: 0.26 }),
   copperAccent: matteMat('#CD8158', { roughness: 0.42, metalness: 0.28 }),
-  tireRubber: toonMat('#2B303B'),
-  hubcapCream: toonMat('#F8FAFC'),
+  tireRubber: toonMat('#363B46'),
+  hubcapCream: toonMat('#F3ECE0'),
 
   // Scaffolding & Subway
   scaffoldingSteel: matteMat('#6E7F94', { roughness: 0.48, metalness: 0.24 }),
@@ -519,8 +529,13 @@ export const TOYBOX_MATERIALS = {
   vanRoofBounceDeck: toonMat('#34D399'),
 
   // Bistro Set
-  bistroTableTop: toonMat('#FFFDF7'),
-  bistroCastIron: matteMat('#3B3F4A', { roughness: 0.56, metalness: 0.2 }),
+  bistroTableTop: toonMat('#FAF5E8'),
+  bistroCastIron: matteMat('#464B57', {
+    roughness: 0.62,
+    metalness: 0.14,
+    emissive: '#23262E',
+    emissiveIntensity: 0.05,
+  }),
 
   // Fountain & Water Hazard
   turquoiseWater: matteMat('#2DD4BF', {
@@ -533,16 +548,19 @@ export const TOYBOX_MATERIALS = {
     depthWrite: false,
   }),
   turquoiseWaterDeep: toonMat('#0F766E'),
-  waterBeadCyan: matteMat('#67E8F9', {
+  waterBeadCyan: matteMat('#74ECFA', {
     roughness: 0.28,
-    metalness: 0.08,
+    metalness: 0.06,
     emissive: '#22D3EE',
-    emissiveIntensity: 0.35,
+    emissiveIntensity: 0.28,
+    transparent: true,
+    opacity: 0.84,
+    depthWrite: false,
   }),
   waterFoamWhite: new THREE.MeshBasicMaterial({
     color: '#F0FDFA',
     transparent: true,
-    opacity: 0.88,
+    opacity: 0.82,
     depthWrite: false,
   }),
   lilyPadGreen: toonMat('#34D399'),

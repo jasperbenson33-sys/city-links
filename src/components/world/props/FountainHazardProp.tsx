@@ -12,6 +12,21 @@ const WATER_MAT = withPolygonOffset(TOYBOX_MATERIALS.turquoiseWater, 1);
 const WATER_DEEP_MAT = withPolygonOffset(TOYBOX_MATERIALS.turquoiseWaterDeep, 1);
 const LILY_PAD_MAT = withPolygonOffset(TOYBOX_MATERIALS.lilyPadGreen, 1);
 const SPLASH_RING_MAT = withPolygonOffset(TOYBOX_MATERIALS.waterFoamWhite, 2);
+const PLUME_CYAN_MAT = (() => {
+  const m = TOYBOX_MATERIALS.waterBeadCyan.clone();
+  m.transparent = true;
+  m.opacity = 0.84;
+  m.depthWrite = false;
+  return m;
+})();
+const PLUME_FOAM_MAT = (() => {
+  const m = TOYBOX_MATERIALS.waterFoamWhite.clone();
+  m.transparent = true;
+  m.opacity = 0.84;
+  m.depthWrite = false;
+  return m;
+})();
+const UP_AXIS = new THREE.Vector3(0, 1, 0);
 
 export interface FountainHazardPropProps {
   position?: [number, number, number];
@@ -81,6 +96,7 @@ export function FountainHazardProp({
   const splashRingRef = useRef<THREE.Mesh>(null);
   const waterSurfaceRef = useRef<THREE.Mesh>(null);
   const elapsedRef = useRef(0);
+  const tangentVec = useMemo(() => new THREE.Vector3(), []);
 
   const wallOuterR = Math.max(0.95, radius - 0.06);
   const innerR = Math.max(0.68, wallOuterR - 0.22);
@@ -126,32 +142,41 @@ export function FountainHazardProp({
 
     if (upperPlumeRef.current) {
       const children = upperPlumeRef.current.children;
+      const drDu = 0.42;
       for (let i = 0; i < children.length; i++) {
         const drop = children[i];
         const u = (t * 1.35 + i / UPPER_PLUME_COUNT) % 1.0;
         const ang = (i / UPPER_PLUME_COUNT) * Math.PI * 2;
-        const r = 0.04 + u * 0.42;
+        const r = 0.04 + u * drDu;
         const y = 1.36 + Math.sin(u * Math.PI) * 0.26 - u * 0.5;
+        const dyDu = 0.26 * Math.PI * Math.cos(u * Math.PI) - 0.5;
         drop.position.set(Math.cos(ang) * r, y, Math.sin(ang) * r);
-        const s = 0.032 + Math.sin(u * Math.PI) * 0.026;
-        // Align droplet elongation along radial outward + vertical arc velocity
-        drop.rotation.set(0, -ang, 0);
-        drop.scale.set(s * 1.25, s * 1.15, s * 0.85);
+        tangentVec
+          .set(Math.cos(ang) * drDu, dyDu, Math.sin(ang) * drDu)
+          .normalize();
+        drop.quaternion.setFromUnitVectors(UP_AXIS, tangentVec);
+        const s = 0.015 + Math.sin(u * Math.PI) * 0.011;
+        drop.scale.set(s * 0.68, s * 1.85, s * 0.68);
       }
     }
 
     if (lowerPlumeRef.current) {
       const children = lowerPlumeRef.current.children;
+      const drDu = innerR * 0.8 - 0.48;
       for (let i = 0; i < children.length; i++) {
         const drop = children[i];
         const u = (t * 1.2 + i / LOWER_PLUME_COUNT) % 1.0;
         const ang = (i / LOWER_PLUME_COUNT) * Math.PI * 2 + 0.18;
-        const r = 0.48 + u * (innerR * 0.8 - 0.48);
+        const r = 0.48 + u * drDu;
         const y = 0.82 + Math.sin(u * Math.PI) * 0.22 - u * 0.62;
+        const dyDu = 0.22 * Math.PI * Math.cos(u * Math.PI) - 0.62;
         drop.position.set(Math.cos(ang) * r, y, Math.sin(ang) * r);
-        const s = 0.038 + Math.sin(u * Math.PI) * 0.028;
-        drop.rotation.set(0, -ang, 0);
-        drop.scale.set(s * 1.25, s * 1.15, s * 0.85);
+        tangentVec
+          .set(Math.cos(ang) * drDu, dyDu, Math.sin(ang) * drDu)
+          .normalize();
+        drop.quaternion.setFromUnitVectors(UP_AXIS, tangentVec);
+        const s = 0.017 + Math.sin(u * Math.PI) * 0.011;
+        drop.scale.set(s * 0.68, s * 1.85, s * 0.68);
       }
     }
 
@@ -347,18 +372,14 @@ export function FountainHazardProp({
         <coneGeometry args={[0.045, 0.06, 8]} />
       </mesh>
 
-      {/* Animated Smooth Arching Water Plumes */}
+      {/* Animated Sleek Translucent Arching Water Streams */}
       <group ref={upperPlumeRef}>
         {Array.from({ length: UPPER_PLUME_COUNT }, (_, idx) => (
           <mesh
             key={`uplume-${idx}`}
-            material={
-              idx % 2 === 0
-                ? TOYBOX_MATERIALS.waterBeadCyan
-                : TOYBOX_MATERIALS.waterFoamWhite
-            }
+            material={idx % 2 === 0 ? PLUME_CYAN_MAT : PLUME_FOAM_MAT}
           >
-            <icosahedronGeometry args={[1, 1]} />
+            <icosahedronGeometry args={[1, 2]} />
           </mesh>
         ))}
       </group>
@@ -366,13 +387,9 @@ export function FountainHazardProp({
         {Array.from({ length: LOWER_PLUME_COUNT }, (_, idx) => (
           <mesh
             key={`lplume-${idx}`}
-            material={
-              idx % 3 === 0
-                ? TOYBOX_MATERIALS.waterFoamWhite
-                : TOYBOX_MATERIALS.waterBeadCyan
-            }
+            material={idx % 3 === 0 ? PLUME_FOAM_MAT : PLUME_CYAN_MAT}
           >
-            <icosahedronGeometry args={[1, 1]} />
+            <icosahedronGeometry args={[1, 2]} />
           </mesh>
         ))}
       </group>
@@ -398,9 +415,9 @@ export function FountainHazardProp({
             scale={0}
             castShadow={false}
             frustumCulled={false}
-            material={TOYBOX_MATERIALS.waterBeadCyan}
+            material={PLUME_CYAN_MAT}
           >
-            <icosahedronGeometry args={[1, 1]} />
+            <icosahedronGeometry args={[1, 2]} />
           </mesh>
         ))}
       </group>

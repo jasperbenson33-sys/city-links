@@ -50,6 +50,18 @@ import {
 
 export const TEE_POSITION: Vec3Tuple = [0.0, ELEVATIONS.ROAD_ASPHALT_Y, 27.52];
 
+/**
+ * Stand golf bag local offset from TEE_POSITION (nudged 0.28m further West to x = -1.42m
+ * so default & oblique tee sightlines stay wide open while keeping > 2.1m West curb clearance).
+ */
+export const TEE_STAND_BAG_OFFSET: Vec3Tuple = [-1.42, 0.0, 0.18];
+
+export const TEE_SET_LOCAL_BOUNDS = {
+  min: [-1.84, 0.0, -0.54] as Vec3Tuple,
+  max: [0.96, 1.0, 0.54] as Vec3Tuple,
+  size: [2.8, 1.0, 1.08] as Vec3Tuple,
+} as const;
+
 export const A_POSITION_CROSSWALK: CrosswalkLandingPadSpec = {
   id: 'crosswalk-a-position',
   center: [-1.2, ELEVATIONS.ROAD_ASPHALT_Y, -16.5],
@@ -1820,8 +1832,13 @@ export const COURSE_PROPS: CoursePropSpec[] = [
     rotationY: 0,
     localSize: [2.5, 1.42, 2.5],
     aabb: computeRotatedAABB([20.55, ELEVATIONS.COURTYARD_GREEN_Y, -21.6], [2.5, 1.42, 2.5], 0),
+    // Two-tier CAD collision & occlusion envelope: low 2.50m x 0.34m octagonal basin rim + narrow 1.12m central spire
     solidColliders: [
-      computeRotatedAABB([20.55, ELEVATIONS.COURTYARD_GREEN_Y, -21.6], [2.5, 1.42, 2.5], 0),
+      computeRotatedAABB([20.55, ELEVATIONS.COURTYARD_GREEN_Y, -21.6], [2.5, 0.34, 2.5], 0),
+      {
+        min: [20.55 - 0.56, ELEVATIONS.COURTYARD_GREEN_Y + 0.34, -21.6 - 0.56],
+        max: [20.55 + 0.56, ELEVATIONS.COURTYARD_GREEN_Y + 1.42, -21.6 + 0.56],
+      },
     ],
     surfaceTag: 'fountain_hazard',
     blocksGroundRoll: true,

@@ -70,6 +70,7 @@ const THIN_CORD_MAT = softenedThinMaterial(VENICE_MATERIALS.stringLightCord, '#5
 const BAY_PANEL_DECAL_MAT = layeredMaterial(VENICE_MATERIALS.stuccoTerracottaDeep, 1);
 const WINDOW_LIT_DECAL_MAT = layeredMaterial(VENICE_MATERIALS.windowWarmLit, 1);
 const WINDOW_DARK_DECAL_MAT = layeredMaterial(VENICE_MATERIALS.windowDarkGlass, 1);
+const SKYLINE_MULLION_MAT = layeredMaterial(VENICE_MATERIALS.storefrontTimber, 2);
 const HORIZON_APRON_MAT = layeredMaterial(VENICE_MATERIALS.horizonEarthApron, -1);
 
 interface WallAbut {
@@ -1187,6 +1188,30 @@ function SkylineTowerMesh({ tower }: { tower: PerimeterBuildingSpec }) {
             >
               <boxGeometry args={[bayW + 0.3, 0.28, bayD + 0.3]} />
             </mesh>
+            {/* Carved Eave Corbel Dentils Directly Beneath Palazzo Cornice */}
+            {Array.from(
+              { length: Math.max(4, Math.floor(baySpan / 0.95)) },
+              (_, di) => {
+                const dentilCount = Math.max(4, Math.floor(baySpan / 0.95));
+                const du =
+                  -baySpan * 0.44 +
+                  (di / Math.max(1, dentilCount - 1)) * (baySpan * 0.88);
+                const dentilPos: [number, number, number] = frontIsNS
+                  ? [du, baseY + bayH - 0.1, faceSign * (bayD * 0.5 + 0.04)]
+                  : [faceSign * (bayW * 0.5 + 0.04), baseY + bayH - 0.1, du];
+                return (
+                  <mesh
+                    key={`pcorbel-${di}`}
+                    position={dentilPos}
+                    material={VENICE_MATERIALS.stuccoCreamLimestone}
+                  >
+                    <boxGeometry
+                      args={frontIsNS ? [0.18, 0.2, 0.16] : [0.16, 0.2, 0.18]}
+                    />
+                  </mesh>
+                );
+              },
+            )}
 
             {/* Framed Venetian Shuttered Windows across upper stories */}
             {Array.from({ length: storiesAbove }, (_, sIdx) => {
@@ -1218,7 +1243,7 @@ function SkylineTowerMesh({ tower }: { tower: PerimeterBuildingSpec }) {
                     >
                       <boxGeometry args={[1.34, 0.12, 0.2]} />
                     </mesh>
-                    {/* Warm sunset-lit or dark reflected glass pane */}
+                    {/* Warm sunset-lit or dark reflected glass pane + Cross Muntin Sash Bars */}
                     <mesh
                       position={[0, 0, 0.025]}
                       material={
@@ -1228,6 +1253,18 @@ function SkylineTowerMesh({ tower }: { tower: PerimeterBuildingSpec }) {
                       }
                     >
                       <boxGeometry args={[0.92, 1.54, 0.05]} />
+                    </mesh>
+                    <mesh
+                      position={[0, 0, 0.045]}
+                      material={SKYLINE_MULLION_MAT}
+                    >
+                      <boxGeometry args={[0.05, 1.54, 0.03]} />
+                    </mesh>
+                    <mesh
+                      position={[0, 0.18, 0.048]}
+                      material={SKYLINE_MULLION_MAT}
+                    >
+                      <boxGeometry args={[0.92, 0.05, 0.03]} />
                     </mesh>
                     {/* Paired Venetian Shutters seated flush against facade */}
                     <mesh position={[-0.72, 0, 0.005]} material={shutterMat}>
