@@ -9,11 +9,13 @@ import {
   AUDIT_CAMERA_STATIONS,
   auditStation360PerimeterClosure,
   COURSE_MASTER_PLAN,
+  getCourseSurfaceElevationAt,
   getMasterPlanGroundElevationAt,
   getMasterPlanSurfaceTagAt,
   getVanRampOrRoofElevationAt,
   HOLE_1_CUP,
   isWalkablePointExplicitlyCovered,
+  isWorldPointInWaterHazard,
   OUTER_CITY_GROUND_SKIRT,
   STREET_SCOUT_CAMERA_PRESET,
   TEE_POSITION,
@@ -43,6 +45,8 @@ import { computeDeterministicTrajectory } from '@/engine/trajectory';
 import {
   BALL_RADIUS,
   CLUB_SPECS,
+  CUP_DEPTH,
+  CUP_RADIUS,
   ELEVATIONS,
   WORLD_GRAVITY_Y,
   type AABB3D,
@@ -243,6 +247,43 @@ test('2. Collision & Diegetic Zoning Audit: 0 solid/skyline AABB overlaps + flus
     }
   }
 
+  // Pairwise 3D AABB non-overlap across ALL stone curbs (flush corner & ramp joints, 0 overlap)
+  const curbs = COURSE_MASTER_PLAN.curbs;
+  for (let i = 0; i < curbs.length; i++) {
+    for (let j = i + 1; j < curbs.length; j++) {
+      assert.equal(
+        aabbsOverlap3D(curbs[i].aabb, curbs[j].aabb, 1e-4),
+        false,
+        `Stone curbs "${curbs[i].id}" and "${curbs[j].id}" interpenetrate instead of meeting flush`,
+      );
+    }
+  }
+
+  // North back-alley zero-gap seam: NW corner & North-1 buildings extend flush to z = -38.5 skyline face
+  const nwSkyline = COURSE_MASTER_PLAN.skylineBackdrops.find(
+    (b) => b.id === 'skyline-north-west-tower',
+  )!;
+  for (const northPrimaryId of ['bld-west-5-nw-corner', 'bld-north-1']) {
+    const northBld = COURSE_MASTER_PLAN.perimeterBuildings.find(
+      (b) => b.id === northPrimaryId,
+    )!;
+    assert.equal(
+      northBld.boundsXZ.minZ,
+      nwSkyline.boundsXZ.maxZ,
+      `Primary building "${northPrimaryId}" minZ (${northBld.boundsXZ.minZ}) must meet "${nwSkyline.id}" maxZ (${nwSkyline.boundsXZ.maxZ}) with 0.00m seam`,
+    );
+  }
+
+  // Courtyard west retaining step wall meets ramp-courtyard-main south edge at z = -18.0 with 0.00m gap
+  const westStepWall = walls.find((w) => w.id === 'wall-courtyard-west-step')!;
+  const mainCourtyardRamp = COURSE_MASTER_PLAN.ramps.find(
+    (r) => r.id === 'ramp-courtyard-main',
+  )!;
+  assert.ok(
+    Math.abs(westStepWall.aabb.min[2] - mainCourtyardRamp.boundsXZ.maxZ) < 1e-6,
+    `wall-courtyard-west-step minZ (${westStepWall.aabb.min[2]}) must meet ramp-courtyard-main maxZ (${mainCourtyardRamp.boundsXZ.maxZ}) flush`,
+  );
+
   // 2d. Explicit Assertion: Scaffolding Shed touches its host brick brownstone facade FLUSH (gap <= 0.02m)
   const blds = COURSE_MASTER_PLAN.perimeterBuildings;
   const scaffolding = props.find((p) => p.id === 'scaffolding-shed-west');
@@ -299,15 +340,42 @@ test('2. Collision & Diegetic Zoning Audit: 0 solid/skyline AABB overlaps + flus
     );
   }
 
-  // R3: Hotdog Cart sits cleanly back from the x = 19.0m courtyard terrace step (>= 0.25m margin)
+  // R3: Hotdog Cart carriage sits >= 0.25m clear of the x = 19.0m courtyard terrace step, and full [1.92, 2.58, 2.04] awning AABB clears step & wall
   const hotdogCart = props.find((p) => p.id === 'hotdog-cart-corner')!;
-  const terraceStepClearance = 19.0 - hotdogCart.aabb.max[0];
+  assert.deepEqual(
+    hotdogCart.localSize,
+    [1.92, 2.58, 2.04],
+    'Hotdog cart localSize [widthX, heightY, depthZ] must enclose 1.88m purlins/awning, 2.56m ridge, and 2.04m depth',
+  );
+  const carriageStepClearance = 19.0 - hotdogCart.solidColliders[0].max[0];
   assert.ok(
-    terraceStepClearance >= 0.25,
-    `Hotdog cart AABB maxX (${hotdogCart.aabb.max[0].toFixed(3)}) must keep >= 0.25m clearance from x=19.0m terrace step`,
+    carriageStepClearance >= 0.25,
+    `Hotdog cart ground carriage maxX (${hotdogCart.solidColliders[0].max[0].toFixed(3)}) must keep >= 0.25m clearance from x=19.0m terrace step`,
+  );
+  assert.ok(
+    19.0 - hotdogCart.aabb.max[0] >= 0.15,
+    `Hotdog cart full rotated awning AABB maxX (${hotdogCart.aabb.max[0].toFixed(3)}) must clear x=19.0m terrace step & wall-courtyard-west-step`,
   );
 
-  // 2g. Explicit Assertion: Cup apron (>= 1.5m) is 100% obstacle-free on the +0.60m Putting Green
+  // 2g. Explicit Assertion: Cup geometry (r=0.42m, depth=0.42m) cleanly recesses holed r=0.18m ball clear of center pin, and >= 1.5m apron is obstacle-free
+  assert.equal(CUP_RADIUS, 0.42);
+  assert.equal(CUP_DEPTH, 0.42);
+  assert.equal(HOLE_1_CUP.cupRadius, 0.42);
+  assert.equal(HOLE_1_CUP.cupDepth, 0.42);
+  const holedBallOffset = 0.205;
+  const maxPinRadius = 0.02;
+  assert.ok(
+    holedBallOffset > BALL_RADIUS + maxPinRadius + 0.004,
+    'Holed ball at 0.205m radial offset must clear central flagpole without impalement',
+  );
+  assert.ok(
+    holedBallOffset + BALL_RADIUS <= HOLE_1_CUP.cupRadius - 0.025,
+    'Holed ball at 0.205m radial offset must fit inside 0.42m cup liner without wall clipping',
+  );
+  assert.ok(
+    HOLE_1_CUP.cupDepth >= BALL_RADIUS * 2 + 0.04,
+    'Cup depth (0.42m) must recess full 0.36m ball diameter cleanly below green rim',
+  );
   assert.equal(HOLE_1_CUP.elevationY, 0.6);
   assert.ok(HOLE_1_CUP.apronRadius >= 1.5);
   assert.equal(
@@ -328,6 +396,32 @@ test('2. Collision & Diegetic Zoning Audit: 0 solid/skyline AABB overlaps + flus
         `Prop ${prop.id} encroaches within 1.5m of the Cup (${distToCup.toFixed(2)}m)`,
       );
     }
+  }
+
+  // 2h. Explicit Assertion: Every vintage streetlamp lantern arm extends inward over its street/courtyard corridor
+  const streetLamps = props.filter((p) => p.type === 'street_lamp');
+  assert.equal(streetLamps.length, 5, 'Expected all 5 vintage coaxial streetlamps');
+  for (const lampProp of streetLamps) {
+    const armDirXZ: Vec2Tuple = [
+      Math.sin(lampProp.rotationY),
+      Math.cos(lampProp.rotationY),
+    ];
+    // 5th Ave lamps (x = ±4.6) aim toward x = 0; Mercer & Courtyard north lamps (z < -25) aim south toward z = -21.6
+    const targetCorridorXZ: Vec2Tuple =
+      Math.abs(lampProp.position[0]) < 6.0 && lampProp.position[2] > -22.0
+        ? [0, lampProp.position[2]]
+        : [lampProp.position[0], -21.6];
+    const toCorridorLen = distance2D(lampProp.position, targetCorridorXZ);
+    const toCorridorDirXZ: Vec2Tuple = [
+      (targetCorridorXZ[0] - lampProp.position[0]) / toCorridorLen,
+      (targetCorridorXZ[1] - lampProp.position[2]) / toCorridorLen,
+    ];
+    const alignmentDot =
+      armDirXZ[0] * toCorridorDirXZ[0] + armDirXZ[1] * toCorridorDirXZ[1];
+    assert.ok(
+      alignmentDot > 0.95,
+      `Streetlamp "${lampProp.id}" lantern arm must point inward toward corridor (dot=${alignmentDot.toFixed(3)})`,
+    );
   }
 });
 
@@ -526,7 +620,7 @@ test('3. Geometric Connectivity Audit: 72m centerline, 0 ground holes, SE corner
 // 4. 360-DEGREE MULTI-PITCH & SUB-DEGREE PERIMETER RAYCAST CLOSURE
 // ============================================================================
 
-test('4. 360-Degree Perimeter Raycast Closure: 0 escaping rays across 0.5° sub-degree & [-6°, 0°, +5°, +9°] orbit pitches', () => {
+test('4. 360-Degree Perimeter Raycast Closure: 0 escaping rays across 0.5° sub-degree & [-12°, -6°, 0°, +5°, +9°, +14°] orbit pitches', () => {
   assert.equal(
     AUDIT_CAMERA_STATIONS.length,
     5,
@@ -549,20 +643,20 @@ test('4. 360-Degree Perimeter Raycast Closure: 0 escaping rays across 0.5° sub-
     );
     assert.equal(horizResult.hitCount, 360);
 
-    // R5: High-density 0.5° azimuth x [-6°, 0°, +5°, +9°] multi-pitch orbit audit (2,880 rays/station)
+    // R5: High-density 0.5° azimuth x [-12°, -6°, 0°, +5°, +9°, +14°] multi-pitch orbit audit (4,320 rays/station)
     const multiPitchResult = auditStation360PerimeterClosure(
       station.id,
       station.position,
       COURSE_MASTER_PLAN,
       145,
-      { azimuthStepDeg: 0.5, pitchAnglesDeg: [-6, 0, 5, 9] },
+      { azimuthStepDeg: 0.5, pitchAnglesDeg: [-12, -6, 0, 5, 9, 14] },
     );
     assert.equal(
       multiPitchResult.escapedRays.length,
       0,
       `Station "${station.id}" leaked ${multiPitchResult.escapedRays.length} multi-pitch rays (first: ${JSON.stringify(multiPitchResult.escapedRays[0])})`,
     );
-    assert.equal(multiPitchResult.hitCount, 2880);
+    assert.equal(multiPitchResult.hitCount, 4320);
   }
 
   // Also verify Street Scout elevated canyon peek stays inside corridor and has 100% multi-pitch closure!
@@ -575,13 +669,14 @@ test('4. 360-Degree Perimeter Raycast Closure: 0 escaping rays across 0.5° sub-
     STREET_SCOUT_CAMERA_PRESET.position,
     COURSE_MASTER_PLAN,
     145,
-    { azimuthStepDeg: 0.5, pitchAnglesDeg: [-6, 0, 5, 9] },
+    { azimuthStepDeg: 0.5, pitchAnglesDeg: [-20, -12, -6, 0, 5, 9] },
   );
   assert.equal(
     scoutMultiPitch.escapedRays.length,
     0,
     `Street Scout camera leaked multi-pitch rays: ${JSON.stringify(scoutMultiPitch.escapedRays.slice(0, 5))}`,
   );
+  assert.equal(scoutMultiPitch.hitCount, 4320);
 
   // T9: Default Tee Camera (~z = 32.72) must sit strictly North of subway-portal-south (no spawn inside portal!)
   const subwayPortal = COURSE_MASTER_PLAN.props.find(
@@ -675,6 +770,15 @@ test('5a. Coaxial Multi-Part Builder Invariants: Wheels, Umbrellas, 28° Awnings
     assert.deepEqual(wheel.hub.symmetryAxis, wheel.axleDirection);
     assert.deepEqual(wheel.hubcap.symmetryAxis, wheel.axleDirection);
     assert.deepEqual(wheel.axle.symmetryAxis, wheel.axleDirection);
+    const hubcapAxialCoord =
+      axis === 'x'
+        ? Math.abs(wheel.hubcap.outboardPosition[0])
+        : Math.abs(wheel.hubcap.outboardPosition[2]);
+    const hubcapInnerFace = hubcapAxialCoord - wheel.hubcap.thickness * 0.5;
+    assert.ok(
+      hubcapInnerFace < wheel.hub.width * 0.5 - 0.002,
+      'Hubcap inner face must seat >= 2mm inside hub cylinder endcap (zero coplanar z-fighting)',
+    );
     for (const spoke of wheel.spokes) {
       assert.ok(
         Math.abs(dotVec3(spoke.directionAxis, wheel.axleDirection)) < 1e-9,
@@ -736,6 +840,34 @@ test('5a. Coaxial Multi-Part Builder Invariants: Wheels, Umbrellas, 28° Awnings
     assert.ok(
       Math.abs(radialDist - midRadius) < 1e-6,
       `Arch segment ${seg.index} must be coaxial around archCenter`,
+    );
+  }
+  const frontZ = (p: Vec3Tuple, s: Vec3Tuple) => p[2] + s[2] * 0.5;
+  const rightJambFrontZ = frontZ(arch.rightJamb.position, arch.rightJamb.size);
+  const leftJambFrontZ = frontZ(arch.leftJamb.position, arch.leftJamb.size);
+  const firstSegFrontZ = frontZ(
+    arch.archRingSegments[0].position,
+    arch.archRingSegments[0].size,
+  );
+  const lastSeg = arch.archRingSegments[arch.archRingSegments.length - 1];
+  const lastSegFrontZ = frontZ(lastSeg.position, lastSeg.size);
+  assert.ok(
+    Math.abs(firstSegFrontZ - rightJambFrontZ) >= 0.004 &&
+      Math.abs(lastSegFrontZ - leftJambFrontZ) >= 0.004,
+    'Springline voussoirs and jambs must have rusticated Z-relief (>= 4mm front-plane separation, 0 z-fighting)',
+  );
+  for (let i = 0; i < arch.archRingSegments.length - 1; i++) {
+    const zA = frontZ(
+      arch.archRingSegments[i].position,
+      arch.archRingSegments[i].size,
+    );
+    const zB = frontZ(
+      arch.archRingSegments[i + 1].position,
+      arch.archRingSegments[i + 1].size,
+    );
+    assert.ok(
+      Math.abs(zA - zB) >= 0.004,
+      `Adjacent arch voussoirs ${i} and ${i + 1} share coplanar front Z (${zA.toFixed(4)} vs ${zB.toFixed(4)})`,
     );
   }
 
@@ -831,6 +963,20 @@ test('5b. Strategic Shot Matrix Audit: 28° Hotdog Awning damped rollout <= 2m, 
     distFromCupLanding <= 2.0,
     `Awning bank landing must touch down within 2.0m of Cup (land=${distFromCupLanding.toFixed(2)}m)`,
   );
+  assert.ok(
+    distance2D(landXZ, meta.predictedGreenLandingXZ) <= 0.03,
+    `hotdogAwningMeta.predictedGreenLandingXZ (${meta.predictedGreenLandingXZ}) must match analytical landing (${landXZ.map((n) => n.toFixed(2))})`,
+  );
+
+  const canonicalWedgeStopXZ = simulateGreenRollout(
+    landXZ,
+    [vOut[0], vOut[2]],
+    CLUB_SPECS.wedge.rollDamping,
+  );
+  assert.ok(
+    distance2D(canonicalWedgeStopXZ, meta.predictedStopXZ) <= 0.03,
+    `hotdogAwningMeta.predictedStopXZ (${meta.predictedStopXZ}) must match analytical stop (${canonicalWedgeStopXZ.map((n) => n.toFixed(2))})`,
+  );
 
   for (const damping of [CLUB_SPECS.wedge.rollDamping, getClubProfile('wedge').rollDamping]) {
     const stopXZ = simulateGreenRollout(landXZ, [vOut[0], vOut[2]], damping);
@@ -905,9 +1051,9 @@ test('5b. Strategic Shot Matrix Audit: 28° Hotdog Awning damped rollout <= 2m, 
     `Overhanging tree canopy minZ (${canopyBox.min[2]}) must be >= -6.0m for clean van roof launch headroom`,
   );
 
-  // Trace continuous ball traversal from road (z = -3.4) up ramp -> kicker -> roof deck (z = -10.2)
+  // Trace continuous ball traversal from road (z = -3.4) up ramp -> kicker -> cargo roof launch deck (z = -8.9)
   let prevRampY = 0;
-  for (let z = -3.4; z >= -10.2 - 1e-6; z = Number((z - 0.1).toFixed(2))) {
+  for (let z = -3.4; z >= -8.9 - 1e-6; z = Number((z - 0.1).toFixed(2))) {
     const surfaceY = getVanRampOrRoofElevationAt(2.28, z);
     assert.notEqual(surfaceY, null, `Missing van ramp/roof surface at z=${z}`);
     assert.ok(
@@ -936,6 +1082,37 @@ test('5b. Strategic Shot Matrix Audit: 28° Hotdog Awning damped rollout <= 2m, 
     }
   }
   assert.ok(Math.abs(prevRampY - van.vanRampMeta!.roofDeckTopY) < 1e-4);
+
+  // Verify forward cab roof north of z = -8.92 steps down accurately to visual cab roof (y = 1.82m, 0 invisible 42cm floating box!)
+  assert.equal(
+    getVanRampOrRoofElevationAt(2.28, -9.5),
+    null,
+    'Cargo 2.24m roof launch deck must terminate at cab seam z = -8.92',
+  );
+  const cabColliders = van.solidColliders.filter((c) => c.min[2] < -8.93);
+  assert.equal(cabColliders.length, 1, 'Expected dedicated stepped-down cab collider north of z = -8.92');
+  assert.ok(
+    Math.abs(cabColliders[0].max[1] - 1.82) < 1e-4,
+    `Van cab collider maxY (${cabColliders[0].max[1]}) must match 1.82m visual cab roof`,
+  );
+
+  // Verify course-plan elevation & water-hazard helpers honor passed CourseMasterPlan instances
+  assert.equal(
+    getCourseSurfaceElevationAt(COURSE_MASTER_PLAN, HOLE_1_CUP.position[0], HOLE_1_CUP.position[2]),
+    ELEVATIONS.COURTYARD_GREEN_Y,
+  );
+  const frontFountain = COURSE_MASTER_PLAN.props.find(
+    (p) => p.id === 'fountain-courtyard-front',
+  )!;
+  assert.equal(
+    isWorldPointInWaterHazard(
+      COURSE_MASTER_PLAN,
+      frontFountain.position[0],
+      ELEVATIONS.FOUNTAIN_WATER_Y,
+      frontFountain.position[2],
+    ),
+    true,
+  );
 
   // Cast launch ray along van boostVelocity from roof launch zone to confirm 100% clear sky headroom
   const launchDir = normalizeDir(van.reactive!.boostVelocity!);

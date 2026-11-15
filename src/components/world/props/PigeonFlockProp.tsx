@@ -280,9 +280,8 @@ export function PigeonFlockProp({
               <cylinderGeometry args={[0.0185, 0.0185, 0.056, 5]} />
             </mesh>
 
-            {/* Plump Faceted Grey Body */}
+            {/* Plump Faceted Grey Body (dynamic scatter: castShadow={false} to avoid stale baked shadows) */}
             <mesh
-              castShadow
               position={[0, 0.095, -0.01]}
               scale={[0.82, 0.85, 1.32]}
               material={TOYBOX_MATERIALS.pigeonBody}
@@ -292,7 +291,6 @@ export function PigeonFlockProp({
 
             {/* Iridescent Teal Neck Collar & Berry Chest Highlight */}
             <mesh
-              castShadow
               position={[0, 0.145, 0.048]}
               material={TOYBOX_MATERIALS.pigeonNeck}
             >
@@ -313,7 +311,7 @@ export function PigeonFlockProp({
               }}
               position={[0, 0.178, 0.06]}
             >
-              <mesh castShadow material={TOYBOX_MATERIALS.pigeonBody}>
+              <mesh material={TOYBOX_MATERIALS.pigeonBody}>
                 <dodecahedronGeometry args={[0.036, 0]} />
               </mesh>
               <mesh

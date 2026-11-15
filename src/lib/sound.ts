@@ -65,6 +65,8 @@ function registerActiveVoice(
   stopTime: number,
   sourceNode: AudioScheduledSourceNode,
   cleanup: () => void,
+  stealGain?: GainNode,
+  onSteal?: () => void,
 ): () => void {
   const now = ctx.currentTime;
   for (let i = activeVoices.length - 1; i >= 0; i -= 1) {
@@ -94,11 +96,25 @@ function registerActiveVoice(
     stopTime,
     steal: () => {
       try {
-        sourceNode.stop();
+        if (stealGain) {
+          const tNow = ctx.currentTime;
+          stealGain.gain.cancelScheduledValues(tNow);
+          stealGain.gain.setValueAtTime(
+            Math.max(0.0001, stealGain.gain.value),
+            tNow,
+          );
+          stealGain.gain.exponentialRampToValueAtTime(0.0001, tNow + 0.004);
+          sourceNode.stop(tNow + 0.005);
+        } else {
+          sourceNode.stop();
+        }
+        onSteal?.();
       } catch {
         // Ignore already-stopped nodes
       }
-      finish();
+      if (!stealGain) {
+        finish();
+      }
     },
   });
 
@@ -128,7 +144,7 @@ function resolveVelocityParams(
   referenceSpeedMps: number,
   minIntensity = 0.14,
   maxIntensity = 1.2,
-): { intensity: number; brightness: number; surfaceKey?: string } {
+): { intensity: number; brightness: number; speedNorm: number; surfaceKey?: string } {
   let baseIntensity = defaultIntensity;
   let impactSpeed = impactSpeedArg;
   let surfaceKey: string | undefined;
@@ -154,23 +170,32 @@ function resolveVelocityParams(
   }
 
   if (typeof impactSpeed === 'number' && Number.isFinite(impactSpeed)) {
-    const speedNorm = clamp(Math.abs(impactSpeed) / referenceSpeedMps, 0.08, 1.35);
+    const speedNorm = clamp(Math.abs(impactSpeed) / referenceSpeedMps, 0.06, 1.35);
+    // Perceptual power-law compression: soft micro-taps stay warm & subtle,
+    // while high-speed curb/awning impacts open filter brightness & transient snap.
+    const perceptualGain = Math.pow(speedNorm, 0.72);
+    const perceptualBright = Math.pow(speedNorm, 0.58);
     const hasExplicitIntensity =
       typeof intensityOrOpts === 'number' ||
       (typeof intensityOrOpts === 'object' &&
         intensityOrOpts !== null &&
         typeof intensityOrOpts.intensity === 'number');
-    const speedIntensity = clamp(0.18 + speedNorm * 0.88, minIntensity, maxIntensity);
+    const speedIntensity = clamp(
+      0.14 + perceptualGain * 0.94,
+      minIntensity,
+      maxIntensity,
+    );
     const effectiveIntensity = hasExplicitIntensity
-      ? clamp(baseIntensity * (0.45 + 0.55 * speedNorm), minIntensity, maxIntensity)
+      ? clamp(baseIntensity * (0.36 + 0.64 * perceptualGain), minIntensity, maxIntensity)
       : speedIntensity;
-    const brightness = clamp(0.52 + speedNorm * 0.72, 0.5, 1.4);
-    return { intensity: effectiveIntensity, brightness, surfaceKey };
+    const brightness = clamp(0.46 + perceptualBright * 0.84, 0.45, 1.45);
+    return { intensity: effectiveIntensity, brightness, speedNorm, surfaceKey };
   }
 
   const effectiveIntensity = clamp(baseIntensity, minIntensity, maxIntensity);
-  const brightness = clamp(0.62 + effectiveIntensity * 0.45, 0.55, 1.3);
-  return { intensity: effectiveIntensity, brightness, surfaceKey };
+  const speedNorm = clamp(effectiveIntensity, 0.15, 1.15);
+  const brightness = clamp(0.58 + Math.pow(effectiveIntensity, 0.75) * 0.52, 0.5, 1.35);
+  return { intensity: effectiveIntensity, brightness, speedNorm, surfaceKey };
 }
 
 function getAudioContextConstructor(): typeof AudioContext | null {
@@ -426,17 +451,29 @@ function scheduleTone(
     filter.frequency.setValueAtTime(lowpassHz, startTime);
     osc.connect(filter);
     filter.connect(gain);
-    osc.onended = registerActiveVoice(ctx, startTime + duration + 0.015, osc, () => {
-      osc.disconnect();
-      filter.disconnect();
-      gain.disconnect();
-    });
+    osc.onended = registerActiveVoice(
+      ctx,
+      startTime + duration + 0.015,
+      osc,
+      () => {
+        osc.disconnect();
+        filter.disconnect();
+        gain.disconnect();
+      },
+      gain,
+    );
   } else {
     osc.connect(gain);
-    osc.onended = registerActiveVoice(ctx, startTime + duration + 0.015, osc, () => {
-      osc.disconnect();
-      gain.disconnect();
-    });
+    osc.onended = registerActiveVoice(
+      ctx,
+      startTime + duration + 0.015,
+      osc,
+      () => {
+        osc.disconnect();
+        gain.disconnect();
+      },
+      gain,
+    );
   }
 
   gain.connect(dest);
@@ -509,11 +546,17 @@ function scheduleFilteredNoise(
   filter.connect(gain);
   gain.connect(dest);
 
-  src.onended = registerActiveVoice(ctx, startTime + duration + 0.02, src, () => {
-    src.disconnect();
-    filter.disconnect();
-    gain.disconnect();
-  });
+  src.onended = registerActiveVoice(
+    ctx,
+    startTime + duration + 0.02,
+    src,
+    () => {
+      src.disconnect();
+      filter.disconnect();
+      gain.disconnect();
+    },
+    gain,
+  );
 
   src.start(startTime, offset, duration + 0.02);
 }
@@ -761,33 +804,49 @@ function synthPutterStrike(
 function synthCurbBank(
   ctx: AudioContext,
   out: AudioNode,
+  noise: AudioBuffer,
   t: number,
   intensity: number,
   brightness = 1.0,
+  speedNorm = 0.85,
 ): void {
-  // Crisp granite stone curb clack — velocity-scaled gain, filter cutoff & micro-haptic
+  // Crisp granite stone curb clack — velocity-scaled gain, transient grit & micro-haptic
   if (intensity >= 0.24) {
     triggerHaptic(Math.round(clamp(4 + intensity * 6, 4, 12)), 45);
   }
+  const snapFactor = Math.pow(clamp(speedNorm, 0.1, 1.35), 1.2);
   scheduleTone(ctx, out, {
     type: 'triangle',
     startTime: t,
-    duration: 0.036 + intensity * 0.008,
-    startFreq: 500 + brightness * 90,
+    duration: 0.034 + intensity * 0.008,
+    startFreq: 500 + brightness * 95,
     endFreq: 215 + brightness * 25,
     peakGain: 0.24 * intensity,
-    attack: 0.0015,
-    lowpassHz: clamp(1350 + brightness * 1150, 950, 3400),
+    attack: 0.0012,
+    lowpassHz: clamp(1280 + brightness * 1250, 900, 3600),
   });
   scheduleTone(ctx, out, {
     type: 'sine',
     startTime: t,
-    duration: 0.015,
-    startFreq: 1220 + brightness * 310,
+    duration: 0.014,
+    startFreq: 1220 + brightness * 330,
     endFreq: 590 + brightness * 90,
-    peakGain: 0.11 * intensity * clamp(brightness, 0.45, 1.25),
+    peakGain: 0.11 * intensity * clamp(brightness, 0.42, 1.3),
     attack: 0.001,
   });
+  // 6ms high-mid stone-on-urethane transient micro-click for authentic hard impacts
+  if (snapFactor >= 0.18) {
+    scheduleFilteredNoise(ctx, out, noise, {
+      startTime: t,
+      duration: 0.008,
+      filterType: 'bandpass',
+      startFreq: clamp(1800 + brightness * 950, 1400, 3800),
+      endFreq: 1100,
+      q: 1.9,
+      peakGain: clamp(0.14 * intensity * snapFactor, 0.005, 0.18),
+      attack: 0.001,
+    });
+  }
 }
 
 function synthAwningCushion(
@@ -1004,12 +1063,25 @@ function synthPigeonScatter(
     carrier.connect(env);
     env.connect(out);
 
-    carrier.onended = () => {
-      lfo.disconnect();
-      lfoDepth.disconnect();
-      carrier.disconnect();
-      env.disconnect();
-    };
+    carrier.onended = registerActiveVoice(
+      ctx,
+      sTime + syl.dur + 0.025,
+      carrier,
+      () => {
+        lfo.disconnect();
+        lfoDepth.disconnect();
+        carrier.disconnect();
+        env.disconnect();
+      },
+      env,
+      () => {
+        try {
+          lfo.stop();
+        } catch {
+          // Ignore already-stopped LFO
+        }
+      },
+    );
 
     lfo.start(sTime);
     carrier.start(sTime);
@@ -1162,7 +1234,8 @@ export function playClubStrike(clubId: ClubId, power = 0.75): void {
   if (!canTriggerVoice(`strike:${clubId}`, MIN_VOICE_COOLDOWN_MS)) return;
   const ready = getReadyGraph();
   if (!ready) return;
-  const intensity = clamp(0.35 + power * 0.75, 0.25, 1.15);
+  const shapedPower = Math.pow(clamp(power, 0.04, 1.0), 0.76);
+  const intensity = clamp(0.28 + shapedPower * 0.86, 0.24, 1.18);
   switch (clubId) {
     case 'driver':
       synthDriverStrike(ready.ctx, ready.out, ready.noise, ready.t, intensity);
@@ -1183,7 +1256,7 @@ export function playCurbBank(
   intensityOrOpts: SoundArg = 0.85,
   impactSpeed?: number,
 ): void {
-  const { intensity, brightness, surfaceKey } = resolveVelocityParams(
+  const { intensity, brightness, speedNorm, surfaceKey } = resolveVelocityParams(
     intensityOrOpts,
     impactSpeed,
     0.85,
@@ -1195,7 +1268,15 @@ export function playCurbBank(
   if (!canTriggerVoice(voiceKey, 45)) return;
   const ready = getReadyGraph();
   if (!ready) return;
-  synthCurbBank(ready.ctx, ready.out, ready.t, intensity, brightness);
+  synthCurbBank(
+    ready.ctx,
+    ready.out,
+    ready.noise,
+    ready.t,
+    intensity,
+    brightness,
+    speedNorm,
+  );
 }
 
 export function playAwningCushion(

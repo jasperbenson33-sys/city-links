@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useMemo, useRef } from 'react';
+import React, { useEffect, useMemo, useRef } from 'react';
 import { useFrame } from '@react-three/fiber';
 import * as THREE from 'three';
 import {
@@ -10,6 +10,7 @@ import {
 } from '@/lib/geometryHelpers';
 import { CONFETTI_TOYBOX_MATERIALS, TOYBOX_MATERIALS } from '@/materials';
 import { isQaFreezeActive, resolveAnimTime } from '../qaFreeze';
+import { computeSteamCameraFade } from './propMaterials';
 
 /**
  * Local cached polygon-offset clones (shared TOYBOX materials are never mutated).
@@ -250,6 +251,22 @@ export function HotdogCartProp({
   const bellRef = useRef<THREE.Group>(null);
   const steamGroupRef = useRef<THREE.Group>(null);
   const confettiGroupRef = useRef<THREE.Group>(null);
+  const puffWorldPos = useMemo(() => new THREE.Vector3(), []);
+
+  // Per-puff clones preserve createSoftSteamMaterial Fresnel + <1.65m camera discard hooks.
+  const puffMaterials = useMemo(
+    () =>
+      Array.from({ length: STEAM_COUNT }, () =>
+        TOYBOX_MATERIALS.steamColumnWhite.clone()
+      ),
+    []
+  );
+
+  useEffect(() => {
+    return () => {
+      for (const m of puffMaterials) m.dispose();
+    };
+  }, [puffMaterials]);
 
   const wheelSpec = useMemo(
     () =>
@@ -270,7 +287,7 @@ export function HotdogCartProp({
   const awningSpec = useMemo(
     () =>
       buildPitchedAwningSpec({
-        width: 2.1,
+        width: 1.88,
         slopedDepth: 1.65,
         centerY: 2.15,
         pitchDeg,
@@ -375,18 +392,34 @@ export function HotdogCartProp({
     }
 
     if (steamGroupRef.current) {
+      steamGroupRef.current.updateWorldMatrix(true, false);
+      const groupWorldMatrix = steamGroupRef.current.matrixWorld;
       const children = steamGroupRef.current.children;
       for (let i = 0; i < children.length; i++) {
         const puff = children[i];
+        const mat = puffMaterials[i];
         const phase = (t * 0.65 + i / STEAM_COUNT) % 1.0;
-        const rise = phase * 0.52;
+        const rise = phase * 0.42;
         puff.position.set(
           Math.sin(t * 2.2 + i * 1.3) * 0.12,
-          1.48 + rise,
+          1.5 + rise,
           Math.cos(t * 1.8 + i) * 0.08
         );
-        const s = Math.sin(phase * Math.PI) * 0.072;
-        puff.scale.setScalar(Math.max(0.01, s));
+        const s = Math.sin(phase * Math.PI) * 0.105;
+        puffWorldPos.copy(puff.position).applyMatrix4(groupWorldMatrix);
+        const camDist = state.camera.position.distanceTo(puffWorldPos);
+        const camFade = computeSteamCameraFade(camDist, 1.65, 3.2);
+        const finalOpacity = 0.32 * Math.sin(phase * Math.PI) * camFade;
+
+        if (camDist < 1.65 || s <= 0.008 || finalOpacity <= 0.004) {
+          puff.visible = false;
+          puff.scale.setScalar(0);
+          if (mat) mat.opacity = 0;
+        } else {
+          puff.visible = true;
+          puff.scale.setScalar(s);
+          if (mat) mat.opacity = finalOpacity;
+        }
       }
     }
 
@@ -513,8 +546,8 @@ export function HotdogCartProp({
         <boxGeometry args={[1.42, 0.04, 1.8]} />
       </mesh>
 
-      {/* Side Condiment Shelf (+X) with Ketchup, Mustard & Napkin Dispenser */}
-      <group position={[0.78, 1.14, 0]}>
+      {/* Side Condiment Shelf (+X) with Ketchup, Mustard & Napkin Dispenser (tucked strictly <= +0.82m inside 1.92m bounds) */}
+      <group position={[0.74, 1.14, 0]}>
         <mesh
           castShadow
           receiveShadow
@@ -736,15 +769,15 @@ export function HotdogCartProp({
         </group>
       </group>
 
-      {/* Animated Gentle Warmer Steam Puffs */}
+      {/* Animated Soft Fresnel Warmer Steam Puffs */}
       <group ref={steamGroupRef}>
         {Array.from({ length: STEAM_COUNT }, (_, idx) => (
           <mesh
             key={`steam-${idx}`}
             position={[0, 1.55, 0]}
-            material={TOYBOX_MATERIALS.steamColumnWhite}
+            material={puffMaterials[idx]}
           >
-            <icosahedronGeometry args={[0.9, 0]} />
+            <icosahedronGeometry args={[1, 2]} />
           </mesh>
         ))}
       </group>
@@ -779,10 +812,10 @@ export function HotdogCartProp({
             />
           </mesh>
           <mesh
-            position={[0, 1.25, 0]}
+            position={[0, 1.29, 0]}
             material={TOYBOX_MATERIALS.qaBoundsWireframe}
           >
-            <boxGeometry args={[1.65, 2.5, 2.0]} />
+            <boxGeometry args={[1.92, 2.58, 2.04]} />
           </mesh>
         </group>
       )}

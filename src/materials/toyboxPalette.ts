@@ -3,30 +3,51 @@ import type { BuildingPaletteId } from '@/types';
 import {
   createAsphaltAggregateTexture,
   createCourtyardPaverTexture,
+  createPatioCobblestoneTexture,
   createPuttingGreenStripeTexture,
   createSidewalkFlagstoneTexture,
   createSubwayBrickTexture,
   createTerracottaRoofTexture,
 } from './proceduralTextures';
+import { createSoftSteamMaterial } from './steamMaterial';
+
+function smoothstepRamp(edge0: number, edge1: number, x: number): number {
+  const t = Math.max(0, Math.min(1, (x - edge0) / (edge1 - edge0)));
+  return t * t * (3 - 2 * t);
+}
 
 /**
- * Shared 4-band sunlit toon ramp texture.
- * Using RGBAFormat + NearestFilter gives crisp Coffee-Golf-style plane separation
- * while keeping shadowed faces bright, warm, and legible on mobile GPUs.
+ * Shared 4-band antialiased sunlit toon ramp texture (128x1 LinearFilter).
+ * Preserves crisp Coffee-Golf / Walkabout plane separation across 4 tonal steps while
+ * feathering band terminators over ~3.5% of NdotL so curved silhouettes never stair-step.
  */
 function createSunlitToonGradientMap(): THREE.DataTexture {
-  const stops = [182, 208, 234, 255];
-  const data = new Uint8Array(stops.length * 4);
-  for (let i = 0; i < stops.length; i++) {
-    const v = stops[i];
-    data[i * 4] = v;
-    data[i * 4 + 1] = v;
-    data[i * 4 + 2] = v;
-    data[i * 4 + 3] = 255;
+  const width = 128;
+  const stops = [184, 210, 235, 255];
+  const edges = [0.25, 0.5, 0.75];
+  const feather = 0.022;
+  const data = new Uint8Array(width * 4);
+
+  for (let i = 0; i < width; i++) {
+    const u = i / (width - 1);
+    let val = stops[0];
+    val += (stops[1] - stops[0]) * smoothstepRamp(edges[0] - feather, edges[0] + feather, u);
+    val += (stops[2] - stops[1]) * smoothstepRamp(edges[1] - feather, edges[1] + feather, u);
+    val += (stops[3] - stops[2]) * smoothstepRamp(edges[2] - feather, edges[2] + feather, u);
+    const byteVal = Math.round(val);
+    const idx = i * 4;
+    data[idx] = byteVal;
+    data[idx + 1] = byteVal;
+    data[idx + 2] = byteVal;
+    data[idx + 3] = 255;
   }
-  const tex = new THREE.DataTexture(data, stops.length, 1, THREE.RGBAFormat);
-  tex.minFilter = THREE.NearestFilter;
-  tex.magFilter = THREE.NearestFilter;
+
+  const tex = new THREE.DataTexture(data, width, 1, THREE.RGBAFormat);
+  tex.colorSpace = THREE.NoColorSpace;
+  tex.wrapS = THREE.ClampToEdgeWrapping;
+  tex.wrapT = THREE.ClampToEdgeWrapping;
+  tex.minFilter = THREE.LinearFilter;
+  tex.magFilter = THREE.LinearFilter;
   tex.generateMipmaps = false;
   tex.needsUpdate = true;
   return tex;
@@ -100,6 +121,7 @@ export const VENICE_TEXTURES = {
   asphaltAggregate: createAsphaltAggregateTexture(),
   sidewalkFlagstone: createSidewalkFlagstoneTexture(),
   courtyardPaver: createCourtyardPaverTexture(),
+  patioCobblestone: createPatioCobblestoneTexture(),
   subwayBrick: createSubwayBrickTexture(),
   puttingGreenStripes: createPuttingGreenStripeTexture(),
   terracottaRoof: createTerracottaRoofTexture(),
@@ -118,33 +140,33 @@ export const VENICE_MATERIALS = {
   }),
   asphaltRoadEdgeBase: matteMat('#2D3340', { roughness: 0.92, metalness: 0.03 }),
   crosswalkWhite: matteMat('#F8F4EA', {
-    roughness: 0.72,
+    roughness: 0.76,
     metalness: 0.02,
     polygonOffset: true,
-    polygonOffsetFactor: -1,
-    polygonOffsetUnits: -1,
+    polygonOffsetFactor: -2,
+    polygonOffsetUnits: -2,
   }),
   loadingZoneAmber: matteMat('#F2B233', {
-    roughness: 0.68,
+    roughness: 0.72,
     metalness: 0.03,
     emissive: '#B45309',
     emissiveIntensity: 0.06,
     polygonOffset: true,
-    polygonOffsetFactor: -1,
-    polygonOffsetUnits: -1,
+    polygonOffsetFactor: -2,
+    polygonOffsetUnits: -2,
   }),
   laneLineCream: matteMat('#E7DCC4', {
-    roughness: 0.74,
+    roughness: 0.76,
     metalness: 0.02,
     polygonOffset: true,
-    polygonOffsetFactor: -1,
-    polygonOffsetUnits: -1,
+    polygonOffsetFactor: -2,
+    polygonOffsetUnits: -2,
   }),
   gutterConcreteChannel: matteMat('#545D6B', { roughness: 0.84, metalness: 0.05 }),
   gutterConcreteLip: matteMat('#677180', { roughness: 0.8, metalness: 0.06 }),
   gutterWetWaterSheen: matteMat('#38BDF8', {
-    roughness: 0.08,
-    metalness: 0.24,
+    roughness: 0.28,
+    metalness: 0.12,
     emissive: '#0284C7',
     emissiveIntensity: 0.2,
     transparent: true,
@@ -192,8 +214,8 @@ export const VENICE_MATERIALS = {
     roughness: 0.84,
     metalness: 0.02,
     polygonOffset: true,
-    polygonOffsetFactor: -1,
-    polygonOffsetUnits: -1,
+    polygonOffsetFactor: -2,
+    polygonOffsetUnits: -2,
   }),
   courtyardRampCheek: matteMat('#D7C4A8', {
     roughness: 0.82,
@@ -214,10 +236,10 @@ export const VENICE_MATERIALS = {
     metalness: 0.02,
     flatShading: true,
   }),
-  patioRoughStone: matteMat('#8E7E69', {
-    roughness: 0.92,
+  patioRoughStone: matteMat('#FFFFFF', {
+    map: VENICE_TEXTURES.patioCobblestone,
+    roughness: 0.9,
     metalness: 0.01,
-    flatShading: true,
   }),
   patioRoughMoss: matteMat('#5A8245', {
     roughness: 0.94,
@@ -263,25 +285,27 @@ export const VENICE_MATERIALS = {
   // === Storefronts, Windows, Shutters, Ironwork, Pergola & Flora ===
   storefrontTimber: matteMat('#4B2E20', { roughness: 0.74, metalness: 0.04 }),
   storefrontWarmInterior: matteMat('#FFE5A3', {
-    roughness: 0.34,
-    metalness: 0.05,
+    roughness: 0.36,
+    metalness: 0.04,
     emissive: '#FFAC45',
     emissiveIntensity: 0.62,
   }),
-  windowDarkGlass: matteMat('#233242', {
-    roughness: 0.16,
-    metalness: 0.34,
+  windowDarkGlass: matteMat('#2F4356', {
+    roughness: 0.34,
+    metalness: 0.16,
+    emissive: '#1E3246',
+    emissiveIntensity: 0.12,
   }),
   windowWarmLit: matteMat('#FFE094', {
-    roughness: 0.3,
-    metalness: 0.08,
+    roughness: 0.34,
+    metalness: 0.06,
     emissive: '#FFB347',
     emissiveIntensity: 0.54,
   }),
-  shutterSageDefault: matteMat('#2F6F5E', { roughness: 0.7, metalness: 0.04 }),
-  shutterEspresso: matteMat('#3B2921', { roughness: 0.74, metalness: 0.04 }),
-  wroughtIron: matteMat('#1F242D', { roughness: 0.44, metalness: 0.64 }),
-  copperDrainpipe: matteMat('#7A523B', { roughness: 0.42, metalness: 0.54 }),
+  shutterSageDefault: matteMat('#2F6F5E', { roughness: 0.72, metalness: 0.03 }),
+  shutterEspresso: matteMat('#4A352C', { roughness: 0.76, metalness: 0.03 }),
+  wroughtIron: matteMat('#3D3739', { roughness: 0.56, metalness: 0.18 }),
+  copperDrainpipe: matteMat('#8C5E45', { roughness: 0.48, metalness: 0.24 }),
   pergolaCedar: matteMat('#7A4B2E', { roughness: 0.78, metalness: 0.03 }),
   pergolaVineLeaf: matteMat('#499346', {
     roughness: 0.76,
@@ -303,12 +327,12 @@ export const VENICE_MATERIALS = {
   signagePlaqueInk: matteMat('#3A2920', { roughness: 0.78, metalness: 0.02 }),
 
   // === Overhead Catenary Café String Lights & Distant Horizon ===
-  stringLightCord: matteMat('#1D2129', { roughness: 0.72, metalness: 0.1 }),
+  stringLightCord: matteMat('#4A403A', { roughness: 0.78, metalness: 0.05 }),
   stringLightBulbGlow: new THREE.MeshStandardMaterial({
     color: '#FFF7D6',
     emissive: '#FFBE55',
-    emissiveIntensity: 1.5,
-    roughness: 0.2,
+    emissiveIntensity: 1.45,
+    roughness: 0.44,
     metalness: 0.0,
   }),
   skylineTerracotta: matteMat('#D18A72', { roughness: 0.9, metalness: 0.02 }),
@@ -405,7 +429,7 @@ export const TOYBOX_MATERIALS = {
   tactileAdaPad: toonMat('#F5B82E', { emissive: '#D97706', emissiveIntensity: 0.08 }),
   crosswalkAmber: VENICE_MATERIALS.loadingZoneAmber,
   roadMarkingWhite: VENICE_MATERIALS.crosswalkWhite,
-  stormDrainSteel: matteMat('#475569', { roughness: 0.45, metalness: 0.58 }),
+  stormDrainSteel: matteMat('#5B6778', { roughness: 0.5, metalness: 0.24 }),
   gutterWaterTrickle: VENICE_MATERIALS.gutterWetWaterSheen,
 
   // === Legacy Cutaway Plinth Keys (kept for compatibility) ===
@@ -414,8 +438,8 @@ export const TOYBOX_MATERIALS = {
   plinthWalnutBase: toonMat('#55301C'),
   plinthRimLip: toonMat('#E8D7BE'),
   plinthBrassPlaque: matteMat('#F59E0B', {
-    roughness: 0.28,
-    metalness: 0.72,
+    roughness: 0.38,
+    metalness: 0.32,
     emissive: '#D97706',
     emissiveIntensity: 0.14,
   }),
@@ -433,8 +457,8 @@ export const TOYBOX_MATERIALS = {
   roofSlate: VENICE_MATERIALS.roofMansardSlate,
   windowWarmGlow: VENICE_MATERIALS.windowWarmLit,
   windowSkyGlass: matteMat('#BAE6FD', {
-    roughness: 0.18,
-    metalness: 0.28,
+    roughness: 0.32,
+    metalness: 0.16,
     emissive: '#7DD3FC',
     emissiveIntensity: 0.16,
   }),
@@ -463,25 +487,25 @@ export const TOYBOX_MATERIALS = {
   hotdogBun: toonMat('#EAB308'),
   hotdogSausage: toonMat('#B91C1C'),
   brassAccent: matteMat('#F59E0B', {
-    roughness: 0.26,
-    metalness: 0.74,
+    roughness: 0.38,
+    metalness: 0.32,
     emissive: '#D97706',
     emissiveIntensity: 0.14,
   }),
-  chromeSilver: matteMat('#E2E8F0', { roughness: 0.24, metalness: 0.78 }),
+  chromeSilver: matteMat('#E5ECF4', { roughness: 0.36, metalness: 0.32 }),
   darkIron: VENICE_MATERIALS.wroughtIron,
-  galvanizedSteel: matteMat('#94A3B8', { roughness: 0.36, metalness: 0.62 }),
-  copperAccent: matteMat('#C8784E', { roughness: 0.34, metalness: 0.66 }),
-  tireRubber: toonMat('#1F242D'),
+  galvanizedSteel: matteMat('#9BAAB9', { roughness: 0.46, metalness: 0.26 }),
+  copperAccent: matteMat('#CD8158', { roughness: 0.42, metalness: 0.28 }),
+  tireRubber: toonMat('#2B303B'),
   hubcapCream: toonMat('#F8FAFC'),
 
   // Scaffolding & Subway
-  scaffoldingSteel: matteMat('#64748B', { roughness: 0.42, metalness: 0.58 }),
+  scaffoldingSteel: matteMat('#6E7F94', { roughness: 0.48, metalness: 0.24 }),
   scaffoldingDeckWood: matteMat('#C78D56', { roughness: 0.82, metalness: 0.02 }),
   scaffoldingSafetyAmber: toonMat('#F59E0B'),
-  subwayIronGreen: matteMat('#1E5B45', { roughness: 0.52, metalness: 0.36 }),
+  subwayIronGreen: matteMat('#24664E', { roughness: 0.54, metalness: 0.18 }),
   subwayGlobeGreen: matteMat('#4ADE80', {
-    roughness: 0.22,
+    roughness: 0.28,
     metalness: 0.05,
     emissive: '#22C55E',
     emissiveIntensity: 0.6,
@@ -496,21 +520,22 @@ export const TOYBOX_MATERIALS = {
 
   // Bistro Set
   bistroTableTop: toonMat('#FFFDF7'),
-  bistroCastIron: matteMat('#1F2937', { roughness: 0.46, metalness: 0.55 }),
+  bistroCastIron: matteMat('#3B3F4A', { roughness: 0.56, metalness: 0.2 }),
 
   // Fountain & Water Hazard
   turquoiseWater: matteMat('#2DD4BF', {
-    roughness: 0.14,
-    metalness: 0.14,
+    roughness: 0.26,
+    metalness: 0.1,
     emissive: '#0EA5E9',
     emissiveIntensity: 0.22,
     transparent: true,
     opacity: 0.86,
+    depthWrite: false,
   }),
   turquoiseWaterDeep: toonMat('#0F766E'),
   waterBeadCyan: matteMat('#67E8F9', {
-    roughness: 0.15,
-    metalness: 0.1,
+    roughness: 0.28,
+    metalness: 0.08,
     emissive: '#22D3EE',
     emissiveIntensity: 0.35,
   }),
@@ -518,39 +543,43 @@ export const TOYBOX_MATERIALS = {
     color: '#F0FDFA',
     transparent: true,
     opacity: 0.88,
+    depthWrite: false,
   }),
   lilyPadGreen: toonMat('#34D399'),
   lilyPadDeep: toonMat('#059669'),
   lilyBlossomPink: toonMat('#FB7185', { emissive: '#F43F5E', emissiveIntensity: 0.14 }),
-  steamColumnWhite: matteMat('#FFFFFF', {
-    roughness: 0.9,
-    metalness: 0.0,
-    emissive: '#FFF7ED',
+  steamColumnWhite: createSoftSteamMaterial({
+    color: '#FFFDF9',
+    emissive: '#FFF5E6',
     emissiveIntensity: 0.28,
-    transparent: true,
-    opacity: 0.78,
+    opacity: 0.34,
+    roughness: 0.92,
+    fresnelPower: 1.8,
+    nearFadeStart: 1.65,
+    nearFadeEnd: 3.2,
   }),
 
   // Pigeons
   pigeonBody: matteMat('#94A3B8', { roughness: 0.65, metalness: 0.04, flatShading: true }),
   pigeonWing: matteMat('#64748B', { roughness: 0.65, metalness: 0.04, flatShading: true }),
-  pigeonNeck: matteMat('#5EEAD4', { roughness: 0.38, metalness: 0.25 }),
+  pigeonNeck: matteMat('#5EEAD4', { roughness: 0.38, metalness: 0.2 }),
   pigeonBeakFeet: toonMat('#FB923C'),
 
   // Cups & Flags
   cupHoleDark: new THREE.MeshBasicMaterial({ color: '#0F172A' }),
-  cupRimWhite: matteMat('#FFFFFF', { roughness: 0.35, metalness: 0.05 }),
+  cupRimWhite: matteMat('#FFFFFF', { roughness: 0.36, metalness: 0.05 }),
   cupSunkCheck: matteMat('#FDE047', {
-    roughness: 0.3,
-    metalness: 0.2,
+    roughness: 0.34,
+    metalness: 0.18,
     emissive: '#FACC15',
     emissiveIntensity: 0.45,
   }),
-  flagPoleWhite: matteMat('#FFFDF7', { roughness: 0.28, metalness: 0.16 }),
+  flagPoleWhite: matteMat('#FFFDF7', { roughness: 0.34, metalness: 0.1 }),
   flagSunkGhost: matteMat('#CBD5E1', {
     roughness: 0.55,
     transparent: true,
     opacity: 0.48,
+    depthWrite: false,
     side: THREE.DoubleSide,
   }),
   bulbWarmGlow: VENICE_MATERIALS.stringLightBulbGlow,

@@ -815,8 +815,8 @@ function SingleStringLightSpan({ span }: { span: StringLightSpanSpec }) {
       curvePts.push(p);
     }
     const curve = new THREE.CatmullRomCurve3(curvePts);
-    // Stylized cable: 4.5cm diameter (>= 3.5cm) so it glides during slow orbits instead of aliasing.
-    const tube = new THREE.TubeGeometry(curve, 24, 0.0225, 6, false);
+    // Chunky festive cable: 5.6cm diameter so upper skyline slow pans glide without sub-pixel stair-stepping.
+    const tube = new THREE.TubeGeometry(curve, 24, 0.028, 8, false);
 
     const bulbs: [number, number, number][] = [];
     const count = Math.max(2, span.bulbCount);
@@ -859,7 +859,7 @@ function SingleStringLightSpan({ span }: { span: StringLightSpanSpec }) {
             material={THIN_CORD_MAT}
             castShadow={false}
           >
-            <cylinderGeometry args={[0.02, 0.026, 0.045, 8]} />
+            <cylinderGeometry args={[0.024, 0.032, 0.045, 8]} />
           </mesh>
           <mesh material={VENICE_MATERIALS.stringLightBulbGlow} castShadow={false}>
             <sphereGeometry args={[0.056, 8, 6]} />
@@ -904,13 +904,18 @@ export function SkylineAndHorizonSkirt({
         <SkylineTowerMesh key={b.id} tower={b} />
       ))}
 
-      {/* Far-horizon distant city rooftop silhouettes well outside the [-28..54, -50..57] CAD skyline ring */}
+      {/* Far-horizon distant city rooftop silhouettes sealing N/S/E/W + all 4 diagonal corners */}
       <group name="outer-horizon-infill-silhouettes">
         {[
           { x: 10, z: -64, w: 96, h: 17.5, d: 14, mat: VENICE_MATERIALS.skylineOchre },
           { x: -34, z: 0, w: 14, h: 19.0, d: 104, mat: VENICE_MATERIALS.skylineTerracotta },
           { x: 60, z: -4, w: 14, h: 19.5, d: 104, mat: VENICE_MATERIALS.skylineLimestone },
           { x: 10, z: 64, w: 96, h: 17.0, d: 14, mat: VENICE_MATERIALS.skylineBrick },
+          // NW / NE / SW / SE corner skyline anchors closing diagonal horizon sightlines
+          { x: -34, z: -59, w: 18, h: 18.5, d: 22, mat: VENICE_MATERIALS.skylineBrick },
+          { x: 60, z: -59, w: 18, h: 20.0, d: 22, mat: VENICE_MATERIALS.skylineOchre },
+          { x: -34, z: 59, w: 18, h: 18.0, d: 22, mat: VENICE_MATERIALS.skylineLimestone },
+          { x: 60, z: 57, w: 18, h: 18.5, d: 24, mat: VENICE_MATERIALS.skylineTerracotta },
         ].map((blk, idx) => (
           <group key={`outer-blk-${idx}`} position={[blk.x, -0.05, blk.z]}>
             <mesh position={[0, blk.h * 0.5, 0]} material={blk.mat}>
@@ -1190,8 +1195,8 @@ function SkylineTowerMesh({ tower }: { tower: PerimeterBuildingSpec }) {
               return Array.from({ length: winCols }, (_, cIdx) => {
                 const uOff = (-0.5 + (cIdx + 0.5) / winCols) * (baySpan * 0.72);
                 const winPos: [number, number, number] = frontIsNS
-                  ? [uOff, wy, faceSign * (bayD * 0.5 + 0.04)]
-                  : [faceSign * (bayW * 0.5 + 0.04), wy, uOff];
+                  ? [uOff, wy, faceSign * (bayD * 0.5 + 0.005)]
+                  : [faceSign * (bayW * 0.5 + 0.005), wy, uOff];
                 const isLit = (bIdx + sIdx + cIdx) % 3 === 0;
                 return (
                   <group
@@ -1199,16 +1204,16 @@ function SkylineTowerMesh({ tower }: { tower: PerimeterBuildingSpec }) {
                     position={winPos}
                     rotation={[0, frontIsNS ? (faceSign > 0 ? 0 : Math.PI) : faceSign > 0 ? Math.PI * 0.5 : -Math.PI * 0.5, 0]}
                   >
-                    {/* Limestone architrave surround */}
+                    {/* Limestone architrave surround (seated cleanly into wall face at -0.025) */}
                     <mesh
-                      position={[0, 0, -0.01]}
+                      position={[0, 0, -0.015]}
                       material={VENICE_MATERIALS.stuccoCreamLimestone}
                     >
                       <boxGeometry args={[1.18, 1.82, 0.08]} />
                     </mesh>
                     {/* Projecting stone window sill */}
                     <mesh
-                      position={[0, -0.94, 0.08]}
+                      position={[0, -0.94, 0.06]}
                       material={VENICE_MATERIALS.graniteCurbBevelTop}
                     >
                       <boxGeometry args={[1.34, 0.12, 0.2]} />
@@ -1224,11 +1229,11 @@ function SkylineTowerMesh({ tower }: { tower: PerimeterBuildingSpec }) {
                     >
                       <boxGeometry args={[0.92, 1.54, 0.05]} />
                     </mesh>
-                    {/* Paired Venetian Shutters */}
-                    <mesh position={[-0.72, 0, 0.04]} material={shutterMat}>
+                    {/* Paired Venetian Shutters seated flush against facade */}
+                    <mesh position={[-0.72, 0, 0.005]} material={shutterMat}>
                       <boxGeometry args={[0.38, 1.56, 0.06]} />
                     </mesh>
-                    <mesh position={[0.72, 0, 0.04]} material={shutterMat}>
+                    <mesh position={[0.72, 0, 0.005]} material={shutterMat}>
                       <boxGeometry args={[0.38, 1.56, 0.06]} />
                     </mesh>
                   </group>

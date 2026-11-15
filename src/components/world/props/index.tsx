@@ -85,6 +85,8 @@ export interface PlacedPropRendererProps {
   lastFountainSplashAt?: number;
   lastVanRoofHitAt?: number;
   showWireframe?: boolean;
+  /** QA toggle to force active gusts / scatter previews. */
+  forceAction?: boolean;
   /** When true (QA single-asset stage), keep hydrant puddle at y = 0 datum instead of -0.17m road grade. */
   isStandaloneQA?: boolean;
 }
@@ -118,6 +120,7 @@ export const PlacedPropRenderer = React.memo(function PlacedPropRenderer({
   lastFountainSplashAt = -10,
   lastVanRoofHitAt = -10,
   showWireframe = false,
+  forceAction = false,
   isStandaloneQA = false,
 }: PlacedPropRendererProps) {
   const courseProp = prop as CoursePropSpec;
@@ -161,6 +164,7 @@ export const PlacedPropRenderer = React.memo(function PlacedPropRenderer({
           depth={prop.localSize[2]}
           cycleSeconds={courseProp.steamLiftMeta?.cycleSeconds ?? 3.2}
           gustActiveSeconds={courseProp.steamLiftMeta?.activeSeconds ?? 1.6}
+          forceGust={forceAction}
           showWireframe={showWireframe}
         />
       );
@@ -219,6 +223,7 @@ export const PlacedPropRenderer = React.memo(function PlacedPropRenderer({
           position={pos}
           rotationY={rotY}
           ballPosition={ballPosition}
+          forceScatter={forceAction}
           showWireframe={showWireframe}
         />
       );

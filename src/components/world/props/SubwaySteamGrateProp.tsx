@@ -1,19 +1,22 @@
 'use client';
 
-import React, { useMemo, useRef } from 'react';
+import React, { useEffect, useMemo, useRef } from 'react';
 import { useFrame } from '@react-three/fiber';
 import * as THREE from 'three';
-import { CONFETTI_TOYBOX_MATERIALS, TOYBOX_MATERIALS } from '@/materials';
+import { TOYBOX_MATERIALS } from '@/materials';
 import { useCurbsideStore } from '@/store/useCurbsideStore';
 import { resolveAnimTime } from '../qaFreeze';
-import { PROP_ACCENT_MATERIALS, withPolygonOffset } from './propMaterials';
+import {
+  computeSteamCameraFade,
+  PROP_ACCENT_MATERIALS,
+  withPolygonOffset,
+} from './propMaterials';
 
 // Cached polygonOffset variants (never mutate shared materials).
 const FRAME_MAT = withPolygonOffset(TOYBOX_MATERIALS.darkIron, 1);
 const LOUVER_MAT = withPolygonOffset(TOYBOX_MATERIALS.stormDrainSteel, 2);
 const STIFFENER_MAT = withPolygonOffset(TOYBOX_MATERIALS.darkIron, 2);
 const BOLT_MAT = withPolygonOffset(TOYBOX_MATERIALS.brassAccent, 2);
-const ACCENT_MATS = CONFETTI_TOYBOX_MATERIALS.map((m) => withPolygonOffset(m, 2));
 
 export interface SubwaySteamGratePropProps {
   position?: [number, number, number];
@@ -28,28 +31,13 @@ export interface SubwaySteamGratePropProps {
 }
 
 const STEAM_PUFF_COUNT = 20;
-/**
- * Vertical stack (collar top y = 0.02): amber glow top 0.036 (+0.016) -> frame ring top 0.045 (+0.025)
- * -> louvers top 0.050 -> flat accents at 0.066 (>= 0.016 above everything beneath, constant Y, no wobble).
- */
-const ACCENT_Y = 0.066;
 const GLOW_MAT = withPolygonOffset(TOYBOX_MATERIALS.grateWarmUnder, 1);
-const HORIZONTAL_ACCENTS: Array<{
-  pos: [number, number];
-  yaw: number;
-  size: [number, number];
-}> = [
-  { pos: [-0.74, -0.74], yaw: 0.42, size: [0.09, 0.05] },
-  { pos: [0.74, -0.62], yaw: -0.58, size: [0.08, 0.045] },
-  { pos: [-0.66, 0.64], yaw: 0.88, size: [0.085, 0.045] },
-  { pos: [0.72, 0.74], yaw: -0.35, size: [0.09, 0.05] },
-];
 
 /**
  * Subway Steam Vent Grate seated flush in a concrete utility collar at y = 0.
- * Features recessed warm subterranean glow, slatted steel louver bars, flat horizontal
- * street ticket/leaf accents resting flush on the concrete apron, and a rhythmic
- * animated low-poly steam column synced deterministically to cycleSeconds.
+ * Features recessed warm subterranean glow, slatted steel louver bars, grounded
+ * brass collar anchor bolts, and a rhythmic smooth low-poly steam column synced
+ * deterministically to cycleSeconds.
  */
 export function SubwaySteamGrateProp({
   position = [0, 0, 0],
@@ -62,7 +50,23 @@ export function SubwaySteamGrateProp({
   showWireframe = false,
 }: SubwaySteamGratePropProps) {
   const steamGroupRef = useRef<THREE.Group>(null);
-  const accentsGroupRef = useRef<THREE.Group>(null);
+  const puffWorldPos = useMemo(() => new THREE.Vector3(), []);
+
+  // Clone TOYBOX_MATERIALS.steamColumnWhite per puff so Fresnel feathering + near-camera
+  // shader discard stay active while each puff animates its own lifecycle opacity independently.
+  const puffMaterials = useMemo(
+    () =>
+      Array.from({ length: STEAM_PUFF_COUNT }, () =>
+        TOYBOX_MATERIALS.steamColumnWhite.clone()
+      ),
+    []
+  );
+
+  useEffect(() => {
+    return () => {
+      for (const m of puffMaterials) m.dispose();
+    };
+  }, [puffMaterials]);
 
   const barOffsets = useMemo(() => {
     const count = 9;
@@ -91,44 +95,66 @@ export function SubwaySteamGrateProp({
         : 0;
 
     if (steamGroupRef.current) {
+      steamGroupRef.current.updateWorldMatrix(true, false);
+      const groupWorldMatrix = steamGroupRef.current.matrixWorld;
       const children = steamGroupRef.current.children;
       for (let i = 0; i < children.length; i++) {
         const puff = children[i];
+        const mat = puffMaterials[i];
         const sub = (t * 1.35 + i / STEAM_PUFF_COUNT) % 1.0;
         const colX = ((i % 3) - 1) * (width * 0.22) + Math.sin(t * 3.0 + i) * 0.09;
         const colZ =
           ((Math.floor(i / 3) % 3) - 1) * (depth * 0.22) + Math.cos(t * 2.6 + i) * 0.09;
 
+        let s = 0;
+        let baseAlpha = 0;
         if (puffActive) {
-          const height = sub * 3.05 * (0.45 + 0.55 * puffEnv);
+          // Keep passive cyclic column <= 2.2m high so elevated courtyard pans never clip puffs.
+          const maxRise = forced ? 2.45 : 1.72;
+          const height = sub * maxRise * (0.45 + 0.55 * puffEnv);
           puff.position.set(colX, 0.09 + height, colZ);
-          const s = Math.sin(sub * Math.PI) * (0.24 + 0.24 * puffEnv);
-          puff.scale.setScalar(Math.max(0.015, s));
+          s = Math.sin(sub * Math.PI) * (0.22 + 0.19 * puffEnv);
+          baseAlpha = 0.34 * Math.sin(sub * Math.PI) * (0.55 + 0.45 * puffEnv);
           puff.rotation.set(t * 0.7 + i, t * 0.5, i * 0.4);
-        } else {
+        } else if (i < 6) {
           puff.position.set(colX * 0.65, 0.05 + sub * 0.28, colZ * 0.65);
-          puff.scale.setScalar(
-            i < 6 ? Math.max(0.01, Math.sin(sub * Math.PI) * 0.075) : 0,
-          );
+          s = Math.sin(sub * Math.PI) * 0.09;
+          baseAlpha = 0.22 * Math.sin(sub * Math.PI);
           puff.rotation.set(t * 0.4 + i, t * 0.3, 0);
+        } else {
+          puff.visible = false;
+          puff.scale.setScalar(0);
+          if (mat) mat.opacity = 0;
+          continue;
+        }
+
+        puffWorldPos.copy(puff.position).applyMatrix4(groupWorldMatrix);
+        const camDist = state.camera.position.distanceTo(puffWorldPos);
+        const camFade = computeSteamCameraFade(camDist, 1.65, 3.2);
+        const finalOpacity = baseAlpha * camFade;
+
+        if (camDist < 1.65 || s <= 0.008 || finalOpacity <= 0.004) {
+          puff.visible = false;
+          puff.scale.setScalar(0);
+          if (mat) mat.opacity = 0;
+        } else {
+          puff.visible = true;
+          puff.scale.setScalar(s);
+          if (mat) mat.opacity = finalOpacity;
         }
       }
     }
-
-    // Keep colored ticket/leaf accents strictly flat horizontal on the apron with tiny planar flutter
-    if (accentsGroupRef.current) {
-      const children = accentsGroupRef.current.children;
-      for (let i = 0; i < children.length; i++) {
-        const item = children[i];
-        const base = HORIZONTAL_ACCENTS[i];
-        if (!base) continue;
-        item.rotation.x = -Math.PI * 0.5;
-        item.rotation.z =
-          base.yaw + (puffActive ? Math.sin(t * 18.0 + i * 1.7) * 0.14 : 0);
-        item.position.y = ACCENT_Y;
-      }
-    }
   });
+
+  const cornerBolts = useMemo<[number, number][]>(
+    () => [
+      [-(width * 0.5 - 0.075), -(depth * 0.5 - 0.075)],
+      [width * 0.5 - 0.075, -(depth * 0.5 - 0.075)],
+      [-(width * 0.5 - 0.075), depth * 0.5 - 0.075],
+      [width * 0.5 - 0.075, depth * 0.5 - 0.075],
+    ],
+    [width, depth],
+  );
 
   const innerW = width - 0.22;
   const innerD = depth - 0.22;
@@ -211,42 +237,26 @@ export function SubwaySteamGrateProp({
         </mesh>
       ))}
 
-      {/* Corner Utility Anchor Bolts */}
-      {HORIZONTAL_ACCENTS.map(({ pos: [rx, rz] }, idx) => (
+      {/* Grounded Corner Brass Collar Anchor Bolts Seated Cleanly on Steel Frame */}
+      {cornerBolts.map(([bx, bz], idx) => (
         <mesh
           key={`bolt-${idx}`}
-          position={[rx * 1.08, 0.048, rz * 1.08]}
+          position={[bx, 0.048, bz]}
           material={BOLT_MAT}
         >
-          <cylinderGeometry args={[0.024, 0.024, 0.014, 6]} />
+          <cylinderGeometry args={[0.024, 0.026, 0.014, 6]} />
         </mesh>
       ))}
 
-      {/* Flat Horizontal Ticket / Leaf Accents Flush on Concrete Apron */}
-      <group ref={accentsGroupRef}>
-        {HORIZONTAL_ACCENTS.map(({ pos: [rx, rz], yaw, size }, idx) => (
-          <mesh
-            key={`flat-accent-${idx}`}
-            position={[rx, ACCENT_Y, rz]}
-            rotation={[-Math.PI * 0.5, 0, yaw]}
-            material={
-              ACCENT_MATS[idx % ACCENT_MATS.length]
-            }
-          >
-            <planeGeometry args={[size[0], size[1]]} />
-          </mesh>
-        ))}
-      </group>
-
-      {/* Rhythmic Low-Poly Billowing Steam Column */}
+      {/* Rhythmic Soft Fresnel-Falloff Steam Column (depthWrite: false avoids faceted z-clipping) */}
       <group ref={steamGroupRef}>
         {Array.from({ length: STEAM_PUFF_COUNT }, (_, idx) => (
           <mesh
             key={`steam-${idx}`}
             position={[0, 0.2, 0]}
-            material={TOYBOX_MATERIALS.steamColumnWhite}
+            material={puffMaterials[idx]}
           >
-            <icosahedronGeometry args={[1, 0]} />
+            <icosahedronGeometry args={[1, 2]} />
           </mesh>
         ))}
       </group>

@@ -13,11 +13,14 @@ import {
   ARCHITECTURAL_WALLS,
   AUDIT_CAMERA_STATIONS,
   COURSE_PROPS,
+  HOLE_1_CUP,
   PERIMETER_BUILDINGS,
   STREET_SCOUT_CAMERA_PRESET,
+  getMasterPlanGroundElevationAt,
+  getVanRampOrRoofElevationAt,
 } from '@/config/courseMasterPlan';
 import { intersectRayAABB3D } from '@/lib/geometryHelpers';
-import type { Vec3Tuple } from '@/types';
+import { AUTO_PUTTER_DISTANCE, BALL_RADIUS, type Vec3Tuple } from '@/types';
 import { useCurbsideStore } from '@/store';
 
 export interface CameraRigControl {
@@ -47,24 +50,32 @@ interface MaterialFadeSnapshot {
 interface OccludableEntry {
   object: THREE.Object3D;
   aabb: { min: Vec3Tuple; max: Vec3Tuple };
+  isProp: boolean;
+  isLowProp: boolean;
   enterMarginXZ: number;
   exitMarginXZ: number;
+  nearLensEnterMargin: number;
+  nearLensExitMargin: number;
   snapshots: MaterialFadeSnapshot[];
   currentOpacity: number;
+  lastTargetOpacity: number;
   isFaded: boolean;
   clearHoldSec: number;
   showingFadeMaterial: boolean;
 }
 
-const FADE_MIN_OPACITY = 0.16;
-const OCCLUDE_ENTER_MARGIN_XZ = 0.78;
-const OCCLUDE_EXIT_MARGIN_XZ = 0.98;
-const OCCLUDE_PROP_ENTER_MARGIN_XZ = 0.58;
-const OCCLUDE_PROP_EXIT_MARGIN_XZ = 0.78;
+const FADE_MIN_OPACITY = 0.06;
+const OCCLUDE_ENTER_MARGIN_XZ = 0.55;
+const OCCLUDE_EXIT_MARGIN_XZ = 0.72;
+const OCCLUDE_PROP_ENTER_MARGIN_XZ = 0.18;
+const OCCLUDE_PROP_EXIT_MARGIN_XZ = 0.28;
 const OCCLUDE_HOLD_SECONDS = 0.25;
 const OCCLUDE_OPACITY_SNAP_EPS = 0.002;
-const OCCLUDE_NEAR_LENS_ENTER_MARGIN = 0.75;
-const OCCLUDE_NEAR_LENS_EXIT_MARGIN = 0.95;
+const OCCLUDE_NEAR_LENS_ENTER_MARGIN = 0.65;
+const OCCLUDE_NEAR_LENS_EXIT_MARGIN = 0.85;
+const OCCLUDE_PROP_NEAR_LENS_ENTER = 0.28;
+const OCCLUDE_PROP_NEAR_LENS_EXIT = 0.42;
+const LOW_PROP_HEIGHT_THRESHOLD = 1.55;
 const CAMERA_SNAP_EPS = 1e-4;
 const QA_SLOW_ORBIT_OMEGA = (Math.PI * 2) / 8.0;
 
@@ -151,9 +162,32 @@ function createFadeLeafMaterial(orig: THREE.Material): {
     opacity: number;
     depthWrite: boolean;
   };
-  c.transparent = true;
-  c.depthWrite = true;
+  // Preserve original material blend state & depthWrite and discard via deterministic screen-space
+  // Interleaved Gradient Noise (IGN) so multi-part occluders fade cleanly with zero X-ray stacking or waffle grid.
+  c.transparent = orig.transparent;
+  c.depthWrite = orig.depthWrite;
   c.opacity = orig.opacity;
+  if (!(orig instanceof THREE.ShaderMaterial)) {
+    const prevOnBeforeCompile = orig.onBeforeCompile;
+    const prevCacheKey = orig.customProgramCacheKey?.() ?? '';
+    c.onBeforeCompile = (shader, renderer) => {
+      if (prevOnBeforeCompile) {
+        prevOnBeforeCompile.call(c, shader, renderer);
+      }
+      if (shader.fragmentShader.includes('#include <alphatest_fragment>')) {
+        shader.fragmentShader = shader.fragmentShader.replace(
+          '#include <alphatest_fragment>',
+          `#include <alphatest_fragment>
+if (opacity < 0.998) {
+  float ign = fract(52.9829189 * fract(dot(floor(gl_FragCoord.xy), vec2(0.06711056, 0.00583715))));
+  if (opacity <= ign + 0.001) discard;
+}`,
+        );
+      }
+    };
+    c.customProgramCacheKey = () =>
+      prevCacheKey ? `${prevCacheKey}|curbside-ign-cutaway-v1` : 'curbside-ign-cutaway-v1';
+  }
   c.needsUpdate = true;
   return { clone: c, origOpacity: orig.opacity };
 }
@@ -209,7 +243,11 @@ function applyEntryOpacity(entry: OccludableEntry, nextOpacity: number): void {
         snap.mesh.material = snap.fadeMaterial;
       }
       for (const leaf of snap.fadeLeafMaterials) {
-        leaf.mat.opacity = Math.min(leaf.origOpacity, nextOpacity);
+        // Scale originally transparent sub-meshes (fountain water/droplets) proportionally so they dissolve completely
+        leaf.mat.opacity =
+          leaf.origOpacity < 0.99
+            ? leaf.origOpacity * nextOpacity
+            : nextOpacity;
       }
     } else if (entry.showingFadeMaterial) {
       snap.mesh.material = snap.origMaterial;
@@ -234,22 +272,27 @@ export function CameraRig({
 
   // Smooth cylindrical follow coordinates (prevents chord-wise overhead whip on 90° post-shot turns)
   const smoothedYawRef = useRef(useCurbsideStore.getState().aimYaw);
+  const yawVelRef = useRef(0);
+  const lastManualOrbitSecRef = useRef(-10);
   const smoothedBehindDistRef = useRef(4.7);
   const smoothedEyeHeightRef = useRef(2.08);
   const smoothedForwardDistRef = useRef(4.8);
   const smoothedLookHeightRef = useRef(0.72);
   const smoothedFlightRiseRef = useRef(0);
+  const smoothedWallDistRef = useRef<number | null>(null);
   const shotLaunchYRef = useRef<number | null>(null);
   const pullHoldYawRef = useRef<number | null>(null);
   const scoutBlendRef = useRef(0);
   const slowOrbitElapsedRef = useRef(0);
+  const flightTimerRef = useRef(0);
+  const prevBallPosRef = useRef(new THREE.Vector3(NaN, NaN, NaN));
+  const estimatedBallSpeedRef = useRef(0);
+  const rollBlendAlphaRef = useRef(0);
 
   const occludablesRef = useRef<OccludableEntry[]>([]);
   const knownObjectsRef = useRef<Set<THREE.Object3D>>(new Set());
   const elapsedSecRef = useRef(0);
-  const lastScanSecRef = useRef(-10);
-  const scanCountRef = useRef(0);
-  const lastSceneChildCountRef = useRef(-1);
+  const hasIndexedOccludablesRef = useRef(false);
   const hasWarmedShadersRef = useRef(false);
 
   // Scratch vectors to avoid per-frame allocations
@@ -299,6 +342,7 @@ export function CameraRig({
     if (!controlRef) return;
     controlRef.current = {
       orbitDelta: (deltaYawRad, deltaPitchRad) => {
+        lastManualOrbitSecRef.current = elapsedSecRef.current;
         const s = useCurbsideStore.getState();
         s.setAimYaw(s.aimYaw + deltaYawRad);
         pitchOffsetRef.current = Math.max(
@@ -344,14 +388,20 @@ export function CameraRig({
     };
   }, []);
 
+  // Priority 0 preserves R3F's automatic gl.render() pass while reading after GolfBall
   useFrame((_, rawDelta) => {
     const dt = Math.min(rawDelta, 0.05);
     elapsedSecRef.current += dt;
     const store = useCurbsideStore.getState();
 
-    // Read Rapier-interpolated rendered mesh matrix first; fall back to vector ref / store
+    // Read Rapier-interpolated rendered mesh matrix first; force matrixWorld refresh if needed
     const ballVec = ballVecRef.current;
     if (ballMeshRef?.current) {
+      if (ballMeshRef.current.parent) {
+        ballMeshRef.current.parent.updateMatrixWorld(true);
+      } else {
+        ballMeshRef.current.updateMatrixWorld(true);
+      }
       ballMeshRef.current.getWorldPosition(ballVec);
     } else if (ballWorldPositionRef?.current) {
       ballVec.copy(ballWorldPositionRef.current);
@@ -429,11 +479,89 @@ export function CameraRig({
         pullHoldYawRef.current = null;
       }
 
+      // Compute smooth ground roll-settle yaw anticipation so camera glides toward the pin
+      // while the ball slows below 1.5 m/s rather than staring at a wall until full stop.
+      const cupPos = HOLE_1_CUP.position;
+      const distToPin = Math.hypot(cupPos[0] - bx, cupPos[2] - bz);
+      const stepDist = Number.isNaN(prevBallPosRef.current.x)
+        ? 0
+        : ballVec.distanceTo(prevBallPosRef.current);
+      prevBallPosRef.current.set(bx, by, bz);
+      const instSpeed = dt > 1e-4 ? stepDist / dt : 0;
+
+      if (inFlight && !slowOrbit) {
+        flightTimerRef.current += dt;
+        estimatedBallSpeedRef.current =
+          flightTimerRef.current <= dt * 1.5
+            ? instSpeed
+            : THREE.MathUtils.lerp(
+                estimatedBallSpeedRef.current,
+                instSpeed,
+                1 - Math.exp(-12.0 * dt),
+              );
+        const groundY = getMasterPlanGroundElevationAt(bx, bz);
+        const vanY = getVanRampOrRoofElevationAt(bx, bz);
+        const supportY =
+          vanY !== null && by - BALL_RADIUS >= vanY - 0.12
+            ? Math.max(groundY, vanY)
+            : groundY;
+        const onGroundRoll = by <= supportY + BALL_RADIUS + 0.12;
+        const movedFromSafe =
+          Math.hypot(
+            bx - store.lastSafeBallPosition[0],
+            bz - store.lastSafeBallPosition[2],
+          ) >= 0.65 || distToPin < AUTO_PUTTER_DISTANCE;
+
+        if (
+          flightTimerRef.current > 0.85 &&
+          distToPin < 35 &&
+          distToPin > 0.5 &&
+          onGroundRoll &&
+          movedFromSafe &&
+          estimatedBallSpeedRef.current < 1.5
+        ) {
+          const speedFrac =
+            1 -
+            THREE.MathUtils.clamp(
+              (estimatedBallSpeedRef.current - 0.15) / (1.5 - 0.15),
+              0,
+              1,
+            );
+          const smoothFrac = speedFrac * speedFrac * (3 - 2 * speedFrac);
+          rollBlendAlphaRef.current = THREE.MathUtils.lerp(
+            rollBlendAlphaRef.current,
+            smoothFrac,
+            1 - Math.exp(-3.4 * dt),
+          );
+        } else if (!onGroundRoll || estimatedBallSpeedRef.current > 2.2) {
+          rollBlendAlphaRef.current = THREE.MathUtils.lerp(
+            rollBlendAlphaRef.current,
+            0,
+            1 - Math.exp(-4.0 * dt),
+          );
+        }
+      } else {
+        flightTimerRef.current = 0;
+        estimatedBallSpeedRef.current = 0;
+        rollBlendAlphaRef.current = 0;
+      }
+
+      const yawToCup =
+        distToPin > 0.5
+          ? Math.atan2(cupPos[0] - bx, -(cupPos[2] - bz))
+          : store.aimYaw;
+      const inFlightTargetYaw =
+        inFlight && rollBlendAlphaRef.current > 0.001
+          ? store.aimYaw +
+            shortestAngleDelta(store.aimYaw, yawToCup) *
+              rollBlendAlphaRef.current
+          : store.aimYaw;
+
       // Compute cylindrical/polar follow pose with exponential smoothing
       const targetFollowYaw =
         !slowOrbit && store.shotPhase === 'pulling' && pullHoldYawRef.current !== null
           ? pullHoldYawRef.current
-          : store.aimYaw;
+          : inFlightTargetYaw;
       const baseYaw = slowOrbit
         ? targetFollowYaw +
           (slowOrbitElapsedRef.current += dt) * QA_SLOW_ORBIT_OMEGA
@@ -461,6 +589,8 @@ export function CameraRig({
           fountainHoldPosRef.current = null;
           fountainHoldLookAtRef.current = null;
           smoothedYawRef.current = store.aimYaw;
+          yawVelRef.current = 0;
+          smoothedWallDistRef.current = null;
           smoothedFlightRiseRef.current = 0;
           smoothedBehindDistRef.current = 4.7 * zoomScaleRef.current;
           smoothedEyeHeightRef.current = 2.08 + pitchOffsetRef.current * 1.1;
@@ -469,16 +599,32 @@ export function CameraRig({
           instantSnap = true;
         }
 
-        const yawRate = 7.5;
-        const yawAlpha = slowOrbit ? 1 : 1 - Math.exp(-yawRate * dt);
-        const poseAlpha = 1 - Math.exp(-8.5 * dt);
-        const riseAlpha = 1 - Math.exp(-4.5 * dt);
+        const poseAlpha = 1 - Math.exp(-9.5 * dt);
+        const riseAlpha = 1 - Math.exp(-5.0 * dt);
 
-        const dYaw = shortestAngleDelta(smoothedYawRef.current, baseYaw);
-        smoothedYawRef.current =
-          Math.abs(dYaw) < 1e-5
-            ? baseYaw
-            : smoothedYawRef.current + dYaw * yawAlpha;
+        if (slowOrbit) {
+          smoothedYawRef.current = baseYaw;
+          yawVelRef.current = 0;
+        } else {
+          // Critically damped yaw spring eliminates initial angular-velocity whip on 90°-120° post-shot turns
+          // while staying snappy during manual touch/mouse orbiting.
+          const errYaw = shortestAngleDelta(baseYaw, smoothedYawRef.current);
+          if (
+            Math.abs(errYaw) < 1e-5 &&
+            Math.abs(yawVelRef.current) < 1e-4
+          ) {
+            smoothedYawRef.current = baseYaw;
+            yawVelRef.current = 0;
+          } else {
+            const isManualOrbitActive =
+              elapsedSecRef.current - lastManualOrbitSecRef.current < 0.28;
+            const omega = isManualOrbitActive ? 22.0 : 5.4;
+            const temp = (yawVelRef.current + omega * errYaw) * dt;
+            const decay = Math.exp(-omega * dt);
+            yawVelRef.current = (yawVelRef.current - omega * temp) * decay;
+            smoothedYawRef.current = baseYaw + (errYaw + temp) * decay;
+          }
+        }
 
         const launchY = shotLaunchYRef.current ?? by;
         const apexLift = Math.max(0, by - launchY);
@@ -550,18 +696,34 @@ export function CameraRig({
         const vecLen = Math.hypot(vecX, vecY, vecZ);
         if (vecLen > 1.2) {
           const rayDir: Vec3Tuple = [vecX / vecLen, vecY / vecLen, vecZ / vecLen];
-          let clampedDist = vecLen;
+          let targetDist = vecLen;
           for (const wallBox of solidWallAabbs) {
             const hit = intersectRayAABB3D(rayStart, rayDir, wallBox, vecLen);
-            if (hit.hit && hit.tMin > 0.25 && hit.tMin < clampedDist) {
-              clampedDist = Math.max(1.2, hit.tMin);
+            if (hit.hit && hit.tMin > 0.25 && hit.tMin < targetDist) {
+              targetDist = Math.max(1.2, hit.tMin);
             }
           }
-          if (clampedDist < vecLen) {
-            camX = rayStart[0] + rayDir[0] * clampedDist;
-            camY = rayStart[1] + rayDir[1] * clampedDist;
-            camZ = rayStart[2] + rayDir[2] * clampedDist;
+          if (smoothedWallDistRef.current === null || slowOrbit) {
+            smoothedWallDistRef.current = targetDist;
+          } else if (Math.abs(targetDist - smoothedWallDistRef.current) < CAMERA_SNAP_EPS) {
+            smoothedWallDistRef.current = targetDist;
+          } else {
+            // Pull inward briskly to avoid grazing geometry; extend back out smoothly
+            const clampRate = targetDist < smoothedWallDistRef.current ? 18.0 : 8.5;
+            smoothedWallDistRef.current = THREE.MathUtils.lerp(
+              smoothedWallDistRef.current,
+              targetDist,
+              1 - Math.exp(-clampRate * dt),
+            );
           }
+          const appliedDist = Math.min(vecLen, smoothedWallDistRef.current);
+          if (appliedDist < vecLen - CAMERA_SNAP_EPS) {
+            camX = rayStart[0] + rayDir[0] * appliedDist;
+            camY = rayStart[1] + rayDir[1] * appliedDist;
+            camZ = rayStart[2] + rayDir[2] * appliedDist;
+          }
+        } else {
+          smoothedWallDistRef.current = vecLen;
         }
 
         followPosRef.current.set(camX, camY, camZ);
@@ -623,7 +785,10 @@ export function CameraRig({
         perspCam.updateProjectionMatrix();
       }
     } else {
-      const followRate = store.isStreetScoutActive ? 7.5 : 10.5;
+      // Single-stage follow tracks interpolated ball coordinates immediately without double Cartesian lag,
+      // while Street Scout transitions ease smoothly.
+      const followRate =
+        store.isStreetScoutActive || scoutBlendRef.current > 0.001 ? 9.0 : 48.0;
       const alpha = 1 - Math.exp(-followRate * dt);
 
       const posDist = currentPosRef.current.distanceTo(desiredPosRef.current);
@@ -660,23 +825,15 @@ export function CameraRig({
             perspCam.updateProjectionMatrix();
           }
         } else {
-          perspCam.fov = THREE.MathUtils.lerp(perspCam.fov, desiredFov, alpha);
+          perspCam.fov = THREE.MathUtils.lerp(perspCam.fov, desiredFov, Math.min(1, 1 - Math.exp(-10.5 * dt)));
           perspCam.updateProjectionMatrix();
         }
       }
     }
 
     // 2. Discover occludable buildings, delivery van & tall/hedge props ONCE after mount,
-    // pre-cloning & pre-compiling transparent fade shaders upfront so mid-orbit fades have 0 frame hitch.
-    // Stop re-traversing scene once occludables are populated unless scene.children changes.
-    const sceneChildrenChanged =
-      scene.children.length !== lastSceneChildCountRef.current;
-    const needsInitialRetry = occludablesRef.current.length === 0;
-
-    if (sceneChildrenChanged || needsInitialRetry) {
-      lastSceneChildCountRef.current = scene.children.length;
-      lastScanSecRef.current = elapsedSecRef.current;
-      scanCountRef.current += 1;
+    // completely decoupled from scene.children.length so shot guide visibility changes never hitch.
+    if (!hasIndexedOccludablesRef.current) {
       const known = knownObjectsRef.current;
       const newlyAdded: OccludableEntry[] = [];
 
@@ -689,17 +846,28 @@ export function CameraRig({
           known.add(obj);
           const aabb = resolveObjectAabb(obj);
           if (aabb) {
+            const heightY = aabb.max[1] - aabb.min[1];
+            const isLowProp = isProp && heightY < LOW_PROP_HEIGHT_THRESHOLD;
             const entry: OccludableEntry = {
               object: obj,
               aabb,
+              isProp,
+              isLowProp,
               enterMarginXZ: isProp
                 ? OCCLUDE_PROP_ENTER_MARGIN_XZ
                 : OCCLUDE_ENTER_MARGIN_XZ,
               exitMarginXZ: isProp
                 ? OCCLUDE_PROP_EXIT_MARGIN_XZ
                 : OCCLUDE_EXIT_MARGIN_XZ,
+              nearLensEnterMargin: isProp
+                ? OCCLUDE_PROP_NEAR_LENS_ENTER
+                : OCCLUDE_NEAR_LENS_ENTER_MARGIN,
+              nearLensExitMargin: isProp
+                ? OCCLUDE_PROP_NEAR_LENS_EXIT
+                : OCCLUDE_NEAR_LENS_EXIT_MARGIN,
               snapshots: cloneMaterialsForOcclusion(obj),
               currentOpacity: 1.0,
+              lastTargetOpacity: FADE_MIN_OPACITY,
               isFaded: false,
               clearHoldSec: 0,
               showingFadeMaterial: false,
@@ -710,8 +878,12 @@ export function CameraRig({
         }
       });
 
-      // Pre-warm shaders & transparent fade variants once on discovery so idle/orbit never hitches
-      if (newlyAdded.length > 0 || !hasWarmedShadersRef.current) {
+      if (occludablesRef.current.length > 0) {
+        hasIndexedOccludablesRef.current = true;
+      }
+
+      // Pre-warm cutaway shaders once on startup discovery so mid-orbit fades compile in 0ms
+      if (newlyAdded.length > 0 && !hasWarmedShadersRef.current) {
         hasWarmedShadersRef.current = true;
         for (const entry of newlyAdded) {
           for (const snap of entry.snapshots) {
@@ -731,7 +903,7 @@ export function CameraRig({
       }
     }
 
-    // 3. Per-frame smooth foreground occlusion fade with spatial + temporal hysteresis
+    // 3. Per-frame smooth foreground occlusion cutaway with spatial + temporal hysteresis
     const camOrigin: Vec3Tuple = [
       camera.position.x,
       camera.position.y,
@@ -757,32 +929,39 @@ export function CameraRig({
 
       for (const entry of occludablesRef.current) {
         let hitNow = false;
+        let hitDist = rayMaxDist;
         if (!disableFade) {
           const marginXZ = entry.isFaded
             ? entry.exitMarginXZ
             : entry.enterMarginXZ;
           const nearLensMargin = entry.isFaded
-            ? Math.max(marginXZ, OCCLUDE_NEAR_LENS_EXIT_MARGIN)
-            : Math.max(marginXZ, OCCLUDE_NEAR_LENS_ENTER_MARGIN);
+            ? Math.max(marginXZ, entry.nearLensExitMargin)
+            : Math.max(marginXZ, entry.nearLensEnterMargin);
+          const padBottom = entry.isLowProp ? 0.05 : entry.isProp ? 0.15 : 0.4;
+          const padTop = entry.isLowProp ? 0.06 : entry.isProp ? 0.28 : 0.75;
+          // Skip omnidirectional near-lens trigger on low props (< 1.55m) so flanking waist-high
+          // props only fade when the camera->ball sightline ray genuinely intersects them.
           const nearOrInsideLens =
+            !entry.isLowProp &&
             camOrigin[0] >= entry.aabb.min[0] - nearLensMargin &&
             camOrigin[0] <= entry.aabb.max[0] + nearLensMargin &&
-            camOrigin[1] >= entry.aabb.min[1] - 0.5 &&
-            camOrigin[1] <= entry.aabb.max[1] + 0.85 &&
+            camOrigin[1] >= entry.aabb.min[1] - 0.2 &&
+            camOrigin[1] <= entry.aabb.max[1] + padTop &&
             camOrigin[2] >= entry.aabb.min[2] - nearLensMargin &&
             camOrigin[2] <= entry.aabb.max[2] + nearLensMargin;
           if (nearOrInsideLens) {
             hitNow = true;
+            hitDist = 0;
           } else {
             const expandedAabb = {
               min: [
                 entry.aabb.min[0] - marginXZ,
-                entry.aabb.min[1] - 0.4,
+                entry.aabb.min[1] - padBottom,
                 entry.aabb.min[2] - marginXZ,
               ] as Vec3Tuple,
               max: [
                 entry.aabb.max[0] + marginXZ,
-                entry.aabb.max[1] + 0.8,
+                entry.aabb.max[1] + padTop,
                 entry.aabb.max[2] + marginXZ,
               ] as Vec3Tuple,
             };
@@ -794,6 +973,7 @@ export function CameraRig({
             );
             if (hit.hit && hit.tMin <= rayMaxDist) {
               hitNow = true;
+              hitDist = Math.max(0, hit.tMin);
             }
           }
         }
@@ -801,6 +981,13 @@ export function CameraRig({
         if (hitNow) {
           entry.isFaded = true;
           entry.clearHoldSec = 0;
+          // Ramp near-lens foreground obstructions (< 1.9m) smoothly down to 0.00 so nothing ghosts over the lens
+          const lensFactor = THREE.MathUtils.clamp(
+            (hitDist - 0.85) / 1.05,
+            0,
+            1,
+          );
+          entry.lastTargetOpacity = FADE_MIN_OPACITY * lensFactor;
         } else if (entry.isFaded) {
           entry.clearHoldSec += dt;
           if (entry.clearHoldSec >= OCCLUDE_HOLD_SECONDS) {
@@ -809,7 +996,7 @@ export function CameraRig({
           }
         }
 
-        const targetOpacity = entry.isFaded ? FADE_MIN_OPACITY : 1.0;
+        const targetOpacity = entry.isFaded ? entry.lastTargetOpacity : 1.0;
         const diff = Math.abs(entry.currentOpacity - targetOpacity);
         if (diff > OCCLUDE_OPACITY_SNAP_EPS) {
           const alpha = 1 - Math.exp(-10 * dt);

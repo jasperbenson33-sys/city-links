@@ -20,7 +20,6 @@ import {
 } from '@react-three/rapier';
 import {
   BALL_RADIUS,
-  CUP_RADIUS,
   WORLD_GRAVITY_Y,
   type Vec3Tuple,
 } from '@/types';
@@ -52,10 +51,10 @@ export interface GolfBallProps {
   ballMeshRef?: RefObject<THREE.Object3D | null>;
 }
 
-const REST_SPEED_THRESHOLD_MPS = 0.025;
-const REST_HYSTERESIS_SECONDS = 0.25;
-const COULOMB_CREEP_STOP_SPEED_MPS = 0.30;
-const COULOMB_CREEP_DECEL_MPS2 = 1.05;
+const REST_SPEED_THRESHOLD_MPS = 0.035;
+const REST_HYSTERESIS_SECONDS = 0.16;
+const COULOMB_CREEP_STOP_SPEED_MPS = 0.32;
+const COULOMB_CREEP_DECEL_MPS2 = 1.35;
 const CUP_DROP_TWEEN_SECONDS = 0.15;
 
 // Memoized static prop descriptors so 120Hz physics steps do zero per-step array scans
@@ -84,6 +83,8 @@ export function GolfBall({
   const localBallMeshRef = useRef<THREE.Mesh | null>(null);
   const shadowRef = useRef<THREE.Mesh | null>(null);
   const scratchWorldVecRef = useRef(new THREE.Vector3());
+  const scratchShadowNormalRef = useRef(new THREE.Vector3());
+  const scratchDefaultUpRef = useRef(new THREE.Vector3(0, 0, 1));
 
   const lastShotSeqRef = useRef(0);
   const lastTeleportSeqRef = useRef(0);
@@ -445,27 +446,57 @@ export function GolfBall({
 
     // 3. Hole 1 recessed Cup capture & realistic high-speed lip-out check
     const cupPos = HOLE_1_CUP.position;
+    const cupRadius = COURSE_MASTER_PLAN.cup.cupRadius;
+    const cupDepth = COURSE_MASTER_PLAN.cup.cupDepth;
     const dxCup = pos.x - cupPos[0];
     const dzCup = pos.z - cupPos[2];
     const distToCupXZ = Math.hypot(dxCup, dzCup);
     const horizSpeed = Math.hypot(vx, vz);
 
     if (
-      distToCupXZ <= CUP_RADIUS &&
+      distToCupXZ <= cupRadius &&
       pos.y <= cupPos[1] + BALL_RADIUS + 0.14 &&
-      pos.y >= cupPos[1] - 0.18
+      pos.y >= cupPos[1] - Math.max(0.22, cupDepth)
     ) {
       const genuinelyDroppedInWell =
         pos.y <= cupPos[1] + 0.085 && horizSpeed <= 4.35 && Math.abs(vy) <= 2.4;
       const slowEdgeDrop =
-        distToCupXZ <= CUP_RADIUS * 0.72 &&
+        distToCupXZ <= cupRadius * 0.72 &&
         horizSpeed < 1.25 &&
         pos.y <= cupPos[1] + BALL_RADIUS + 0.03;
 
       if (lipOutCooldownRef.current <= 0 && (genuinelyDroppedInWell || slowEdgeDrop)) {
         const capturedPos: Vec3Tuple = [pos.x, pos.y, pos.z];
-        const cuppedPos: Vec3Tuple = [cupPos[0], cupPos[1] - 0.08, cupPos[2]];
-        // Decouple physics so cupBottomCollider (top ~0.64m for ball center) cannot fight the 0.52m resting depth.
+        // Seat holed ball inside the cup pocket along entry vector cleanly clear of <=0.020m center pin & liner wall
+        const entryLen = Math.hypot(dxCup, dzCup);
+        let radDirX = entryLen > 1e-4 ? dxCup / entryLen : -vx;
+        let radDirZ = entryLen > 1e-4 ? dzCup / entryLen : -vz;
+        const radDirLen = Math.hypot(radDirX, radDirZ);
+        if (radDirLen > 1e-4) {
+          radDirX /= radDirLen;
+          radDirZ /= radDirLen;
+        } else {
+          radDirX = -1;
+          radDirZ = 0;
+        }
+        const seatOffset =
+          cupRadius >= 0.405
+            ? 0.205
+            : Math.max(0.185, cupRadius - BALL_RADIUS - 0.015);
+        const seatDrop =
+          cupDepth >= 0.35 ? 0.2 : Math.min(0.08, cupDepth * 0.55);
+        // Rotate ~0.85 rad (~49°) off entry axis so holed ball sits clearly beside 2D pin shaft silhouette
+        const pocketRot = 0.85;
+        const pocketCos = Math.cos(pocketRot);
+        const pocketSin = Math.sin(pocketRot);
+        const pocketDirX = radDirX * pocketCos - radDirZ * pocketSin;
+        const pocketDirZ = radDirX * pocketSin + radDirZ * pocketCos;
+        const cuppedPos: Vec3Tuple = [
+          cupPos[0] + pocketDirX * seatOffset,
+          cupPos[1] - seatDrop,
+          cupPos[2] + pocketDirZ * seatOffset,
+        ];
+        // Decouple physics so cupBottomCollider cannot fight resting well depth
         lockBodyAtRest(rb, cuppedPos[0], cuppedPos[1], cuppedPos[2]);
         rb.setEnabled(false);
         if (!isQaFreezeActive()) {
@@ -478,6 +509,7 @@ export function GolfBall({
           syncVisualTransform(capturedPos[0], capturedPos[1], capturedPos[2]);
         } else {
           cupDropTweenRef.current = null;
+          syncVisualTransform(cuppedPos[0], cuppedPos[1], cuppedPos[2]);
         }
         store.sinkHole();
         return;
@@ -709,9 +741,10 @@ export function GolfBall({
     vy = nextV[1];
     vz = nextV[2];
 
-    // Smooth final rolling arrest so exponential roll damping doesn't creep for seconds below 0.30 m/s
+    // Smooth final rolling arrest so exponential roll damping doesn't creep on flat ground or elevated props
     const isPhysicallySupported = pos.y <= expectedSupportY + BALL_RADIUS + 0.08;
-    if (isPhysicallySupported && !airborne && !gutterEval.inCornerBoostZone) {
+    const isVerticallySettled = Math.abs(vy) < 0.08 && !airborne;
+    if ((isPhysicallySupported || isVerticallySettled) && !airborne && !gutterEval.inCornerBoostZone) {
       const hSpeed = Math.hypot(vx, vz);
       if (hSpeed > 0 && hSpeed < COULOMB_CREEP_STOP_SPEED_MPS) {
         const drop = Math.min(hSpeed, COULOMB_CREEP_DECEL_MPS2 * dt);
@@ -731,11 +764,12 @@ export function GolfBall({
       store.updateBallTelemetry([pos.x, pos.y, pos.z], surfaceTag);
     }
 
-    // 9. Strict grounded rest-hysteresis clamp (linearSpeed < 0.025 m/s continuously for 0.25s)
+    // 9. Strict grounded & obstacle-top rest-hysteresis clamp (linearSpeed < threshold for 0.16s)
     const linearSpeed = Math.hypot(vx, vy, vz);
+    const hasSupportForRest = isPhysicallySupported || Math.abs(vy) < 0.08;
     if (
       flightElapsedRef.current > 0.25 &&
-      isPhysicallySupported &&
+      hasSupportForRest &&
       linearSpeed < REST_SPEED_THRESHOLD_MPS &&
       !gutterEval.inCornerBoostZone
     ) {
@@ -744,13 +778,18 @@ export function GolfBall({
       lowSpeedTimeRef.current = 0;
     }
 
+    const canTriggerTimeoutRest =
+      flightElapsedRef.current >= 12.0 &&
+      (isPhysicallySupported || Math.abs(vy) < 0.25);
+
     if (
-      isPhysicallySupported &&
-      (lowSpeedTimeRef.current >= REST_HYSTERESIS_SECONDS ||
-        flightElapsedRef.current >= 12.0)
+      (hasSupportForRest && lowSpeedTimeRef.current >= REST_HYSTERESIS_SECONDS) ||
+      canTriggerTimeoutRest
     ) {
-      // Avoid 1-frame upward pop if resting slightly inside collider contact skin
-      const restY = Math.max(expectedSupportY + BALL_RADIUS - 0.002, pos.y);
+      // Preserve true elevation atop benches/planters/cab while preventing upward pop on mapped ground
+      const restY = isPhysicallySupported
+        ? Math.max(expectedSupportY + BALL_RADIUS - 0.002, pos.y)
+        : pos.y;
       lowSpeedTimeRef.current = 0;
       lockBodyAtRest(rb, pos.x, restY, pos.z);
       store.markBallResting([pos.x, restY, pos.z]);
@@ -813,9 +852,14 @@ export function GolfBall({
       }
     }
 
-    // Read Rapier-interpolated rendered mesh matrix so shadow & camera match rendered sphere identically
+    // Refresh RigidBody group matrixWorld after priority -1 Rapier interpolation before reading worldVec
     const worldVec = scratchWorldVecRef.current;
     if (localBallMeshRef.current) {
+      if (localBallMeshRef.current.parent) {
+        localBallMeshRef.current.parent.updateMatrixWorld(true);
+      } else {
+        localBallMeshRef.current.updateMatrixWorld(true);
+      }
       localBallMeshRef.current.getWorldPosition(worldVec);
     } else if (rb) {
       const t = rb.translation();
@@ -829,14 +873,58 @@ export function GolfBall({
     }
 
     if (shadowRef.current) {
-      const gY = getMasterPlanGroundElevationAt(worldVec.x, worldVec.z);
-      const heightAbove = Math.max(0, worldVec.y - BALL_RADIUS - gY);
-      const scale = Math.max(0.45, 1.0 - heightAbove * 0.08);
-      // 0.022m clears raised green (+0.018m), curbs (+0.019m), and decals (+0.015m)
-      shadowRef.current.position.set(worldVec.x, gY + 0.022, worldVec.z);
-      shadowRef.current.scale.set(scale, scale, 1);
-      const mat = shadowRef.current.material as THREE.MeshBasicMaterial;
-      mat.opacity = Math.max(0.12, 0.34 - heightAbove * 0.035);
+      const cupPos = HOLE_1_CUP.position;
+      const cupRadius = COURSE_MASTER_PLAN.cup.cupRadius;
+      const distToCupXZ = Math.hypot(
+        worldVec.x - cupPos[0],
+        worldVec.z - cupPos[2],
+      );
+      const hideShadowInCup =
+        store.shotPhase === 'holed_out' ||
+        (distToCupXZ < cupRadius - 0.04 &&
+          worldVec.y < cupPos[1] + BALL_RADIUS - 0.03);
+
+      if (hideShadowInCup) {
+        shadowRef.current.visible = false;
+      } else {
+        shadowRef.current.visible = true;
+        const ballBottomY = worldVec.y - BALL_RADIUS;
+        const sampleSurf = (sx: number, sz: number): number => {
+          const sg = getMasterPlanGroundElevationAt(sx, sz);
+          const sv = getVanRampOrRoofElevationAt(sx, sz);
+          return sv !== null && ballBottomY >= sv - 0.12 ? Math.max(sg, sv) : sg;
+        };
+        const gY = sampleSurf(worldVec.x, worldVec.z);
+        const eps = 0.14;
+        const slopeX =
+          (sampleSurf(worldVec.x + eps, worldVec.z) -
+            sampleSurf(worldVec.x - eps, worldVec.z)) /
+          (2 * eps);
+        const slopeZ =
+          (sampleSurf(worldVec.x, worldVec.z + eps) -
+            sampleSurf(worldVec.x, worldVec.z - eps)) /
+          (2 * eps);
+        const slopeMag = Math.hypot(slopeX, slopeZ);
+        const heightAbove = Math.max(0, ballBottomY - gY);
+        const scale = Math.max(0.45, 1.0 - heightAbove * 0.08);
+        // 0.022m clears raised green/curbs/decals; extra gradient margin avoids uphill ramp clipping
+        const clearance = 0.022 + Math.min(0.018, slopeMag * 0.025);
+        shadowRef.current.position.set(worldVec.x, gY + clearance, worldVec.z);
+        if (slopeMag > 0.02 && slopeMag < 0.48) {
+          const normal = scratchShadowNormalRef.current
+            .set(-slopeX, 1, -slopeZ)
+            .normalize();
+          shadowRef.current.quaternion.setFromUnitVectors(
+            scratchDefaultUpRef.current,
+            normal,
+          );
+        } else {
+          shadowRef.current.rotation.set(-Math.PI / 2, 0, 0);
+        }
+        shadowRef.current.scale.set(scale, scale, 1);
+        const mat = shadowRef.current.material as THREE.MeshBasicMaterial;
+        mat.opacity = Math.max(0.12, 0.34 - heightAbove * 0.035);
+      }
     }
   });
 

@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useMemo, useRef } from 'react';
+import React, { useEffect, useMemo, useRef } from 'react';
 import { useFrame } from '@react-three/fiber';
 import * as THREE from 'three';
 import { buildCoaxialHydrantSpec } from '@/lib/geometryHelpers';
@@ -94,6 +94,12 @@ export function FireHydrantJetProp({
       impactCenter: [endX, gutterDropY + 0.012, endZ] as [number, number, number],
     };
   }, [spec, jetRangeMeters, gutterDropY, streamOffsetX]);
+
+  useEffect(() => {
+    return () => {
+      arcTubeGeo.dispose();
+    };
+  }, [arcTubeGeo]);
 
   const burstSpecs = useMemo(() => {
     return Array.from({ length: BURST_DROP_COUNT }, (_, i) => {
@@ -302,7 +308,7 @@ export function FireHydrantJetProp({
                 : TOYBOX_MATERIALS.waterBeadCyan
             }
           >
-            <icosahedronGeometry args={[1, 0]} />
+            <icosahedronGeometry args={[1, 1]} />
           </mesh>
         ))}
       </group>
@@ -341,7 +347,7 @@ export function FireHydrantJetProp({
                 : TOYBOX_MATERIALS.waterFoamWhite
             }
           >
-            <icosahedronGeometry args={[1, 0]} />
+            <icosahedronGeometry args={[1, 1]} />
           </mesh>
         ))}
       </group>

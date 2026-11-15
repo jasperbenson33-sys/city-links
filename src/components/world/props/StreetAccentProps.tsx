@@ -41,7 +41,6 @@ export function StreetBollardProp({
       name="street-bollard-prop"
       position={position}
       rotation={[0, rotationY, 0]}
-      userData={{ occludableProp: true }}
     >
       <mesh
         castShadow

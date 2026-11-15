@@ -18,9 +18,9 @@ export interface CupFlagAssemblyProps {
   color: ToyboxFlagColor;
   /** Whether this flag has already been sunk in the current hole. */
   isSunk?: boolean;
-  /** Regulation cup visual radius (meters, 0.38m in Curbside Links). */
+  /** Regulation cup visual radius (meters, 0.42m in Curbside Links). */
   cupRadius?: number;
-  /** Recessed cup depth (meters, 0.14m in Curbside Links). */
+  /** Recessed cup depth (meters, 0.42m in Curbside Links so holed ball sits cleanly below rim). */
   cupDepth?: number;
   /** Flagpole height in meters (2.35m street-level pin). */
   poleHeight?: number;
@@ -96,8 +96,8 @@ export const CupFlagAssembly = React.memo(function CupFlagAssembly({
   position = [0, 0, 0],
   color,
   isSunk = false,
-  cupRadius = 0.38,
-  cupDepth = 0.14,
+  cupRadius = 0.42,
+  cupDepth = 0.42,
   poleHeight = 2.35,
 }: CupFlagAssemblyProps) {
   const pennantGroupRef = useRef<THREE.Group>(null);
@@ -180,9 +180,12 @@ export const CupFlagAssembly = React.memo(function CupFlagAssembly({
           k,
         );
       }
+      // Cant pennant ~33 deg off the West->East courtyard putting sightline so it reads crisply
+      // instead of an edge-on sliver from both approach and courtyard_green_out angles.
+      const baseFlagYaw = -0.58;
       pennantGroupRef.current.rotation.y = isSunk
-        ? 0.25 + Math.sin(t * 1.6) * 0.05
-        : Math.sin(t * 3.6 + position[0]) * 0.22 + 0.15;
+        ? baseFlagYaw + 0.12 + Math.sin(t * 1.6) * 0.05
+        : baseFlagYaw + Math.sin(t * 3.6 + position[0]) * 0.18;
     }
 
     if (activeBannerRef.current) {
@@ -268,12 +271,12 @@ export const CupFlagAssembly = React.memo(function CupFlagAssembly({
         <circleGeometry args={[cupRadius * 0.99, 28]} />
       </mesh>
 
-      {/* Interior Ferrule Base Ring around Pin (bottom 1.6cm above basin disc) */}
+      {/* Recessed Interior Ferrule Base Ring around Pin (top below y = -0.38m holed-ball bottom) */}
       <mesh
-        position={[0, -cupDepth + 0.036, 0]}
+        position={[0, -cupDepth + 0.022, 0]}
         material={TOYBOX_MATERIALS.brassAccent}
       >
-        <cylinderGeometry args={[0.068, 0.078, 0.04, 12]} />
+        <cylinderGeometry args={[0.034, 0.048, 0.028, 12]} />
       </mesh>
 
       {/* Flush Crisp White Lip Flange around Turf Opening (covers r+0.018 cutout cleanly) */}
@@ -314,13 +317,13 @@ export const CupFlagAssembly = React.memo(function CupFlagAssembly({
         <ringGeometry args={[cupRadius + 0.042, cupRadius + 0.195, 32]} />
       </mesh>
 
-      {/* Tapered White/Fiberglass Flagpole Seated in Recessed Ferrule */}
+      {/* Slender Tapered Fiberglass Flagpole (r <= 0.020m so r=0.18m holed ball clears pin cleanly) */}
       <mesh
         castShadow
         position={[0, (poleHeight - cupDepth) * 0.5, 0]}
         material={POLE_MAT}
       >
-        <cylinderGeometry args={[0.026, 0.032, poleHeight + cupDepth, 12]} />
+        <cylinderGeometry args={[0.017, 0.02, poleHeight + cupDepth, 12]} />
       </mesh>
 
       {/* Brass Finial Orb */}

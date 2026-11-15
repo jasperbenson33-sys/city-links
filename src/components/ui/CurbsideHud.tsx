@@ -9,7 +9,7 @@ import {
   type SoundEventPayload,
   type Vec3Tuple,
 } from '@/types';
-import { HOLE_1_CUP } from '@/config/courseMasterPlan';
+import { HOLE_1_CUP, TEE_POSITION } from '@/config/courseMasterPlan';
 import { useCurbsideStore } from '@/store';
 import { soundEngine } from '@/lib/sound';
 import { ClubHeadIcon } from './ClubHeadIcon';
@@ -94,11 +94,11 @@ const CLUB_UI_META: Record<
 function formatLieDisplay(
   surfaceTag: PhysicsSurfaceTag | undefined,
   strokes: number,
-  distanceToPin: number,
+  isOnTeeBox: boolean,
 ): { label: string; dotColor: string } {
   if (
     strokes === 0 &&
-    distanceToPin > 44 &&
+    isOnTeeBox &&
     (!surfaceTag || surfaceTag === 'road_asphalt')
   ) {
     return { label: 'Tee Box', dotColor: '#D95D39' };
@@ -108,7 +108,7 @@ function formatLieDisplay(
     case 'road_asphalt':
       return { label: '5th Ave Fairway', dotColor: '#64748B' };
     case 'crosswalk_landing':
-      return { label: 'Crosswalk A-Pos', dotColor: '#F59E0B' };
+      return { label: 'Mercer Crosswalk', dotColor: '#F59E0B' };
     case 'loading_zone_asphalt':
       return { label: 'Loading Zone', dotColor: '#FACC15' };
     case 'sidewalk_paver':
@@ -209,6 +209,10 @@ export function CurbsideHud() {
     return st.aimPreview?.power ?? 0;
   });
 
+  const ballPosition = useCurbsideStore(
+    (s) => (s as unknown as StoreCompat).ballPosition,
+  );
+
   const distanceToPinMeters = useCurbsideStore((s) => {
     const st = s as unknown as StoreCompat;
     if (typeof st.distanceToPinMeters === 'number') {
@@ -260,19 +264,16 @@ export function CurbsideHud() {
     }
   }, [isHoleComplete, personalBest]);
 
-  // Hydrate Personal Best & initialize Web Audio unlock/mute sync once
+  // Hydrate Personal Best & keep Web Audio mute state synced with store
   useEffect(() => {
     const initState = useCurbsideStore.getState() as unknown as StoreCompat;
     initState.hydratePersonalBest?.();
     initState.hydrateDailyBest?.();
 
-    const cleanupAudio = soundEngine.init();
     const initialMuted = Boolean(initState.isMuted ?? initState.muted ?? false);
     soundEngine.setMuted(initialMuted);
 
     let lastMuted = initialMuted;
-    let lastSeq = initState.soundEventSeq ?? 0;
-
     const unsubscribe = useCurbsideStore.subscribe((rawState) => {
       const state = rawState as unknown as StoreCompat;
       const nextMuted = Boolean(state.isMuted ?? state.muted ?? false);
@@ -280,21 +281,10 @@ export function CurbsideHud() {
         lastMuted = nextMuted;
         soundEngine.setMuted(nextMuted);
       }
-      if (
-        typeof state.soundEventSeq === 'number' &&
-        state.soundEventSeq !== lastSeq &&
-        state.lastSoundEvent
-      ) {
-        lastSeq = state.soundEventSeq;
-        if (!nextMuted) {
-          soundEngine.playPayload(state.lastSoundEvent);
-        }
-      }
     });
 
     return () => {
       unsubscribe();
-      cleanupAudio();
     };
   }, []);
 
@@ -351,25 +341,27 @@ export function CurbsideHud() {
   };
 
   const qaFreeze = useQaFreeze();
-  const lie = formatLieDisplay(currentSurfaceTag, strokes, distanceToPinMeters);
-  const initialLieRef = useRef<string | null>(null);
-  if (initialLieRef.current === null) {
-    initialLieRef.current = lie.label;
-  }
-  const hasLieChanged = lie.label !== initialLieRef.current;
+  const isOnTeeBox =
+    Array.isArray(ballPosition) &&
+    Math.hypot(
+      ballPosition[0] - TEE_POSITION[0],
+      ballPosition[2] - TEE_POSITION[2],
+    ) <= 2.0;
+  const lie = formatLieDisplay(currentSurfaceTag, strokes, isOnTeeBox);
 
   const activeClubAccent = CLUB_SPECS[selectedClub]?.accentHex ?? '#FF6B4A';
-  const showGestureHint =
+  const showScoutHint =
+    !isHoleComplete && isStreetScoutActive && !lastEventBanner;
+  const showPullHint =
     !isHoleComplete &&
+    !isStreetScoutActive &&
     strokes === 0 &&
     shotPhase === 'aiming' &&
     aimPower <= 0.01 &&
     !lastEventBanner;
   const isPulling = !isHoleComplete && shotPhase === 'pulling';
   const displayDistance =
-    strokes === 0 && Math.abs(distanceToPinMeters - holeDistanceMeters) < 18
-      ? holeDistanceMeters
-      : distanceToPinMeters;
+    strokes === 0 && isOnTeeBox ? holeDistanceMeters : distanceToPinMeters;
   const transitionCls = qaFreeze
     ? 'transition-none'
     : 'transition-[transform,opacity,background-color,color,box-shadow] duration-[180ms] ease-[cubic-bezier(0.22,1,0.36,1)]';
@@ -389,8 +381,15 @@ export function CurbsideHud() {
           'max(0.625rem, var(--safe-right, env(safe-area-inset-right, 0px)))',
       }}
     >
-      {/* TOP WHISPER BAR + DYNAMIC LIE / EVENT TOAST */}
-      <div className="pointer-events-none flex flex-col gap-1.5">
+      {/* TOP WHISPER BAR + DYNAMIC LIE / EVENT TOAST (fades out cleanly behind ScorecardModal) */}
+      <div
+        aria-hidden={isHoleComplete}
+        className={`pointer-events-none flex flex-col gap-1.5 ${
+          qaFreeze
+            ? 'transition-none'
+            : 'transition-opacity duration-200 ease-[cubic-bezier(0.22,1,0.36,1)]'
+        } ${isHoleComplete ? 'opacity-0' : 'opacity-100'}`}
+      >
         <header className="pointer-events-none flex items-start justify-between gap-1.5">
           {/* Left Compact Hole Pill */}
           <div
@@ -553,10 +552,8 @@ export function CurbsideHud() {
         {/* Sub-Row: Subtle Lie Pill (Left) + Stroke & Personal Best Badge (Right) */}
         <div className="pointer-events-none flex items-center justify-between gap-2">
           <div
-            key={lie.label}
             aria-label={`Current lie: ${lie.label}`}
-            style={{ willChange: qaFreeze ? undefined : 'transform, opacity' }}
-            className={`${!qaFreeze && hasLieChanged ? 'animate-toast-pop ' : ''}pointer-events-none inline-flex items-center gap-1.5 rounded-full border border-[#E2C294]/90 bg-[#FFFDF8]/88 px-2.5 py-1 text-[11px] leading-none font-extrabold tracking-tight text-[#231914] shadow-[0_4px_12px_-4px_rgba(35,25,20,0.16)] backdrop-blur-sm`}
+            className={`pointer-events-none inline-flex items-center gap-1.5 rounded-full border border-[#E2C294]/90 bg-[#FFFDF8]/88 px-2.5 py-1 text-[11px] leading-none font-extrabold tracking-tight text-[#231914] shadow-[0_4px_12px_-4px_rgba(35,25,20,0.16)] backdrop-blur-sm ${transitionCls}`}
           >
             <span
               aria-hidden="true"
@@ -610,16 +607,18 @@ export function CurbsideHud() {
       {/* BOTTOM THUMB ZONE: Pull Meter / Gesture Hint + 4-Club Selector Dock */}
       {!isHoleComplete && (
         <div className="pointer-events-none flex flex-col items-center gap-1.5">
-          {/* Pre-Stroke 1 Non-Intrusive Gesture Hint */}
-          {showGestureHint && (
+          {/* Pre-Stroke 1 or Street Scout Non-Intrusive Gesture Hint */}
+          {(showScoutHint || showPullHint) && (
             <div className="pointer-events-none flex justify-center">
               <div className="pointer-events-none inline-flex items-center rounded-full border border-[#E2C294]/90 bg-[#FFFDF8]/90 px-3 py-1 text-[11px] font-extrabold tracking-tight text-[#231914] shadow-[0_6px_16px_-6px_rgba(35,25,20,0.18)] backdrop-blur-sm">
-                Pull back to power &amp; aim • Drag screen to look
+                {showScoutHint
+                  ? 'Drag screen to orbit • Tap eye icon to aim'
+                  : 'Pull back to power & aim • Drag screen to look'}
               </div>
             </div>
           )}
 
-          {/* Tactile Pull Power Meter (GPU scaleX, zero width-layout thrashing) */}
+          {/* Tactile Pull Power Meter (GPU scaleX, zero width-layout thrashing, zero input lag) */}
           {isPulling && (
             <div
               style={{ willChange: qaFreeze ? undefined : 'transform, opacity' }}
@@ -638,9 +637,7 @@ export function CurbsideHud() {
                       transform: `scaleX(${Math.max(0.04, Math.min(1, aimPower))})`,
                       backgroundColor: activeClubAccent,
                       willChange: qaFreeze ? undefined : 'transform',
-                      transition: qaFreeze
-                        ? 'none'
-                        : 'transform 120ms cubic-bezier(0.22, 1, 0.36, 1)',
+                      transition: 'none',
                     }}
                   />
                 </div>
@@ -689,7 +686,7 @@ export function CurbsideHud() {
                   >
                     <ClubHeadIcon club={clubId} className="h-4 w-4" />
                   </span>
-                  <span className="mt-0.5 text-[10px] leading-[1.08] font-black tracking-tight">
+                  <span className="mt-0.5 text-[9.5px] leading-[1.08] font-black tracking-[-0.02em] whitespace-nowrap">
                     {meta.label}
                   </span>
                   <span

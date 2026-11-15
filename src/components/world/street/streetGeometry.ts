@@ -202,9 +202,7 @@ export function buildNotchedWestSidewalkGeometry(
   uvTileScaleMeters = 2.0,
 ): THREE.BufferGeometry {
   const { minX, maxX, minZ, maxZ } = bounds;
-  const sorted = [...cutouts].sort((a, b) => b.maxZ - a.maxZ); // North-to-South or South-to-North? Wait: in +Z (south) to -Z (north), trace outer east wall maxX from maxZ -> minZ!
-
-  const southToNorth = [...sorted].sort((a, b) => b.maxZ - a.maxZ);
+  const southToNorth = [...cutouts].sort((a, b) => b.maxZ - a.maxZ);
 
   const shape = new THREE.Shape();
   // CCW trace in (x, -z):
@@ -256,7 +254,7 @@ export function buildClippedSeApronGeometry(
 
   // Quarter-circle arc centered at (pivotX, pivotZ) with world theta in [1.5*PI -> PI]:
   // x(t) = pivotX + r * cos(t), z(t) = pivotZ + r * sin(t) => y2d = -z(t)
-  const arcSteps = 18;
+  const arcSteps = 48;
   for (let i = 1; i <= arcSteps; i++) {
     const t = Math.PI * 1.5 - (i / arcSteps) * (Math.PI * 0.5);
     const ax = pivotX + innerRadius * Math.cos(t);
@@ -267,7 +265,7 @@ export function buildClippedSeApronGeometry(
   // Close south down minX wall back to SW (minX, -maxZ)
   shape.closePath();
 
-  return buildExtrudedWorldSlab(shape, bottomY, topY, uvTileScaleMeters, 18);
+  return buildExtrudedWorldSlab(shape, bottomY, topY, uvTileScaleMeters, 48);
 }
 
 /**
@@ -297,7 +295,7 @@ export function buildSeRoadSpandrelGeometry(
   shape.moveTo(roadWestX, -roadNorthZ);
   shape.lineTo(roadWestX, -pivotZ);
 
-  const arcSteps = 18;
+  const arcSteps = 48;
   for (let i = 1; i <= arcSteps; i++) {
     const t = Math.PI + (i / arcSteps) * (Math.PI * 0.5);
     const ax = pivotX + outerRadius * Math.cos(t);
@@ -306,7 +304,7 @@ export function buildSeRoadSpandrelGeometry(
   }
 
   shape.closePath();
-  return buildExtrudedWorldSlab(shape, bottomY, topY, uvTileScaleMeters, 18);
+  return buildExtrudedWorldSlab(shape, bottomY, topY, uvTileScaleMeters, 48);
 }
 
 /**
@@ -324,7 +322,7 @@ export function buildRadialArcSlabGeometry(
   bottomY: number,
   topY: number,
   uvTileScaleMeters = 1.8,
-  segments = 20,
+  segments = 48,
 ): THREE.BufferGeometry {
   const shape = new THREE.Shape();
 
@@ -415,8 +413,8 @@ export function buildSolidRampGeometry(
 }
 
 /**
- * Builds a smooth beveled flat ribbon along an arc centerline `(pivotX, pivotZ)` for
- * wet water sheen shimmer inside `gutter-corner-se-90`.
+ * Builds a single top-face-only (+Y normal) flat ribbon along an arc centerline `(pivotX, pivotZ)`
+ * with zero bottom face or internal caps so semi-transparent water never double-blends.
  */
 export function buildRadialWaterRibbonGeometry(
   pivotX: number,
@@ -426,18 +424,114 @@ export function buildRadialWaterRibbonGeometry(
   startRad: number,
   endRad: number,
   yElevation: number,
-  segments = 24,
+  segments = 48,
 ): THREE.BufferGeometry {
-  return buildRadialArcSlabGeometry(
-    pivotX,
-    pivotZ,
-    rInner,
-    rOuter,
-    startRad,
-    endRad,
-    yElevation - 0.002,
-    yElevation + 0.004,
-    1.0,
-    segments,
-  );
+  const positions: number[] = [];
+  const normals: number[] = [];
+  const uvs: number[] = [];
+
+  for (let i = 0; i < segments; i++) {
+    const t0 = startRad + (i / segments) * (endRad - startRad);
+    const t1 = startRad + ((i + 1) / segments) * (endRad - startRad);
+    const c0 = Math.cos(t0);
+    const s0 = Math.sin(t0);
+    const c1 = Math.cos(t1);
+    const s1 = Math.sin(t1);
+
+    const a: [number, number, number] = [pivotX + rOuter * c0, yElevation, pivotZ + rOuter * s0];
+    const b: [number, number, number] = [pivotX + rInner * c0, yElevation, pivotZ + rInner * s0];
+    const c: [number, number, number] = [pivotX + rInner * c1, yElevation, pivotZ + rInner * s1];
+    const d: [number, number, number] = [pivotX + rOuter * c1, yElevation, pivotZ + rOuter * s1];
+
+    positions.push(...a, ...b, ...c, ...a, ...c, ...d);
+    for (let k = 0; k < 6; k++) normals.push(0, 1, 0);
+    uvs.push(a[0], a[2], b[0], b[2], c[0], c[2], a[0], a[2], c[0], c[2], d[0], d[2]);
+  }
+
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+  geo.setAttribute('normal', new THREE.Float32BufferAttribute(normals, 3));
+  geo.setAttribute('uv', new THREE.Float32BufferAttribute(uvs, 2));
+  return geo;
+}
+
+/**
+ * Builds one continuous, single-sheet (+Y top-face only, zero internal caps) hydrant water ribbon
+ * starting north of the corner drain grate, sweeping smoothly around the 90-deg SE gutter arc,
+ * and stopping cleanly short of the Courtyard Stone Ramp toe (`eastEndX <= 14.15m`).
+ */
+export function buildContinuousHydrantWaterSheetGeometry({
+  pivotX,
+  pivotZ,
+  centerRadius,
+  ribbonWidth = 0.28,
+  startRad = Math.PI,
+  endRad = Math.PI * 1.5,
+  southStartZ,
+  eastEndX,
+  yElevation,
+  arcSegments = 48,
+}: {
+  pivotX: number;
+  pivotZ: number;
+  centerRadius: number;
+  ribbonWidth?: number;
+  startRad?: number;
+  endRad?: number;
+  southStartZ: number;
+  eastEndX: number;
+  yElevation: number;
+  arcSegments?: number;
+}): THREE.BufferGeometry {
+  const halfW = ribbonWidth * 0.5;
+  const spine: Array<{ cx: number; cz: number; rx: number; rz: number }> = [];
+
+  const arcStartX = pivotX + centerRadius * Math.cos(startRad);
+  const arcStartZ = pivotZ + centerRadius * Math.sin(startRad);
+  if (southStartZ > arcStartZ + 0.01) {
+    spine.push({ cx: arcStartX, cz: southStartZ, rx: 1, rz: 0 });
+  }
+
+  for (let i = 0; i <= arcSegments; i++) {
+    const t = startRad + (i / arcSegments) * (endRad - startRad);
+    const c = Math.cos(t);
+    const s = Math.sin(t);
+    spine.push({
+      cx: pivotX + centerRadius * c,
+      cz: pivotZ + centerRadius * s,
+      rx: -c,
+      rz: -s,
+    });
+  }
+
+  const arcEndX = pivotX + centerRadius * Math.cos(endRad);
+  const arcEndZ = pivotZ + centerRadius * Math.sin(endRad);
+  if (eastEndX > arcEndX + 0.01) {
+    spine.push({ cx: eastEndX, cz: arcEndZ, rx: 0, rz: 1 });
+  }
+
+  const positions: number[] = [];
+  const normals: number[] = [];
+  const uvs: number[] = [];
+
+  for (let i = 0; i < spine.length - 1; i++) {
+    const p0 = spine[i];
+    const p1 = spine[i + 1];
+
+    const a: [number, number, number] = [p0.cx - p0.rx * halfW, yElevation, p0.cz - p0.rz * halfW];
+    const b: [number, number, number] = [p0.cx + p0.rx * halfW, yElevation, p0.cz + p0.rz * halfW];
+    const c: [number, number, number] = [p1.cx + p1.rx * halfW, yElevation, p1.cz + p1.rz * halfW];
+    const d: [number, number, number] = [p1.cx - p1.rx * halfW, yElevation, p1.cz - p1.rz * halfW];
+
+    // Winding (a, b, c) and (a, c, d) yields upward +Y normal: (b-a) x (d-a) = (+R) x (+T) = +Y.
+    positions.push(...a, ...b, ...c, ...a, ...c, ...d);
+    for (let k = 0; k < 6; k++) normals.push(0, 1, 0);
+    uvs.push(a[0], a[2], b[0], b[2], c[0], c[2], a[0], a[2], c[0], c[2], d[0], d[2]);
+  }
+
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+  geo.setAttribute('normal', new THREE.Float32BufferAttribute(normals, 3));
+  geo.setAttribute('uv', new THREE.Float32BufferAttribute(uvs, 2));
+  return geo;
 }

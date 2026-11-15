@@ -11,6 +11,11 @@ import * as THREE from 'three';
 import { useFrame, useThree } from '@react-three/fiber';
 import { BALL_RADIUS, type ClubId, type Vec3Tuple } from '@/types';
 import {
+  AUDIT_CAMERA_STATIONS,
+  getMasterPlanGroundElevationAt,
+  getVanRampOrRoofElevationAt,
+} from '@/config/courseMasterPlan';
+import {
   computeDeterministicTrajectory,
   resolveHorizontalAim,
 } from '@/lib/aerodynamics';
@@ -26,11 +31,12 @@ export interface AimControlsAndArcProps {
   cameraControlRef?: MutableRefObject<CameraRigControl | null>;
 }
 
-const MAX_ARC_DOTS = 64;
+const MAX_ARC_DOTS = 96;
 const DOT_ARC_STEP_METERS = 0.85;
 const CLUB_MORPH_DURATION_SEC = 0.15;
 const PULL_CANCEL_THRESHOLD = 0.06;
 const PULL_LATERAL_DEADZONE_PX = 5;
+const PULL_EMA_ALPHA = 0.62;
 
 function sampleFixedArcLengthAlongPath(
   points: Vec3Tuple[],
@@ -118,6 +124,7 @@ export function AimControlsAndArc({
   const aimPower = useCurbsideStore((s) => s.aimPower);
   const ballPosition = useCurbsideStore((s) => s.ballPosition);
   const isHoleComplete = useCurbsideStore((s) => s.isHoleComplete);
+  const cameraAuditStationId = useCurbsideStore((s) => s.cameraAuditStationId);
 
   const haloRef = useRef<THREE.Mesh | null>(null);
   const impactRingRef = useRef<THREE.Mesh | null>(null);
@@ -134,12 +141,12 @@ export function AimControlsAndArc({
     lastY: number;
     startYaw: number;
     lastPowerStep: number;
-    dxWindow: [number, number, number];
-    dyWindow: [number, number, number];
-    windowIdx: number;
-    windowCount: number;
     smoothedPullDx: number;
     smoothedPullDy: number;
+    pendingPullDirty: boolean;
+    pendingOrbitDx: number;
+    pendingOrbitDy: number;
+    rafId: number | null;
   }>({
     active: false,
     pointerId: -1,
@@ -150,13 +157,14 @@ export function AimControlsAndArc({
     lastY: 0,
     startYaw: 0,
     lastPowerStep: 0,
-    dxWindow: [0, 0, 0],
-    dyWindow: [0, 0, 0],
-    windowIdx: 0,
-    windowCount: 0,
     smoothedPullDx: 0,
     smoothedPullDy: 0,
+    pendingPullDirty: false,
+    pendingOrbitDx: 0,
+    pendingOrbitDy: 0,
+    rafId: null,
   });
+  const dotsHiddenRef = useRef(false);
 
   // Club-switch 150ms arc morph state
   const prevClubRef = useRef<ClubId>(selectedClub);
@@ -181,6 +189,9 @@ export function AimControlsAndArc({
 
     const getBallScreenCoords = (): { sx: number; sy: number } => {
       if (ballMeshRef?.current) {
+        if (ballMeshRef.current.parent) {
+          ballMeshRef.current.parent.updateMatrixWorld(true);
+        }
         ballMeshRef.current.getWorldPosition(worldBallVec);
         projVec.copy(worldBallVec);
       } else if (ballWorldPositionRef?.current) {
@@ -209,6 +220,55 @@ export function AimControlsAndArc({
       return normX >= 0.24 && normX <= 0.76 && normY >= 0.52 && normY <= 0.84;
     };
 
+    const flushPendingDrag = () => {
+      const drag = dragStateRef.current;
+      drag.rafId = null;
+      const s = useCurbsideStore.getState();
+
+      if (drag.pendingPullDirty) {
+        drag.pendingPullDirty = false;
+        const maxPullPx = Math.max(120, Math.min(220, size.height * 0.27));
+        const nextPower = Math.max(
+          0,
+          Math.min(1, drag.smoothedPullDy / maxPullPx),
+        );
+        // Slingshot lateral aim with soft 5px deadzone and exact 1:1 displacement gain
+        const rawPullDx = drag.smoothedPullDx;
+        const adjPullDx =
+          Math.abs(rawPullDx) <= PULL_LATERAL_DEADZONE_PX
+            ? 0
+            : rawPullDx - Math.sign(rawPullDx) * PULL_LATERAL_DEADZONE_PX;
+        const yawOffset = -(adjPullDx / maxPullPx) * 0.65;
+        s.setAimYaw(drag.startYaw + yawOffset);
+        s.setAimPower(nextPower);
+
+        const stepBucket = Math.floor(nextPower * 10);
+        if (stepBucket > 0 && stepBucket !== drag.lastPowerStep) {
+          drag.lastPowerStep = stepBucket;
+          soundEngine.playSwingTick(nextPower);
+        }
+      }
+
+      if (drag.pendingOrbitDx !== 0 || drag.pendingOrbitDy !== 0) {
+        const yawDelta = -drag.pendingOrbitDx * 0.0068;
+        const pitchDelta = drag.pendingOrbitDy * 0.0032;
+        drag.pendingOrbitDx = 0;
+        drag.pendingOrbitDy = 0;
+        if (cameraControlRef?.current) {
+          cameraControlRef.current.orbitDelta(yawDelta, pitchDelta);
+        } else {
+          s.setAimYaw(s.aimYaw + yawDelta);
+        }
+      }
+    };
+
+    const scheduleDragFlush = () => {
+      const drag = dragStateRef.current;
+      if (drag.rafId === null) {
+        drag.rafId = window.requestAnimationFrame(flushPendingDrag);
+      }
+    };
+
     const handlePointerDown = (e: PointerEvent) => {
       if (e.button !== 0 && e.pointerType === 'mouse') return;
       const s = useCurbsideStore.getState();
@@ -220,6 +280,10 @@ export function AimControlsAndArc({
         !s.cameraAuditStationId &&
         isInsidePullZone(e.clientX, e.clientY);
 
+      if (dragStateRef.current.rafId !== null) {
+        window.cancelAnimationFrame(dragStateRef.current.rafId);
+      }
+
       dragStateRef.current = {
         active: true,
         pointerId: e.pointerId,
@@ -230,12 +294,12 @@ export function AimControlsAndArc({
         lastY: e.clientY,
         startYaw: s.aimYaw,
         lastPowerStep: 0,
-        dxWindow: [0, 0, 0],
-        dyWindow: [0, 0, 0],
-        windowIdx: 0,
-        windowCount: 0,
         smoothedPullDx: 0,
         smoothedPullDy: 0,
+        pendingPullDirty: false,
+        pendingOrbitDx: 0,
+        pendingOrbitDy: 0,
+        rafId: null,
       };
 
       try {
@@ -253,62 +317,42 @@ export function AimControlsAndArc({
       const drag = dragStateRef.current;
       if (!drag.active || drag.pointerId !== e.pointerId) return;
 
-      const s = useCurbsideStore.getState();
       const rawDx = e.clientX - drag.lastX;
       const rawDy = e.clientY - drag.lastY;
       drag.lastX = e.clientX;
       drag.lastY = e.clientY;
 
-      // 3-sample moving average pointer/touch smoothing eliminates micro-thumb tremor
-      drag.dxWindow[drag.windowIdx] = rawDx;
-      drag.dyWindow[drag.windowIdx] = rawDy;
-      drag.windowIdx = (drag.windowIdx + 1) % 3;
-      drag.windowCount = Math.min(3, drag.windowCount + 1);
-      const dxStep =
-        (drag.dxWindow[0] + drag.dxWindow[1] + drag.dxWindow[2]) /
-        drag.windowCount;
-      const dyStep =
-        (drag.dyWindow[0] + drag.dyWindow[1] + drag.dyWindow[2]) /
-        drag.windowCount;
-
       if (drag.mode === 'pull') {
-        drag.smoothedPullDx += dxStep;
-        drag.smoothedPullDy += dyStep;
-        const maxPullPx = Math.max(120, Math.min(220, size.height * 0.27));
-        const nextPower = Math.max(
-          0,
-          Math.min(1, drag.smoothedPullDy / maxPullPx),
-        );
-        // Slingshot lateral aim with soft 5px deadzone so micro-thumb wobble stays rock steady
-        const rawPullDx = drag.smoothedPullDx;
-        const adjPullDx =
-          Math.abs(rawPullDx) <= PULL_LATERAL_DEADZONE_PX
-            ? 0
-            : rawPullDx - Math.sign(rawPullDx) * PULL_LATERAL_DEADZONE_PX;
-        const yawOffset = -(adjPullDx / maxPullPx) * 0.65;
-        s.setAimYaw(drag.startYaw + yawOffset);
-        s.setAimPower(nextPower);
-
-        const stepBucket = Math.floor(nextPower * 10);
-        if (stepBucket > 0 && stepBucket !== drag.lastPowerStep) {
-          drag.lastPowerStep = stepBucket;
-          soundEngine.playSwingTick(nextPower);
-        }
+        // Filter total displacement directly (exact 1.000x DC gain, no multi-sample ramp overshoot)
+        const totalDx = e.clientX - drag.startX;
+        const totalDy = e.clientY - drag.startY;
+        drag.smoothedPullDx += PULL_EMA_ALPHA * (totalDx - drag.smoothedPullDx);
+        drag.smoothedPullDy += PULL_EMA_ALPHA * (totalDy - drag.smoothedPullDy);
+        drag.pendingPullDirty = true;
       } else {
-        // Full 360-degree street-level look around the ball
-        const yawDelta = -dxStep * 0.0068;
-        const pitchDelta = dyStep * 0.0032;
-        if (cameraControlRef?.current) {
-          cameraControlRef.current.orbitDelta(yawDelta, pitchDelta);
-        } else {
-          s.setAimYaw(s.aimYaw + yawDelta);
-        }
+        drag.pendingOrbitDx += rawDx;
+        drag.pendingOrbitDy += rawDy;
       }
+
+      scheduleDragFlush();
     };
 
     const finishDrag = (e: PointerEvent) => {
       const drag = dragStateRef.current;
       if (!drag.active || drag.pointerId !== e.pointerId) return;
+
+      if (drag.rafId !== null) {
+        window.cancelAnimationFrame(drag.rafId);
+        drag.rafId = null;
+      }
+      if (drag.mode === 'pull') {
+        // Snap exact release coordinates before launch evaluation so zero tail delta is lost
+        drag.smoothedPullDx = e.clientX - drag.startX;
+        drag.smoothedPullDy = e.clientY - drag.startY;
+        drag.pendingPullDirty = true;
+      }
+      flushPendingDrag();
+
       drag.active = false;
       drag.pointerId = -1;
 
@@ -344,6 +388,10 @@ export function AimControlsAndArc({
     dom.addEventListener('wheel', handleWheel, { passive: true });
 
     return () => {
+      if (dragStateRef.current.rafId !== null) {
+        window.cancelAnimationFrame(dragStateRef.current.rafId);
+        dragStateRef.current.rafId = null;
+      }
       dom.removeEventListener('pointerdown', handlePointerDown);
       dom.removeEventListener('pointermove', handlePointerMove);
       dom.removeEventListener('pointerup', finishDrag);
@@ -379,21 +427,34 @@ export function AimControlsAndArc({
     });
   }, [showGuides, aimPower, ballPosition, selectedClub, aimYaw]);
 
-  // Idle aim direction breadcrumbs before pulling (>= 0.025m surface clearance)
+  // Terrain-following idle aim breadcrumbs clear of the ball collar & bottom club dock
   const idleDots = useMemo<Vec3Tuple[]>(() => {
     if (!showGuides || aimPower > 0.03) return [];
     const [dx, dz] = resolveHorizontalAim(undefined, aimYaw);
+    const ballBaseY = ballPosition[1] - BALL_RADIUS;
+    const auditStation = cameraAuditStationId
+      ? AUDIT_CAMERA_STATIONS.find((s) => s.id === cameraAuditStationId)
+      : null;
     const pts: Vec3Tuple[] = [];
-    for (let i = 1; i <= 8; i++) {
-      const d = i * 0.85;
-      pts.push([
-        ballPosition[0] + dx * d,
-        ballPosition[1] - BALL_RADIUS + 0.06,
-        ballPosition[2] + dz * d,
-      ]);
+    for (let i = 0; i < 8; i++) {
+      const d = 2.05 + i * 0.85;
+      const px = ballPosition[0] + dx * d;
+      const pz = ballPosition[2] + dz * d;
+      // Keep audit station lower UI / pill-to-dock margin crisp asphalt
+      if (
+        auditStation &&
+        Math.hypot(px - auditStation.position[0], pz - auditStation.position[2]) < 4.95
+      ) {
+        continue;
+      }
+      const gY = getMasterPlanGroundElevationAt(px, pz);
+      const vY = getVanRampOrRoofElevationAt(px, pz);
+      const surfY =
+        vY !== null && Math.abs(ballBaseY - vY) < 0.45 ? Math.max(gY, vY) : gY;
+      pts.push([px, surfY + 0.06, pz]);
     }
     return pts;
-  }, [showGuides, aimPower, aimYaw, ballPosition]);
+  }, [showGuides, aimPower, aimYaw, ballPosition, cameraAuditStationId]);
 
   const activeDots = useMemo(() => {
     if (trajectory) {
@@ -453,6 +514,21 @@ export function AimControlsAndArc({
     const inst = dotInstancedRef.current;
     if (!inst) return;
 
+    if (!showGuides) {
+      if (!dotsHiddenRef.current) {
+        dotsHiddenRef.current = true;
+        dummyObj.position.set(0, -100, 0);
+        dummyObj.scale.set(0.0001, 0.0001, 0.0001);
+        dummyObj.updateMatrix();
+        for (let i = 0; i < MAX_ARC_DOTS; i++) {
+          inst.setMatrixAt(i, dummyObj.matrix);
+        }
+        inst.instanceMatrix.needsUpdate = true;
+      }
+      return;
+    }
+    dotsHiddenRef.current = false;
+
     let blend = 1;
     if (morphActiveRef.current && morphFromRef.current && !frozen) {
       morphElapsedRef.current += dt;
@@ -473,56 +549,51 @@ export function AimControlsAndArc({
     const scrollPhase = frozen ? 0 : (animTime * 2.6) % 1;
 
     for (let i = 0; i < MAX_ARC_DOTS; i++) {
-      if (!showGuides) {
-        dummyObj.position.set(0, -100, 0);
-        dummyObj.scale.set(0.0001, 0.0001, 0.0001);
-      } else {
-        const tp = targetDots.positions[i];
-        const ts = targetDots.scales[i];
-        let x = tp[0];
-        let y = tp[1];
-        let z = tp[2];
-        let s = ts;
+      const tp = targetDots.positions[i];
+      const ts = targetDots.scales[i];
+      let x = tp[0];
+      let y = tp[1];
+      let z = tp[2];
+      let s = ts;
 
-        if (blend < 1 && from) {
-          const fp = from.positions[i];
-          const fs = from.scales[i];
-          x = fp[0] + (tp[0] - fp[0]) * blend;
-          y = fp[1] + (tp[1] - fp[1]) * blend;
-          z = fp[2] + (tp[2] - fp[2]) * blend;
-          s = fs + (ts - fs) * blend;
-        }
-
-        currentDotsRef.current.positions[i] = [x, y, z];
-        currentDotsRef.current.scales[i] = s;
-
-        // Subtle animated flow pulse along active pull-back dots (frozen under ?qaFreezeParticles=1)
-        const flowGain =
-          !frozen && isPreviewing && s > 0.001
-            ? 0.92 + 0.14 * Math.sin((i / 4 - scrollPhase) * Math.PI * 2)
-            : 1.0;
-
-        dummyObj.position.set(x, y, z);
-        dummyObj.scale.set(s * flowGain, s * flowGain, s * flowGain);
+      if (blend < 1 && from) {
+        const fp = from.positions[i];
+        const fs = from.scales[i];
+        x = fp[0] + (tp[0] - fp[0]) * blend;
+        y = fp[1] + (tp[1] - fp[1]) * blend;
+        z = fp[2] + (tp[2] - fp[2]) * blend;
+        s = fs + (ts - fs) * blend;
       }
+
+      currentDotsRef.current.positions[i] = [x, y, z];
+      currentDotsRef.current.scales[i] = s;
+
+      // Subtle animated flow pulse along active pull-back dots (frozen under ?qaFreezeParticles=1)
+      const flowGain =
+        !frozen && isPreviewing && s > 0.001
+          ? 0.92 + 0.14 * Math.sin((i / 4 - scrollPhase) * Math.PI * 2)
+          : 1.0;
+
+      dummyObj.position.set(x, y, z);
+      dummyObj.scale.set(s * flowGain, s * flowGain, s * flowGain);
       dummyObj.updateMatrix();
       inst.setMatrixAt(i, dummyObj.matrix);
     }
     inst.instanceMatrix.needsUpdate = true;
   });
 
-  if (!showGuides) return null;
-
   const stopTarget = trajectory?.estimatedStopPoint ?? null;
   const awningTarget = trajectory?.awningBouncePoint ?? null;
   const ringColor =
     trajectory?.firstImpactKind === 'awning' ? '#F59E0B' : profile.accentHex;
+  const impactRingScale = Math.max(0.45, trajectory?.landingRingRadius ?? 1.0);
 
   return (
-    <group name="aim-controls-and-arc">
+    <group name="aim-controls-and-arc" visible={showGuides}>
       {/* Ball locator halo on resting lie (>= 0.025m clearance + polygonOffset) */}
       <mesh
         ref={haloRef}
+        visible={!cameraAuditStationId}
         position={[
           ballPosition[0],
           ballPosition[1] - BALL_RADIUS + 0.026,
@@ -530,11 +601,11 @@ export function AimControlsAndArc({
         ]}
         rotation={[-Math.PI / 2, 0, 0]}
       >
-        <ringGeometry args={[BALL_RADIUS * 1.25, BALL_RADIUS * 1.65, 32]} />
+        <ringGeometry args={[BALL_RADIUS * 1.08, BALL_RADIUS * 1.3, 32]} />
         <meshBasicMaterial
           color={profile.accentHex}
           transparent
-          opacity={0.72}
+          opacity={0.62}
           depthWrite={false}
           polygonOffset
           polygonOffsetFactor={-1}
@@ -561,53 +632,54 @@ export function AimControlsAndArc({
         />
       </instancedMesh>
 
-      {/* Predicted Awning Contact Bullseye when locked onto Hotdog Cart Awning */}
-      {awningTarget && (
-        <mesh
-          ref={awningRingRef}
-          position={[awningTarget[0], awningTarget[1] + 0.06, awningTarget[2]]}
-          rotation={[-Math.PI / 2, 0, 0]}
-        >
-          <ringGeometry args={[0.28, 0.44, 28]} />
-          <meshBasicMaterial
-            color="#F59E0B"
-            transparent
-            opacity={0.9}
-            depthWrite={false}
-            polygonOffset
-            polygonOffsetFactor={-2}
-            polygonOffsetUnits={-2}
-            side={THREE.DoubleSide}
-          />
-        </mesh>
-      )}
+      {/* Predicted Awning Contact Bullseye — permanently mounted via visible so scene topology never mutates */}
+      <mesh
+        ref={awningRingRef}
+        visible={Boolean(awningTarget)}
+        position={
+          awningTarget
+            ? [awningTarget[0], awningTarget[1] + 0.06, awningTarget[2]]
+            : [0, -50, 0]
+        }
+        rotation={[-Math.PI / 2, 0, 0]}
+      >
+        <ringGeometry args={[0.28, 0.44, 28]} />
+        <meshBasicMaterial
+          color="#F59E0B"
+          transparent
+          opacity={0.9}
+          depthWrite={false}
+          polygonOffset
+          polygonOffsetFactor={-2}
+          polygonOffsetUnits={-2}
+          side={THREE.DoubleSide}
+        />
+      </mesh>
 
-      {/* Predicted Stop / Landing Ring (>= 0.025m clearance + polygonOffset) */}
-      {stopTarget && (
-        <mesh
-          ref={impactRingRef}
-          position={[stopTarget[0], stopTarget[1] + 0.028, stopTarget[2]]}
-          rotation={[-Math.PI / 2, 0, 0]}
-        >
-          <ringGeometry
-            args={[
-              Math.max(0.24, trajectory!.landingRingRadius * 0.55),
-              trajectory!.landingRingRadius * 0.78,
-              32,
-            ]}
-          />
-          <meshBasicMaterial
-            color={ringColor}
-            transparent
-            opacity={0.82}
-            depthWrite={false}
-            polygonOffset
-            polygonOffsetFactor={-1}
-            polygonOffsetUnits={-1}
-            side={THREE.DoubleSide}
-          />
-        </mesh>
-      )}
+      {/* Predicted Stop / Landing Ring — permanently mounted via visible & scaled dynamically */}
+      <mesh
+        ref={impactRingRef}
+        visible={Boolean(stopTarget)}
+        position={
+          stopTarget
+            ? [stopTarget[0], stopTarget[1] + 0.028, stopTarget[2]]
+            : [0, -50, 0]
+        }
+        scale={[impactRingScale, impactRingScale, 1]}
+        rotation={[-Math.PI / 2, 0, 0]}
+      >
+        <ringGeometry args={[0.55, 0.78, 32]} />
+        <meshBasicMaterial
+          color={ringColor}
+          transparent
+          opacity={0.82}
+          depthWrite={false}
+          polygonOffset
+          polygonOffsetFactor={-1}
+          polygonOffsetUnits={-1}
+          side={THREE.DoubleSide}
+        />
+      </mesh>
     </group>
   );
 }

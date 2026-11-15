@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useMemo, useRef } from 'react';
+import React, { useEffect, useMemo, useRef } from 'react';
 import { useFrame } from '@react-three/fiber';
 import * as THREE from 'three';
 import { buildCoaxialWheelSpec } from '@/lib/geometryHelpers';
@@ -136,6 +136,14 @@ export function DeliveryBoxVanProp({
 
     return { rampGeometry: rGeo, kickerGeometry: kGeo, deflectorGeo: fGeo };
   }, []);
+
+  useEffect(() => {
+    return () => {
+      rampGeometry.dispose();
+      kickerGeometry.dispose();
+      deflectorGeo.dispose();
+    };
+  }, [rampGeometry, kickerGeometry, deflectorGeo]);
 
   const rampAngleRad = Math.atan2(1.08, 2.6);
   const kickerAngleRad = Math.atan2(1.16, 1.8);
@@ -299,22 +307,22 @@ export function DeliveryBoxVanProp({
             <boxGeometry args={[0.14, 1.48, 2.92]} />
           </mesh>
           <mesh
-            position={[wx > 0 ? 0.015 : -0.015, -0.22, 0]}
+            position={[wx > 0 ? 0.01 : -0.01, -0.22, 0]}
             material={layered(TOYBOX_MATERIALS.vanMintStripe, 1)}
           >
-            <boxGeometry args={[0.15, 0.22, 2.95]} />
+            <boxGeometry args={[0.146, 0.22, 2.95]} />
           </mesh>
           <mesh
-            position={[wx > 0 ? 0.0725 : -0.0725, 0.16, 0.15]}
+            position={[wx > 0 ? 0.068 : -0.068, 0.16, 0.15]}
             material={layered(TOYBOX_MATERIALS.terracottaTerrace, 1)}
           >
-            <boxGeometry args={[0.035, 0.38, 1.1]} />
+            <boxGeometry args={[0.025, 0.38, 1.1]} />
           </mesh>
           <mesh
-            position={[wx > 0 ? 0.0925 : -0.0925, 0.16, 0.15]}
+            position={[wx > 0 ? 0.078 : -0.078, 0.16, 0.15]}
             material={layered(TOYBOX_MATERIALS.pastelCream, 2)}
           >
-            <boxGeometry args={[0.035, 0.24, 0.86]} />
+            <boxGeometry args={[0.02, 0.24, 0.86]} />
           </mesh>
         </group>
       ))}
@@ -354,32 +362,32 @@ export function DeliveryBoxVanProp({
         ))}
       </group>
 
-      {/* Swung-Open Split Rear Cargo Doors Folded Cleanly Back Along Side Flanks */}
+      {/* Swung-Open Split Rear Cargo Doors Folded Flush Against Side Flanks (inside 2.04m AABB) */}
       {([-1, 1] as const).map((side) => (
         <group
           key={`rear-door-${side}`}
-          position={[side * 1.0, 1.42, -0.88]}
-          rotation={[0, side * 0.14, 0]}
+          position={[side * 0.985, 1.42, -0.88]}
+          rotation={[0, 0, 0]}
         >
-          {/* Open Door Leaf Panel Tucked Forward Along Side Flank */}
+          {/* Open Door Leaf Panel Tucked Flush Along Side Flank */}
           <mesh
             castShadow
             receiveShadow
-            position={[side * 0.035, 0, 0.44]}
+            position={[0, 0, 0.44]}
             material={TOYBOX_MATERIALS.vanCreamBody}
           >
-            <boxGeometry args={[0.06, 1.24, 0.86]} />
+            <boxGeometry args={[0.04, 1.24, 0.86]} />
           </mesh>
           {/* Mint Continuation Stripe on Open Door */}
           <mesh
-            position={[side * 0.0525, -0.18, 0.44]}
+            position={[side * 0.004, -0.18, 0.44]}
             material={layered(TOYBOX_MATERIALS.vanMintStripe, 1)}
           >
-            <boxGeometry args={[0.065, 0.2, 0.9]} />
+            <boxGeometry args={[0.042, 0.2, 0.9]} />
           </mesh>
           {/* Vertical Chrome Cam-Lock Bar */}
           <mesh
-            position={[side * 0.072, 0, 0.72]}
+            position={[side * 0.014, 0, 0.72]}
             material={layered(TOYBOX_MATERIALS.chromeSilver, 2)}
           >
             <cylinderGeometry args={[MIN_THIN_RADIUS, MIN_THIN_RADIUS, 1.12, 6]} />
@@ -388,10 +396,10 @@ export function DeliveryBoxVanProp({
           {[-0.44, 0, 0.44].map((hy, hIdx) => (
             <mesh
               key={`hinge-${side}-${hIdx}`}
-              position={[0, hy, 0.02]}
+              position={[side * -0.005, hy, 0.02]}
               material={TOYBOX_MATERIALS.brassAccent}
             >
-              <boxGeometry args={[0.08, 0.055, 0.1]} />
+              <boxGeometry args={[0.055, 0.055, 0.1]} />
             </mesh>
           ))}
         </group>
@@ -440,12 +448,12 @@ export function DeliveryBoxVanProp({
         </group>
       ))}
 
-      {/* Folded-Back Split Skylight Roof Flaps Flanking Kicker Channel */}
+      {/* Folded-Back Split Skylight Roof Flaps Flanking Kicker Channel (top <= 2.26m) */}
       {[-0.93, 0.93].map((rx, idx) => (
         <mesh
           key={`skylight-flap-${idx}`}
           castShadow
-          position={[rx, 2.26, 0.0]}
+          position={[rx, 2.23, 0.0]}
           material={TOYBOX_MATERIALS.vanMintStripe}
         >
           <boxGeometry args={[0.16, 0.06, 1.76]} />
@@ -471,9 +479,9 @@ export function DeliveryBoxVanProp({
         >
           <boxGeometry args={[1.76, 0.06, 1.06]} />
         </mesh>
-        {/* Sleek Chrome Roof-Rack Side Guardrails Along Cargo Roof Edges */}
+        {/* Sleek Chrome Roof-Rack Side Guardrails Along Cargo Roof Edges (top <= 2.26m) */}
         {[-0.9, 0.9].map((rx, idx) => (
-          <group key={`roof-rail-${idx}`} position={[rx, 2.26, 0]}>
+          <group key={`roof-rail-${idx}`} position={[rx, 2.24, 0]}>
             <mesh
               rotation={[Math.PI * 0.5, 0, 0]}
               material={TOYBOX_MATERIALS.chromeSilver}
@@ -483,10 +491,10 @@ export function DeliveryBoxVanProp({
             {[-0.44, 0.44].map((pz, pIdx) => (
               <mesh
                 key={`rail-post-${pIdx}`}
-                position={[0, -0.025, pz]}
+                position={[0, -0.02, pz]}
                 material={TOYBOX_MATERIALS.darkIron}
               >
-                <cylinderGeometry args={[MIN_THIN_RADIUS, MIN_THIN_RADIUS, 0.05, 6]} />
+                <cylinderGeometry args={[MIN_THIN_RADIUS, MIN_THIN_RADIUS, 0.04, 6]} />
               </mesh>
             ))}
           </group>
@@ -501,8 +509,8 @@ export function DeliveryBoxVanProp({
         material={TOYBOX_MATERIALS.vanCreamBody}
       />
 
-      {/* Forward Cab Section (lz: +2.02 -> +3.48, Open Sky Above Cab Roof!) */}
-      <group position={[0, 0, 2.72]}>
+      {/* Forward Cab Section (lz: +2.02 -> +3.50, Open Sky Above Cab Roof!) */}
+      <group position={[0, 0, 2.69]}>
         <mesh
           castShadow
           receiveShadow

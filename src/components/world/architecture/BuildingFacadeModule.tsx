@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useMemo } from 'react';
+import React, { useEffect, useMemo } from 'react';
 import * as THREE from 'three';
 import {
   buildArchedFrameSpec,
@@ -171,14 +171,27 @@ function buildMansardRoofGeometry(
   const t3: [number, number, number] = [-thw, rise, -thd];
 
   const positions: number[] = [];
+  const uvs: number[] = [];
+  const uvScale = 0.62;
+  const pushVert = (v: [number, number, number]) => {
+    positions.push(v[0], v[1], v[2]);
+    uvs.push(
+      (v[0] + v[2] * 0.35) * uvScale,
+      (v[1] * 1.4 + Math.hypot(v[0], v[2]) * 0.3) * uvScale,
+    );
+  };
   const pushQuad = (
     a: [number, number, number],
     b: [number, number, number],
     c: [number, number, number],
     d: [number, number, number],
   ) => {
-    positions.push(a[0], a[1], a[2], b[0], b[1], b[2], c[0], c[1], c[2]);
-    positions.push(a[0], a[1], a[2], c[0], c[1], c[2], d[0], d[1], d[2]);
+    pushVert(a);
+    pushVert(b);
+    pushVert(c);
+    pushVert(a);
+    pushVert(c);
+    pushVert(d);
   };
 
   pushQuad(b0, b1, t1, t0);
@@ -190,6 +203,7 @@ function buildMansardRoofGeometry(
 
   const geo = new THREE.BufferGeometry();
   geo.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+  geo.setAttribute('uv', new THREE.Float32BufferAttribute(uvs, 2));
   geo.computeVertexNormals();
   return geo;
 }
@@ -247,7 +261,8 @@ function resolveExposedFaces(building: PerimeterBuildingSpec): ExposedFaceConfig
     uMin = fullSpan * 0.5 - 7.25;
     uMax = fullSpan * 0.5;
   } else if (building.id === 'bld-west-5-nw-corner') {
-    // East face (+X): local +U points North (-Z). Exposed world Z: [-29.25 .. -22.0]
+    // East face (+X, rotY=+PI/2 => z = centerZ - u): u = -fullSpan*0.5 anchors to maxZ (-22.0),
+    // keeping exposed world Z locked to [-29.25 .. -22.0] regardless of north minZ extension (-38.5).
     uMin = -fullSpan * 0.5;
     uMax = -fullSpan * 0.5 + 7.25;
   } else if (building.id === 'bld-south-courtyard-1') {
@@ -318,12 +333,15 @@ function WindowUnit({
     ? VENICE_MATERIALS.windowWarmLit
     : VENICE_MATERIALS.windowDarkGlass;
 
-  const glassH = isArched
-    ? jambHeight + frameSpec.archInnerRadius * 0.86
-    : jambHeight;
-  // Glass is overlapped 1.5cm into sill/jambs/lintel so no two faces share a plane.
-  const glassBottomY = 0.075;
-  const glassTopY = 0.09 + glassH + 0.02;
+  const springlineY = 0.09 + jambHeight;
+  const archGlassR = frameSpec.archInnerRadius + 0.015;
+  // Lower rectangular glass stops strictly at springlineY so zero corners poke outside curved stone voussoirs.
+  const rectGlassBottomY = 0.075;
+  const rectGlassTopY = isArched ? springlineY : springlineY + 0.02;
+  const mullionTopY = isArched
+    ? springlineY + frameSpec.archInnerRadius * 0.92
+    : springlineY;
+  const mullionHeight = mullionTopY - 0.09;
   const mullionMat = decalMat(VENICE_MATERIALS.storefrontTimber, 1);
   const muntinMat = decalMat(VENICE_MATERIALS.storefrontTimber, 2);
   const slatMat = decalMat(VENICE_MATERIALS.shutterEspresso, 1);
@@ -379,24 +397,32 @@ function WindowUnit({
         </mesh>
       )}
 
-      {/* Recessed Glass Plane + Crisp Muntin Sash Bars */}
+      {/* Recessed Glass Plane + Fitted Semicircular Arch Fanlight + Crisp Muntin Sash Bars */}
       <mesh
-        position={[0, (glassBottomY + glassTopY) * 0.5, 0.015]}
+        position={[0, (rectGlassBottomY + rectGlassTopY) * 0.5, 0.016]}
         material={glassMat}
       >
-        <boxGeometry args={[width + 0.03, glassTopY - glassBottomY, 0.025]} />
+        <boxGeometry args={[width + 0.03, rectGlassTopY - rectGlassBottomY, 0.024]} />
       </mesh>
+      {isArched && (
+        <mesh
+          position={[0, springlineY, 0.028]}
+          material={glassMat}
+        >
+          <circleGeometry args={[archGlassR, 16, 0, Math.PI]} />
+        </mesh>
+      )}
       <mesh
-        position={[0, 0.09 + glassH * 0.5, 0.037]}
+        position={[0, 0.09 + mullionHeight * 0.5, 0.037]}
         material={mullionMat}
       >
-        <boxGeometry args={[0.04, glassH, 0.03]} />
+        <boxGeometry args={[0.044, mullionHeight, 0.03]} />
       </mesh>
       <mesh
         position={[0, 0.09 + jambHeight * 0.54, 0.044]}
         material={muntinMat}
       >
-        <boxGeometry args={[width + 0.04, 0.04, 0.03]} />
+        <boxGeometry args={[width + 0.04, 0.044, 0.03]} />
       </mesh>
 
       {/* Louvered Venetian Shutters */}
@@ -498,7 +524,7 @@ function JulietBalcony({
             <boxGeometry
               args={
                 useWroughtIron
-                  ? [0.036, railH, 0.036]
+                  ? [0.048, railH, 0.048]
                   : [0.075, railH, 0.075]
               }
             />
@@ -548,37 +574,50 @@ function StorefrontBay({
   trimMat: THREE.Material;
   suppressProtrusions: boolean;
 }) {
+  const hasAwning = Boolean(awningHex && !suppressProtrusions);
+  const openingW = hasAwning
+    ? isDoorBay
+      ? Math.min(1.72, bayWidth * 0.6)
+      : Math.min(1.88, bayWidth * 0.68)
+    : Math.min(2.0, bayWidth * 0.7);
+  const sillHeight = isDoorBay ? 0.04 : hasAwning ? 0.36 : 0.42;
+  const archOuterR = openingW * 0.5 + 0.14;
+  // Compact arch crown strictly <= 2.46m under pitched awnings (and <= 2.94m below signage otherwise).
+  const jambHeight = hasAwning
+    ? Math.max(0.95, 2.46 - sillHeight - archOuterR)
+    : Math.max(1.2, Math.min(1.85, 2.94 - sillHeight - archOuterR));
+  const springlineY = sillHeight + jambHeight;
+
   const frameSpec = useMemo(
     () =>
       buildArchedFrameSpec({
-        openingWidth: Math.min(2.1, bayWidth * 0.72),
-        jambHeight: 2.0,
+        openingWidth: openingW,
+        jambHeight,
         frameWidth: 0.14,
         frameDepth: suppressProtrusions ? 0.04 : 0.1,
-        sillHeight: isDoorBay ? 0.04 : 0.42,
+        sillHeight,
         archSegments: 7,
         includeShutters: false,
       }),
-    [bayWidth, isDoorBay, suppressProtrusions],
+    [openingW, jambHeight, sillHeight, suppressProtrusions],
   );
 
   const awningSpec = useMemo(() => {
-    if (!awningHex || suppressProtrusions) return null;
+    if (!hasAwning) return null;
     return buildPitchedAwningSpec({
       width: Math.min(2.6, bayWidth * 0.88),
       slopedDepth: 0.92,
-      centerY: 2.65,
+      centerY: 2.74,
       pitchDeg: 28,
       stripeCount: 7,
-      mountBottomY: 2.35,
+      mountBottomY: 2.52,
     });
-  }, [awningHex, bayWidth, suppressProtrusions]);
+  }, [hasAwning, bayWidth]);
 
   const awningPrimaryMat = awningHex
     ? getCachedMatteMaterial(awningHex, 0.78, 0.02)
     : VENICE_MATERIALS.stuccoTerracotta;
-
-  const openingW = Math.min(2.1, bayWidth * 0.72);
+  const signageW = Math.min(bayWidth * 0.64, bayWidth * 0.9 - 0.22);
 
   return (
     <group>
@@ -633,66 +672,72 @@ function StorefrontBay({
         <group>
           {/* Panelled Timber Cafe/Bodega Entry Door */}
           <mesh
-            position={[0, 1.08, 0.02]}
+            position={[0, 0.04 + (springlineY - 0.02) * 0.5, 0.02]}
             material={VENICE_MATERIALS.storefrontTimber}
           >
-            <boxGeometry args={[openingW * 0.88, 2.02, 0.03]} />
+            <boxGeometry args={[openingW * 0.88, Math.max(0.9, springlineY - 0.02), 0.03]} />
           </mesh>
-          {/* Warm Glowing Upper Glass Panes & Arched Transom */}
+          {/* Warm Glowing Upper Glass Panes & Fitted Semicircular Arched Transom */}
           <mesh
-            position={[0, 1.56, 0.047]}
+            position={[0, 0.04 + (springlineY - 0.04) * 0.66, 0.047]}
             material={decalMat(VENICE_MATERIALS.storefrontWarmInterior, 1)}
           >
-            <boxGeometry args={[openingW * 0.64, 0.85, 0.024]} />
+            <boxGeometry args={[openingW * 0.64, Math.max(0.45, (springlineY - 0.04) * 0.48), 0.024]} />
           </mesh>
           <mesh
-            position={[0, 2.26, 0.047]}
+            position={[0, springlineY, 0.032]}
             material={decalMat(VENICE_MATERIALS.storefrontWarmInterior, 2)}
           >
-            <boxGeometry args={[openingW * 0.8, 0.42, 0.024]} />
+            <circleGeometry args={[frameSpec.archInnerRadius + 0.012, 18, 0, Math.PI]} />
           </mesh>
           {/* Brass Door Push Bar */}
           <mesh
-            position={[openingW * 0.24, 1.02, 0.08]}
+            position={[openingW * 0.24, Math.min(1.02, springlineY * 0.68), 0.08]}
             material={TOYBOX_MATERIALS.brassAccent}
           >
-            <cylinderGeometry args={[0.02, 0.02, 0.36, 8]} />
+            <cylinderGeometry args={[0.024, 0.024, 0.36, 8]} />
           </mesh>
         </group>
       ) : (
         <group>
-          {/* Warm Illuminated Bakery / Trattoria Display Window */}
+          {/* Warm Illuminated Bakery / Trattoria Display Window + Semicircular Fanlight */}
           <mesh
-            position={[0, 1.47, 0.02]}
+            position={[0, (sillHeight + springlineY) * 0.5, 0.02]}
             material={VENICE_MATERIALS.storefrontWarmInterior}
           >
-            <boxGeometry args={[openingW + 0.03, 2.12, 0.025]} />
+            <boxGeometry args={[openingW + 0.03, jambHeight + 0.02, 0.025]} />
           </mesh>
-          {/* Dark Timber Muntin Grid */}
           <mesh
-            position={[0, 1.48, 0.043]}
+            position={[0, springlineY, 0.032]}
+            material={VENICE_MATERIALS.storefrontWarmInterior}
+          >
+            <circleGeometry args={[frameSpec.archInnerRadius + 0.012, 18, 0, Math.PI]} />
+          </mesh>
+          {/* Dark Timber Muntin Grid Clamped Strictly Inside Arch Opening */}
+          <mesh
+            position={[0, sillHeight + (jambHeight + frameSpec.archInnerRadius) * 0.5, 0.043]}
             material={decalMat(VENICE_MATERIALS.storefrontTimber, 1)}
           >
-            <boxGeometry args={[0.05, 2.07, 0.03]} />
+            <boxGeometry args={[0.05, jambHeight + frameSpec.archInnerRadius - 0.01, 0.03]} />
           </mesh>
           <mesh
-            position={[0, 1.72, 0.05]}
+            position={[0, sillHeight + jambHeight * 0.55, 0.05]}
             material={decalMat(VENICE_MATERIALS.storefrontTimber, 2)}
           >
             <boxGeometry args={[openingW + 0.04, 0.05, 0.03]} />
           </mesh>
-          {/* Shop Signage Frieze Plaque Above Window */}
+          {/* Shop Signage Frieze Plaque Centered Cleanly Above Awning & Below Belt Course */}
           <mesh
-            position={[0, 3.04, suppressProtrusions ? 0.03 : 0.06]}
+            position={[0, 3.17, suppressProtrusions ? 0.03 : 0.06]}
             material={VENICE_MATERIALS.signagePlaqueBg}
           >
-            <boxGeometry args={[bayWidth * 0.72, 0.26, 0.04]} />
+            <boxGeometry args={[signageW, 0.22, 0.04]} />
           </mesh>
           <mesh
-            position={[0, 3.04, suppressProtrusions ? 0.055 : 0.085]}
+            position={[0, 3.17, suppressProtrusions ? 0.055 : 0.085]}
             material={decalMat(VENICE_MATERIALS.signagePlaqueInk, 1)}
           >
-            <boxGeometry args={[bayWidth * 0.54, 0.08, 0.03]} />
+            <boxGeometry args={[signageW * 0.76, 0.075, 0.03]} />
           </mesh>
         </group>
       )}
@@ -723,15 +768,15 @@ function StorefrontBay({
           >
             <boxGeometry args={awningSpec.frontValance.size} />
           </mesh>
-          {/* Wrought-Iron Awning Wall-Mount Tie Rods */}
+          {/* Wrought-Iron Awning Wall-Mount Tie Rods Seated Above Arch Crown (>=2.54m) */}
           {[-awningSpec.width * 0.42, awningSpec.width * 0.42].map((ax, i) => (
             <mesh
               key={`tie-${i}`}
-              position={[ax, 2.52, -0.18]}
-              rotation={[0.6, 0, 0]}
+              position={[ax, 2.63, -0.18]}
+              rotation={[Math.PI * 0.5 - 0.34, 0, 0]}
               material={VENICE_MATERIALS.wroughtIron}
             >
-              <cylinderGeometry args={[0.019, 0.019, 0.56, 6]} />
+              <cylinderGeometry args={[0.025, 0.025, 0.44, 6]} />
             </mesh>
           ))}
         </group>
@@ -772,12 +817,12 @@ function FireEscapeAssembly({
             >
               <boxGeometry args={[platW, 0.055, platD + 0.02]} />
             </mesh>
-            {/* Front & Side Safety Railings */}
+            {/* Front & Side Safety Railings (>=4.6cm cross-section for anti-shimmer yaw pans) */}
             <mesh
               position={[0, ly + 0.78, platD - 0.03]}
               material={VENICE_MATERIALS.wroughtIron}
             >
-              <boxGeometry args={[platW, 0.04, 0.04]} />
+              <boxGeometry args={[platW, 0.048, 0.048]} />
             </mesh>
             {[-0.9, -0.45, 0, 0.45, 0.9].map((px, pi) => (
               <mesh
@@ -785,7 +830,7 @@ function FireEscapeAssembly({
                 position={[px, ly + 0.4, platD - 0.03]}
                 material={VENICE_MATERIALS.wroughtIron}
               >
-                <boxGeometry args={[0.036, 0.78, 0.036]} />
+                <boxGeometry args={[0.048, 0.78, 0.048]} />
               </mesh>
             ))}
             {/* Diagonal Zig-Zag Stair Flight */}
@@ -1125,6 +1170,13 @@ export function BuildingFacadeModule({
         : null,
     [building.roofStyle, widthX, depthZ, roofRise],
   );
+
+  useEffect(() => {
+    return () => {
+      hippedRoofGeo?.dispose();
+      mansardRoofGeo?.dispose();
+    };
+  }, [hippedRoofGeo, mansardRoofGeo]);
 
   const exposedFaces = useMemo(
     () => resolveExposedFaces(building),

@@ -10,8 +10,8 @@ export const CLUB_ORDER: readonly ClubId[] = [
 ] as const;
 
 export const BALL_RADIUS = 0.18;
-export const CUP_RADIUS = 0.38;
-export const CUP_DEPTH = 0.14;
+export const CUP_RADIUS = 0.42;
+export const CUP_DEPTH = 0.42;
 export const CUP_APRON_RADIUS = 1.5;
 export const AUTO_PUTTER_DISTANCE = 6.5;
 export const WORLD_GRAVITY_Y = -18.0;

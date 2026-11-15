@@ -513,41 +513,45 @@ export function PlanterHedgeProp({
         <boxGeometry args={[width - 0.16, 0.04, depth - 0.16]} />
       </mesh>
 
-      {/* Main Clipped Boxwood Hedge Volume + Sculpted Faceted Shrubs */}
+      {/* Sculpted Two-Tier Beveled Boxwood Topiary Hedge */}
       <mesh
         castShadow
         receiveShadow
-        position={[0, 0.62, 0]}
+        position={[0, 0.56, 0]}
         material={TOYBOX_MATERIALS.foliageEmerald}
       >
-        <boxGeometry args={[width - 0.24, 0.48, depth - 0.24]} />
+        <boxGeometry args={[width - 0.22, 0.36, depth - 0.22]} />
       </mesh>
-      {[-depth * 0.3, 0, depth * 0.3].map((hz, idx) => (
-        <group key={`shrub-${idx}`} position={[0, 0.72, hz]}>
+      <mesh
+        castShadow
+        receiveShadow
+        position={[0, 0.79, 0]}
+        material={TOYBOX_MATERIALS.foliageEmerald}
+      >
+        <boxGeometry args={[width - 0.34, 0.16, depth - 0.34]} />
+      </mesh>
+      {/* Cleanly Seated Crown Topiary Finial Spheres & Geranium Blossoms */}
+      {[-depth * 0.28, 0, depth * 0.28].map((hz, idx) => (
+        <group key={`shrub-${idx}`} position={[0, 0.86, hz]}>
           <mesh
             castShadow
             receiveShadow
-            scale={[0.92, 0.72, 1.05]}
-            material={
-              idx === 1
-                ? TOYBOX_MATERIALS.foliageSunny
-                : TOYBOX_MATERIALS.foliageEmerald
-            }
+            scale={[0.85, 0.75, 0.95]}
+            material={TOYBOX_MATERIALS.foliageSunny}
           >
-            <dodecahedronGeometry args={[0.38, 0]} />
-          </mesh>
-          {/* Tiny Terrace Geranium Blossoms */}
-          <mesh
-            position={[idx % 2 === 0 ? 0.18 : -0.18, 0.12, 0.12]}
-            material={TOYBOX_MATERIALS.flowerCoral}
-          >
-            <icosahedronGeometry args={[0.065, 0]} />
+            <icosahedronGeometry args={[0.21, 1]} />
           </mesh>
           <mesh
-            position={[idx % 2 === 0 ? -0.15 : 0.16, 0.08, -0.14]}
+            position={[idx % 2 === 0 ? 0.14 : -0.14, 0.08, 0.1]}
             material={TOYBOX_MATERIALS.flowerCoral}
           >
-            <icosahedronGeometry args={[0.055, 0]} />
+            <icosahedronGeometry args={[0.058, 0]} />
+          </mesh>
+          <mesh
+            position={[idx % 2 === 0 ? -0.12 : 0.12, 0.05, -0.1]}
+            material={TOYBOX_MATERIALS.flowerCoral}
+          >
+            <icosahedronGeometry args={[0.048, 0]} />
           </mesh>
         </group>
       ))}
@@ -599,7 +603,7 @@ export function SubwayPortalProp({
       rotation={[0, rotationY, 0]}
       userData={{ occludableProp: true, propId }}
     >
-      {/* Perimeter Limestone Curb Apron (Leaves Interior Chute Open for Dark Recessed Well) */}
+      {/* Perimeter Limestone Curb Apron (exact corner-flush, zero coplanar overlap) */}
       {[-1.73, 1.73].map((ax, idx) => (
         <mesh
           key={`apron-side-${idx}`}
@@ -615,22 +619,22 @@ export function SubwayPortalProp({
         position={[0, 0.02, -1.52]}
         material={TOYBOX_MATERIALS.limestoneCurb}
       >
-        <boxGeometry args={[2.78, 0.04, 0.32]} />
+        <boxGeometry args={[2.76, 0.04, 0.32]} />
       </mesh>
       <mesh
         receiveShadow
         position={[0, 0.02, 1.48]}
         material={TOYBOX_MATERIALS.limestoneCurb}
       >
-        <boxGeometry args={[2.8, 0.04, 0.4]} />
+        <boxGeometry args={[2.76, 0.04, 0.4]} />
       </mesh>
 
       {/* Deep Recessed #0E1418 Tunnel Chute Floor Pan */}
       <mesh
-        position={[0, 0.008, -0.045]}
+        position={[0, 0.008, -0.04]}
         material={DECAL.tunnelFloorPan}
       >
-        <boxGeometry args={[2.78, 0.016, 2.65]} />
+        <boxGeometry args={[2.76, 0.016, 2.64]} />
       </mesh>
 
       {/* Left & Right Carved Stone Knee Walls (x = +/- 1.62) */}
@@ -652,13 +656,13 @@ export function SubwayPortalProp({
           >
             <boxGeometry args={[0.48, 0.08, 3.32]} />
           </mesh>
-          {/* Forest-Green Cast-Iron Pipe Railings Along Side Walls */}
+          {/* Forest-Green Cast-Iron Pipe Railings Along Side Walls (butt-mitered cleanly at z = -1.51) */}
           <mesh
             castShadow
-            position={[0, 1.16, 0]}
+            position={[0, 1.16, 0.04]}
             material={TOYBOX_MATERIALS.subwayIronGreen}
           >
-            <boxGeometry args={[0.08, 0.06, 3.18]} />
+            <boxGeometry args={[0.08, 0.06, 3.1]} />
           </mesh>
           {[-1.4, -0.46, 0.48].map((pz, pIdx) => (
             <mesh
@@ -739,13 +743,24 @@ export function SubwayPortalProp({
       >
         <boxGeometry args={[2.92, 0.08, 0.32]} />
       </mesh>
+      {/* Mitered Rear Green Pipe Railing + 4 Vertical Stanchions Anchored Into Coping */}
       <mesh
         castShadow
-        position={[0, 1.2, -1.51]}
+        position={[0, 1.16, -1.55]}
         material={TOYBOX_MATERIALS.subwayIronGreen}
       >
-        <boxGeometry args={[2.88, 0.06, 0.08]} />
+        <boxGeometry args={[3.32, 0.06, 0.08]} />
       </mesh>
+      {[-1.24, -0.42, 0.42, 1.24].map((rx, rIdx) => (
+        <mesh
+          key={`rear-rail-post-${rIdx}`}
+          castShadow
+          position={[rx, 1.045, -1.55]}
+          material={TOYBOX_MATERIALS.subwayIronGreen}
+        >
+          <cylinderGeometry args={[0.036, 0.04, 0.22, 8]} />
+        </mesh>
+      ))}
 
       {/* Recessed Deep Shadow #0E1418 Tunnel Mouth & Multi-Rib Vaulted Portal Frame */}
       <mesh
@@ -944,23 +959,51 @@ export function SubwayPortalProp({
         >
           <boxGeometry args={[2.9, 0.24, 0.03]} />
         </mesh>
-        {/* Cream Stripe + White Subway Route Bullet Accents */}
+        {/* Crisp Cream Trim Stripe + Balanced Transit Route Bullets & Centered Station Plaque */}
         <mesh
-          position={[0, -0.07, 0.165]}
+          position={[0, -0.072, 0.165]}
           material={DECAL.signStripe}
         >
-          <boxGeometry args={[2.68, 0.036, 0.02]} />
+          <boxGeometry args={[2.68, 0.034, 0.02]} />
         </mesh>
-        {[-1.12, -0.88].map((bx, idx) => (
+        {/* Left Route Bullet Pair (Lines 5 & M) */}
+        {[-1.12, -0.9].map((bx, idx) => (
           <mesh
-            key={`bullet-${idx}`}
-            position={[bx, 0.03, 0.165]}
+            key={`bullet-l-${idx}`}
+            position={[bx, 0.028, 0.166]}
             rotation={[Math.PI * 0.5, 0, 0]}
             material={idx === 0 ? DECAL.bulletCoral : DECAL.bulletAmber}
           >
-            <cylinderGeometry args={[0.072, 0.072, 0.02, 12]} />
+            <cylinderGeometry args={[0.068, 0.068, 0.02, 14]} />
           </mesh>
         ))}
+        {/* Centered Diegetic Enamel Wordmark Grouping ("5TH & MERCER ST") */}
+        <group position={[0.04, 0.03, 0.166]}>
+          <mesh position={[-0.4, 0, 0]} material={DECAL.signStripe}>
+            <boxGeometry args={[0.36, 0.056, 0.018]} />
+          </mesh>
+          <mesh position={[-0.12, 0, 0]} material={DECAL.bulletAmber}>
+            <boxGeometry args={[0.08, 0.056, 0.018]} />
+          </mesh>
+          <mesh position={[0.24, 0, 0]} material={DECAL.signStripe}>
+            <boxGeometry args={[0.5, 0.056, 0.018]} />
+          </mesh>
+        </group>
+        {/* Symmetrical Right Station Express & Brass Wayfinding Medallions */}
+        <mesh
+          position={[0.92, 0.028, 0.166]}
+          rotation={[Math.PI * 0.5, 0, 0]}
+          material={DECAL.bulletCoral}
+        >
+          <cylinderGeometry args={[0.064, 0.064, 0.02, 14]} />
+        </mesh>
+        <mesh
+          position={[1.14, 0.028, 0.166]}
+          rotation={[Math.PI * 0.5, 0, 0]}
+          material={DECAL.signStripe}
+        >
+          <cylinderGeometry args={[0.064, 0.064, 0.02, 14]} />
+        </mesh>
         {/* Peaked Pediment Crest */}
         <mesh
           castShadow

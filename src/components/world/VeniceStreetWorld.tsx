@@ -116,7 +116,8 @@ function isDynamicProp(prop: CoursePropSpec): boolean {
     prop.type === 'fire_hydrant_jet' ||
     prop.type === 'fountain_water_hazard' ||
     prop.type === 'delivery_box_van' ||
-    prop.type === 'pigeon_flock'
+    prop.type === 'pigeon_flock' ||
+    prop.type === 'subway_steam_grate'
   );
 }
 
@@ -243,6 +244,7 @@ export const VeniceStreetWorld = React.memo(function VeniceStreetWorld({
               lastFountainSplashAt={fntTs}
               lastVanRoofHitAt={vanTs}
               showWireframe={showWireframe}
+              forceAction={forceAction}
               isStandaloneQA={false}
             />
           );

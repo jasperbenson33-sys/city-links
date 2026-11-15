@@ -110,3 +110,18 @@ export function withSoftContrast<T extends THREE.Material>(material: T): T {
   SOFTENED_CACHE.set(key, clone);
   return clone;
 }
+
+/**
+ * Deterministic smooth camera-proximity fade for volumetric steam puffs:
+ * hides puffs inside `startDist` (1.65m) to prevent near-plane clipping/whiteout
+ * and scales opacity smoothly to 1.0 by `endDist` (3.2m).
+ */
+export function computeSteamCameraFade(
+  camDist: number,
+  startDist = 1.65,
+  endDist = 3.2
+): number {
+  const span = Math.max(1e-4, endDist - startDist);
+  const t = Math.max(0, Math.min(1, (camDist - startDist) / span));
+  return t * t * (3 - 2 * t);
+}

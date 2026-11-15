@@ -1,5 +1,6 @@
 import {
   BALL_RADIUS,
+  CLUB_SPECS,
   CUP_APRON_RADIUS,
   CUP_DEPTH,
   CUP_RADIUS,
@@ -834,7 +835,7 @@ export const PERIMETER_BUILDINGS: PerimeterBuildingSpec[] = [
     name: 'Palazzo Angolo NW',
     ring: 'primary_facade',
     corridorSector: 'west_5th_ave',
-    boundsXZ: { minX: -15.5, maxX: -7.25, minZ: -37.5, maxZ: -22.0 },
+    boundsXZ: { minX: -15.5, maxX: -7.25, minZ: -38.5, maxZ: -22.0 },
     height: 14.0,
     stories: 4,
     palette: 'terracotta',
@@ -856,7 +857,7 @@ export const PERIMETER_BUILDINGS: PerimeterBuildingSpec[] = [
     name: 'Caffè Veneziano',
     ring: 'primary_facade',
     corridorSector: 'north_mercer_bend',
-    boundsXZ: { minX: -7.25, maxX: 5.5, minZ: -37.5, maxZ: -29.25 },
+    boundsXZ: { minX: -7.25, maxX: 5.5, minZ: -38.5, maxZ: -29.25 },
     height: 12.2,
     stories: 3,
     palette: 'cream_limestone',
@@ -1297,12 +1298,12 @@ export const ARCHITECTURAL_WALLS: ArchitecturalWallSpec[] = [
     kind: 'courtyard_boundary_wall',
     groundY: ELEVATIONS.SIDEWALK_Y,
     topY: 0.65,
-    center: [18.92, 0.4, -16.365],
-    size: [0.16, 0.5, 3.23],
+    center: [18.92, 0.4, -16.375],
+    size: [0.16, 0.5, 3.25],
     rotationY: 0,
     surfaceTag: 'masonry_wall',
     restitution: 0.46,
-    aabb: computeCenteredBoxAABB([18.92, 0.4, -16.365], [0.16, 0.5, 3.23], 0),
+    aabb: computeCenteredBoxAABB([18.92, 0.4, -16.375], [0.16, 0.5, 3.25], 0),
   },
 ];
 
@@ -1401,6 +1402,58 @@ const HOTDOG_DESIGN_V_OUT = computeAwningBounceVelocity(
   0.28,
 );
 
+function computeHotdogPredictedLandingAndStop(): {
+  landingXZ: Vec2Tuple;
+  stopXZ: Vec2Tuple;
+} {
+  const greenContactY = ELEVATIONS.COURTYARD_GREEN_Y + BALL_RADIUS;
+  const disc =
+    HOTDOG_DESIGN_V_OUT[1] * HOTDOG_DESIGN_V_OUT[1] -
+    4 * (-0.5 * WORLD_GRAVITY_Y) * (greenContactY - HOTDOG_AWNING_CENTER[1]);
+  const tGreenLand =
+    (HOTDOG_DESIGN_V_OUT[1] + Math.sqrt(Math.max(0, disc))) / -WORLD_GRAVITY_Y;
+  const rawLandX = HOTDOG_AWNING_CENTER[0] + HOTDOG_DESIGN_V_OUT[0] * tGreenLand;
+  const rawLandZ = HOTDOG_AWNING_CENTER[2] + HOTDOG_DESIGN_V_OUT[2] * tGreenLand;
+
+  const greenZone = GROUND_ZONES.find(
+    (z) => z.id === 'zone-courtyard-putting-green',
+  );
+  const dt = 1 / 60;
+  let x = rawLandX;
+  let z = rawLandZ;
+  let vx = HOTDOG_DESIGN_V_OUT[0] * CLUB_SPECS.wedge.turfCheckMultiplier;
+  let vz = HOTDOG_DESIGN_V_OUT[2] * CLUB_SPECS.wedge.turfCheckMultiplier;
+  const effectiveDamping =
+    CLUB_SPECS.wedge.rollDamping + (greenZone?.rollDamping ?? 1.65);
+
+  for (let step = 0; step < 360; step++) {
+    if (Math.hypot(vx, vz) < 0.08) break;
+    x += vx * dt;
+    z += vz * dt;
+    const decay = Math.exp(-effectiveDamping * dt);
+    vx *= decay;
+    vz *= decay;
+  }
+
+  return {
+    landingXZ: [Number(rawLandX.toFixed(2)), Number(rawLandZ.toFixed(2))],
+    stopXZ: [Number(x.toFixed(2)), Number(z.toFixed(2))],
+  };
+}
+
+const HOTDOG_CART_LOCAL_SIZE: Vec3Tuple = [1.92, 2.58, 2.04];
+const HOTDOG_CART_FULL_AABB = computeRotatedAABB(
+  [17.5, ELEVATIONS.SIDEWALK_Y, -16.35],
+  HOTDOG_CART_LOCAL_SIZE,
+  HOTDOG_CART_YAW,
+);
+const HOTDOG_CART_CARRIAGE_AABB = computeRotatedAABB(
+  [17.5, ELEVATIONS.SIDEWALK_Y, -16.35],
+  [1.65, 1.35, 1.88],
+  HOTDOG_CART_YAW,
+);
+const HOTDOG_PREDICTED_TRAJECTORY = computeHotdogPredictedLandingAndStop();
+
 export const COURSE_PROPS: CoursePropSpec[] = [
   // --------------------------------------------------------------------------
   // 1. SIDEWALK SCAFFOLDING SHED (Left/West Sidewalk y=0.15m, 0.00m wall gap, 2.35m clear height)
@@ -1458,7 +1511,8 @@ export const COURSE_PROPS: CoursePropSpec[] = [
     aabb: computeRotatedAABB([2.28, ELEVATIONS.ROAD_ASPHALT_Y, -6.9], [2.04, 2.26, 7.0], Math.PI),
     // Split solidColliders leaving z: [-3.4 -> -6.0] rear ramp completely open,
     // z: [-6.0 -> -7.8] center roof-access kicker channel open above y = 1.08m,
-    // and z: [-7.8 -> -10.4] flat roof launch deck open at y = 2.24m!
+    // z: [-7.8 -> -8.92] flat cargo roof launch deck open at y = 2.24m,
+    // and z: [-8.92 -> -10.4] forward cab roof accurately stepped down to y = 1.82m!
     solidColliders: [
       // Left cargo side wall along roof-access kicker (x: 1.26..1.44, z: -7.8..-6.0)
       { min: [1.26, 0.0, -7.8], max: [1.44, 2.24, -6.0] },
@@ -1468,16 +1522,18 @@ export const COURSE_PROPS: CoursePropSpec[] = [
       { min: [1.44, 0.0, -7.8], max: [3.12, 0.96, -6.2] },
       // Recessed shoulder under kicker crest (z: -7.98..-7.80) so ball crests smoothly onto y = 2.24m roof
       { min: [1.26, 0.0, -7.98], max: [3.3, 2.08, -7.8] },
-      // Forward van body & cab supporting flat roof launch deck (y: 0.0..2.24, z: -10.4..-7.98)
-      { min: [1.26, 0.0, -10.4], max: [3.3, 2.24, -7.98] },
+      // Forward cargo box body supporting flat roof launch deck (y: 0.0..2.24, z: -8.92..-7.98)
+      { min: [1.26, 0.0, -8.92], max: [3.3, 2.24, -7.98] },
+      // Stepped-down forward cab body matching visual cab roof height (y: 0.0..1.82, z: -10.4..-8.92)
+      { min: [1.26, 0.0, -10.4], max: [3.3, 1.82, -8.92] },
     ],
     surfaceTag: 'van_roof_deck',
     blocksGroundRoll: false,
     reactive: {
       kind: 'van_ramp_and_roof_launch',
-      // Launch deck strictly at z: [-10.35 .. -7.35] (<= -7.3m, completely clear of tree canopy at z >= -5.95!)
-      zoneCenter: [2.28, 2.24, -8.85],
-      zoneHalfExtents: [0.95, 0.22, 1.5],
+      // Launch deck strictly over cargo roof z: [-8.92 .. -7.80] (<= -7.3m, completely clear of tree canopy at z >= -5.95!)
+      zoneCenter: [2.28, 2.24, -8.36],
+      zoneHalfExtents: [0.95, 0.22, 0.56],
       restitution: 0.62,
       boostVelocity: [-0.8, 5.6, -13.4],
     },
@@ -1519,7 +1575,7 @@ export const COURSE_PROPS: CoursePropSpec[] = [
         restitution: 0.52,
         aabb: computeAABBFromBoundsXZ({ minX: 1.44, maxX: 3.12, minZ: -7.8, maxZ: -6.0 }, 1.08, 2.24),
       },
-      roofLaunchDeckBoundsXZ: { minX: 1.36, maxX: 3.2, minZ: -10.4, maxZ: -7.8 },
+      roofLaunchDeckBoundsXZ: { minX: 1.36, maxX: 3.2, minZ: -8.92, maxZ: -7.8 },
     },
   },
   {
@@ -1595,17 +1651,29 @@ export const COURSE_PROPS: CoursePropSpec[] = [
     position: [17.5, ELEVATIONS.SIDEWALK_Y, -16.35],
     groundY: ELEVATIONS.SIDEWALK_Y,
     rotationY: HOTDOG_CART_YAW,
-    localSize: [1.65, 2.5, 2.0],
-    aabb: computeRotatedAABB([17.5, ELEVATIONS.SIDEWALK_Y, -16.35], [1.65, 2.5, 2.0], HOTDOG_CART_YAW),
+    localSize: HOTDOG_CART_LOCAL_SIZE,
+    aabb: HOTDOG_CART_FULL_AABB,
     solidColliders: [
-      computeRotatedAABB([17.5, ELEVATIONS.SIDEWALK_Y, -16.35], [1.65, 2.5, 2.0], HOTDOG_CART_YAW),
+      HOTDOG_CART_CARRIAGE_AABB,
+      {
+        min: [
+          HOTDOG_CART_FULL_AABB.min[0],
+          ELEVATIONS.SIDEWALK_Y + 1.7,
+          HOTDOG_CART_FULL_AABB.min[2],
+        ],
+        max: [
+          HOTDOG_CART_FULL_AABB.max[0],
+          HOTDOG_CART_FULL_AABB.max[1],
+          HOTDOG_CART_FULL_AABB.max[2],
+        ],
+      },
     ],
     surfaceTag: 'awning_cushion',
     blocksGroundRoll: true,
     reactive: {
       kind: 'awning_cushion_bank',
       zoneCenter: HOTDOG_AWNING_CENTER,
-      zoneHalfExtents: [1.1, 0.35, 0.95],
+      zoneHalfExtents: [0.94, 0.35, 0.95],
       restitution: 0.28,
       underpassClearHeight: 0.56,
       underpassClearWidth: 1.05,
@@ -1614,12 +1682,12 @@ export const COURSE_PROPS: CoursePropSpec[] = [
       pitchDeg: 28,
       restitution: 0.28,
       awningCenter: HOTDOG_AWNING_CENTER,
-      awningSize: [2.1, 0.06, 1.65],
+      awningSize: [1.88, 0.06, 1.65],
       worldNormal: HOTDOG_AWNING_NORMAL_INFO.worldNormal,
       designIncomingVelocity: HOTDOG_DESIGN_V_IN,
       designReflectedVelocity: HOTDOG_DESIGN_V_OUT,
-      predictedGreenLandingXZ: [22.89, -20.72],
-      predictedStopXZ: [24.18, -21.74],
+      predictedGreenLandingXZ: HOTDOG_PREDICTED_TRAJECTORY.landingXZ,
+      predictedStopXZ: HOTDOG_PREDICTED_TRAJECTORY.stopXZ,
     },
   },
   {
@@ -2743,27 +2811,41 @@ export function auditStation360PerimeterClosure(
   };
 }
 
+function resolveMasterPlan(courseOrPlan: unknown): CourseMasterPlan {
+  if (
+    courseOrPlan &&
+    typeof courseOrPlan === 'object' &&
+    'groundZones' in courseOrPlan &&
+    'ramps' in courseOrPlan &&
+    'props' in courseOrPlan
+  ) {
+    return courseOrPlan as CourseMasterPlan;
+  }
+  return COURSE_MASTER_PLAN;
+}
+
 /**
  * Drop-in surface elevation helper compatible with trajectory & ball physics controllers.
  */
 export function getCourseSurfaceElevationAt(
-  _courseOrPlan: unknown,
+  courseOrPlan: unknown,
   x: number,
   z: number,
 ): number {
-  return getMasterPlanGroundElevationAt(x, z, COURSE_MASTER_PLAN);
+  return getMasterPlanGroundElevationAt(x, z, resolveMasterPlan(courseOrPlan));
 }
 
 /**
  * Checks whether `(x, y, z)` lies inside the front-center Decorative Stone Fountain Hazard water pool.
  */
 export function isWorldPointInWaterHazard(
-  _courseOrPlan: unknown,
+  courseOrPlan: unknown,
   x: number,
   y: number,
   z: number,
 ): boolean {
-  const fountain = COURSE_MASTER_PLAN.props.find(
+  const plan = resolveMasterPlan(courseOrPlan);
+  const fountain = plan.props.find(
     (p) => p.id === 'fountain-courtyard-front',
   );
   if (!fountain || !fountain.reactive?.zoneRadius) return false;

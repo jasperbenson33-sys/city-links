@@ -67,7 +67,6 @@ export const GolfBagAndTeeProp = React.memo(function GolfBagAndTeeProp({
       name="golf-bag-and-tee-prop"
       position={position}
       rotation={[0, rotationY, 0]}
-      userData={{ occludableProp: true }}
     >
       {/* Tiered Brass-Framed Tee Mat (flush at y = 0, compact 1.06m Z depth) */}
       <mesh
@@ -149,8 +148,8 @@ export const GolfBagAndTeeProp = React.memo(function GolfBagAndTeeProp({
             <cylinderGeometry args={[0.019, 0.018, 0.72, 8]} />
           </mesh>
 
-          {/* Tilted Tour Golf Bag Body Anchored Into Base Cup */}
-          <group position={[0, 0.42, -0.04]} rotation={[0.18, 0, 0]}>
+          {/* Tilted Tour Golf Bag Body Anchored Into Base Cup (seated cleanly below 0.044m rim) */}
+          <group position={[0, 0.4, -0.04]} rotation={[0.18, 0, 0]}>
             <mesh
               castShadow
               receiveShadow

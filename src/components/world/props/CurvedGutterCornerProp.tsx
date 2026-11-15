@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useMemo } from 'react';
+import React, { useEffect, useMemo } from 'react';
 import * as THREE from 'three';
 import { TOYBOX_MATERIALS } from '@/materials';
 import { withPolygonOffset } from './propMaterials';
@@ -90,7 +90,7 @@ export function CurvedGutterCornerProp({
         endTheta: Math.PI,
         bottomY: 0,
         topY: 0.16,
-        segments: 16,
+        segments: 32,
       }),
     []
   );
@@ -107,10 +107,17 @@ export function CurvedGutterCornerProp({
         endTheta: Math.PI,
         bottomY: 0,
         topY: 0.025,
-        segments: 16,
+        segments: 32,
       }),
     []
   );
+
+  useEffect(() => {
+    return () => {
+      arcCurbGeo.dispose();
+      arcDrainGeo.dispose();
+    };
+  }, [arcCurbGeo, arcDrainGeo]);
 
   return (
     <group

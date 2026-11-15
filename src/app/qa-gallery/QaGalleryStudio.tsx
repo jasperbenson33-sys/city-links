@@ -28,6 +28,7 @@ import {
   type RenderablePropSpec,
 } from '@/components/world/props';
 import { PERIMETER_BUILDINGS } from '@/config/courseMasterPlan';
+import { isQaFreezeActive } from '@/components/world/qaFreeze';
 import type { PerimeterBuildingSpec } from '@/types/course';
 
 type CameraPresetView = 'macro' | 'front' | 'side' | 'top';
@@ -313,7 +314,7 @@ function TurntableAssetStage({
 
   useFrame((_, delta) => {
     if (!stageRef.current) return;
-    if (qaFreeze) return;
+    if (qaFreeze || isQaFreezeActive()) return;
     if (autoTurntable) {
       stageRef.current.rotation.y += Math.min(delta, 0.05) * 0.42;
     } else {
@@ -397,6 +398,13 @@ function TurntableAssetStage({
             lastHydrantSurfAt={lastActionAt}
             lastFountainSplashAt={lastActionAt}
             lastVanRoofHitAt={lastActionAt}
+            forceAction={
+              asset.propEntry?.propType === 'subway_steam_grate'
+                ? forceSteam
+                : asset.propEntry?.propType === 'pigeon_flock'
+                  ? forceScatter
+                  : false
+            }
             showWireframe={showWireframe}
             isStandaloneQA
           />

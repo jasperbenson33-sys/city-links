@@ -39,18 +39,20 @@ const CLOUD_SPECS: CloudSpec[] = [
 /** Sky dome radius (< camera far 185) — the dome follows the camera so it can never be clipped. */
 const SKY_DOME_RADIUS = 150;
 
+/** Shared horizon/fog hex so sky dome horizon, WebGL clear color, and distance fog match to 0 LSBs. */
+const HORIZON_MIST_HEX = '#F5DEC2';
+
 /**
- * Static, tightly fitted sun-shadow volume for the compact single hole.
- * Box = playable 5th & Mercer corridor + courtyard (+ margin on the sun-facing side for casters),
- * world metres.
+ * Static, tightly fitted sun-shadow volume for Hole 1 (5th & Mercer corridor + courtyard + perimeter
+ * rooftops `x: -15.5..41.5, z: -38.5..45.0, y: 0..18.2`), eliminating dead margin for ~2.5cm shadow texels.
  */
 const SHADOW_FIT_BOX = {
-  minX: -27,
-  maxX: 44,
-  minZ: -34,
-  maxZ: 55,
+  minX: -16.5,
+  maxX: 42.5,
+  minZ: -39.5,
+  maxZ: 46.0,
   minY: -0.5,
-  maxY: 16,
+  maxY: 18.5,
 };
 
 export interface LightingAndSkyProps {
@@ -73,7 +75,6 @@ export const LightingAndSky = React.memo(function LightingAndSky({
   const cloudsGroupRef = useRef<THREE.Group>(null);
   const elapsedRef = useRef(0);
   const shadowBakeRemainingRef = useRef(5);
-  const prevSceneChildCountRef = useRef(-1);
   const gl = useThree((s) => s.gl);
 
   const resolvedSpan = shadowSpan ?? 12;
@@ -91,6 +92,7 @@ export const LightingAndSky = React.memo(function LightingAndSky({
   ];
 
   const useFittedFrustum = showHorizon && shadowSpan === undefined;
+  const shadowMapSize: [number, number] = useFittedFrustum ? [4096, 4096] : [2048, 2048];
 
   /** Static light-space extents (never changes frame-to-frame, so shadow texels cannot swim). */
   const fitted = useMemo(() => {
@@ -100,7 +102,12 @@ export const LightingAndSky = React.memo(function LightingAndSky({
     const xAxis = new THREE.Vector3(0, 1, 0).cross(zAxis).normalize();
     const yAxis = zAxis.clone().cross(xAxis).normalize();
     const b = SHADOW_FIT_BOX;
-    let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+    let minX = Infinity;
+    let maxX = -Infinity;
+    let minY = Infinity;
+    let maxY = -Infinity;
+    let minDepth = Infinity;
+    let maxDepth = -Infinity;
     const p = new THREE.Vector3();
     for (const x of [b.minX, b.maxX]) {
       for (const y of [b.minY, b.maxY]) {
@@ -108,19 +115,23 @@ export const LightingAndSky = React.memo(function LightingAndSky({
           p.set(x, y, z).sub(eye);
           const lx = p.dot(xAxis);
           const ly = p.dot(yAxis);
+          const depth = -p.dot(zAxis);
           minX = Math.min(minX, lx);
           maxX = Math.max(maxX, lx);
           minY = Math.min(minY, ly);
           maxY = Math.max(maxY, ly);
+          minDepth = Math.min(minDepth, depth);
+          maxDepth = Math.max(maxDepth, depth);
         }
       }
     }
-    // Snap to whole metres so the fitted volume is a clean, reproducible number.
     return {
       left: Math.floor(minX),
       right: Math.ceil(maxX),
       bottom: Math.floor(minY),
       top: Math.ceil(maxY),
+      near: Math.max(2, Math.floor(minDepth - 3)),
+      far: Math.ceil(maxDepth + 5),
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sunPos[0], sunPos[1], sunPos[2], resolvedTarget[0], resolvedTarget[1], resolvedTarget[2]]);
@@ -129,6 +140,8 @@ export const LightingAndSky = React.memo(function LightingAndSky({
   const shadowRight = useFittedFrustum ? fitted.right : resolvedSpan;
   const shadowTop = useFittedFrustum ? fitted.top : resolvedSpan;
   const shadowBottom = useFittedFrustum ? fitted.bottom : -resolvedSpan;
+  const shadowNear = useFittedFrustum ? fitted.near : 2;
+  const shadowFar = useFittedFrustum ? fitted.far : 90;
 
   const lightTargetObj = useMemo(() => new THREE.Object3D(), []);
   useEffect(() => {
@@ -140,9 +153,9 @@ export const LightingAndSky = React.memo(function LightingAndSky({
     lightTargetObj.updateMatrixWorld();
   }, [lightTargetObj, resolvedTarget[0], resolvedTarget[1], resolvedTarget[2]]);
 
-  // W3-M1: In full-course mode (useFittedFrustum), bake the static 2048x2048 sun shadow map for 5 frames
-  // after mount (and re-arm if Suspense children attach), then lock autoUpdate = false so 3,912 static
-  // casters aren't re-submitted every frame. Restore autoUpdate = true on unmount or in /qa-gallery.
+  // Bake static 4096x4096 sun shadow map for 5 initial frames after mount, then permanently lock
+  // autoUpdate = false for the session (never watching scene.children.length, so dynamic HUD/arc
+  // state transitions never trigger mid-gameplay shadow rebake hitches).
   useEffect(() => {
     if (!useFittedFrustum) {
       gl.shadowMap.autoUpdate = true;
@@ -150,7 +163,6 @@ export const LightingAndSky = React.memo(function LightingAndSky({
       return;
     }
     shadowBakeRemainingRef.current = 5;
-    prevSceneChildCountRef.current = -1;
     gl.shadowMap.autoUpdate = true;
     gl.shadowMap.needsUpdate = true;
     return () => {
@@ -164,12 +176,13 @@ export const LightingAndSky = React.memo(function LightingAndSky({
       side: THREE.BackSide,
       depthWrite: false,
       fog: false,
+      toneMapped: false,
       uniforms: {
         uTopColor: { value: new THREE.Color('#53A6E5') },
-        uMidColor: { value: new THREE.Color('#9ED4F4') },
-        uHorizonColor: { value: new THREE.Color('#FBE3BD') },
-        uWarmMistColor: { value: new THREE.Color('#F5CFA0') },
-        uBottomColor: { value: new THREE.Color('#E6BA8B') },
+        uMidColor: { value: new THREE.Color('#9FD5F5') },
+        uHorizonColor: { value: new THREE.Color(HORIZON_MIST_HEX) },
+        uWarmMistColor: { value: new THREE.Color('#F2CCA0') },
+        uBottomColor: { value: new THREE.Color('#E5BA8C') },
         uSunDir: { value: new THREE.Vector3(-0.48, 0.42, 0.42).normalize() },
         uSunGlowColor: { value: new THREE.Color('#FFE9B8') },
       },
@@ -194,7 +207,8 @@ export const LightingAndSky = React.memo(function LightingAndSky({
         varying vec3 vWorldDir;
 
         void main() {
-          float h = vWorldDir.y;
+          vec3 dir = normalize(vWorldDir);
+          float h = dir.y;
           vec3 col;
           if (h >= 0.16) {
             col = mix(uMidColor, uTopColor, smoothstep(0.16, 0.72, h));
@@ -206,34 +220,31 @@ export const LightingAndSky = React.memo(function LightingAndSky({
             col = mix(uWarmMistColor, uBottomColor, smoothstep(-0.22, -0.65, h));
           }
 
-          float sunAmt = max(dot(normalize(vWorldDir), uSunDir), 0.0);
-          col += uSunGlowColor * pow(sunAmt, 10.0) * 0.24;
-          col += uSunGlowColor * pow(sunAmt, 72.0) * 0.34;
+          float sunAmt = max(dot(dir, uSunDir), 0.0);
+          vec3 sunHalo = uSunGlowColor * (pow(sunAmt, 10.0) * 0.18 + pow(sunAmt, 72.0) * 0.28);
+          col = col + sunHalo * (1.0 - col * 0.35);
 
-          gl_FragColor = vec4(col, 1.0);
+          gl_FragColor = vec4(clamp(col, 0.0, 1.0), 1.0);
+          #include <colorspace_fragment>
         }
       `,
     });
   }, []);
 
+  useEffect(() => {
+    return () => {
+      skyDomeMaterial.dispose();
+    };
+  }, [skyDomeMaterial]);
+
   useFrame(({ camera, gl: frameGl, scene }, delta) => {
     if (useFittedFrustum) {
-      const childCount = scene.children.length;
-      if (
-        prevSceneChildCountRef.current !== -1 &&
-        childCount > prevSceneChildCountRef.current
-      ) {
-        shadowBakeRemainingRef.current = Math.max(
-          shadowBakeRemainingRef.current,
-          2,
-        );
-      }
-      prevSceneChildCountRef.current = childCount;
-
       if (shadowBakeRemainingRef.current > 0) {
-        frameGl.shadowMap.autoUpdate = true;
-        frameGl.shadowMap.needsUpdate = true;
-        shadowBakeRemainingRef.current -= 1;
+        if (scene.children.length > 0) {
+          frameGl.shadowMap.autoUpdate = true;
+          frameGl.shadowMap.needsUpdate = true;
+          shadowBakeRemainingRef.current -= 1;
+        }
       } else if (frameGl.shadowMap.autoUpdate) {
         frameGl.shadowMap.autoUpdate = false;
       }
@@ -259,8 +270,8 @@ export const LightingAndSky = React.memo(function LightingAndSky({
 
   return (
     <group name="curbside-lighting-and-sky">
-      <color attach="background" args={[showHorizon ? '#EED7BA' : '#F4EFE6']} />
-      {showHorizon && <fog attach="fog" args={['#F5DEC2', 95, 176]} />}
+      <color attach="background" args={[showHorizon ? HORIZON_MIST_HEX : '#F4EFE6']} />
+      {showHorizon && <fog attach="fog" args={[HORIZON_MIST_HEX, 95, 176]} />}
 
       <primitive object={lightTargetObj} />
 
@@ -271,27 +282,28 @@ export const LightingAndSky = React.memo(function LightingAndSky({
         target={lightTargetObj}
         intensity={2.35}
         color="#FFE5BA"
-        shadow-mapSize={[2048, 2048]}
+        shadow-mapSize={shadowMapSize}
+        shadow-radius={1.5}
         shadow-camera-left={shadowLeft}
         shadow-camera-right={shadowRight}
         shadow-camera-top={shadowTop}
         shadow-camera-bottom={shadowBottom}
-        shadow-camera-near={2}
-        shadow-camera-far={130}
-        shadow-bias={-0.0004}
-        shadow-normalBias={0.035}
+        shadow-camera-near={shadowNear}
+        shadow-camera-far={shadowFar}
+        shadow-bias={-0.00018}
+        shadow-normalBias={0.022}
       />
 
       {/* Crisp Azure Sky / Warm Venetian Terracotta Ground Bounce */}
-      <hemisphereLight args={['#C8E4FF', '#EFAF7B', 0.96]} />
+      <hemisphereLight args={['#C8E4FF', '#EFAF7B', 0.98]} />
 
       {/* Soft Warm Ambient Fill for Legible Interior Shadows */}
-      <ambientLight intensity={0.34} color="#FFF6E6" />
+      <ambientLight intensity={0.35} color="#FFF6E6" />
 
       {/* Cool North-East Sky Rim Fill for Faceted Architectural Edge Separation */}
       <directionalLight
         position={[resolvedTarget[0] + 34, 24, resolvedTarget[2] - 28]}
-        intensity={0.46}
+        intensity={0.48}
         color="#C9DFFF"
       />
 
@@ -302,7 +314,7 @@ export const LightingAndSky = React.memo(function LightingAndSky({
             renderOrder={-1000}
             frustumCulled={false}
           >
-            <sphereGeometry args={[SKY_DOME_RADIUS, 28, 18]} />
+            <sphereGeometry args={[SKY_DOME_RADIUS, 40, 24]} />
           </mesh>
 
           <group ref={cloudsGroupRef} name="drifting-clouds">

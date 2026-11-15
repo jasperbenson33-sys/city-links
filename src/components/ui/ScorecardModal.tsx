@@ -242,12 +242,20 @@ export function ScorecardModal({
       data-hud-interactive="true"
       onPointerDown={(e) => e.stopPropagation()}
       style={{
+        paddingTop:
+          'max(1rem, var(--safe-top, env(safe-area-inset-top, 0px)))',
+        paddingBottom:
+          'max(1rem, var(--safe-bottom, env(safe-area-inset-bottom, 0px)))',
+        paddingLeft:
+          'max(1rem, var(--safe-left, env(safe-area-inset-left, 0px)))',
+        paddingRight:
+          'max(1rem, var(--safe-right, env(safe-area-inset-right, 0px)))',
         willChange: qaFreeze ? undefined : 'opacity',
         transition: qaFreeze
           ? 'none'
           : 'opacity 180ms cubic-bezier(0.22, 1, 0.36, 1)',
       }}
-      className={`pointer-events-auto fixed inset-0 z-40 flex items-center justify-center bg-[#231914]/50 px-4 py-4 ${
+      className={`pointer-events-auto fixed inset-0 z-40 flex items-center justify-center bg-[#231914]/50 ${
         entered ? 'opacity-100' : 'opacity-0'
       }`}
     >

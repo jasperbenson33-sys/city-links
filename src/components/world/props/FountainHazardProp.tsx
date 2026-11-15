@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useMemo, useRef } from 'react';
+import React, { useEffect, useMemo, useRef } from 'react';
 import { useFrame } from '@react-three/fiber';
 import * as THREE from 'three';
 import { TOYBOX_MATERIALS } from '@/materials';
@@ -104,6 +104,13 @@ export function FountainHazardProp({
     return { rimWallGeo: wGeo, copingGeo: cGeo, cornerPillars: pillars };
   }, [radius, wallOuterR, innerR, rimHeight]);
 
+  useEffect(() => {
+    return () => {
+      rimWallGeo.dispose();
+      copingGeo.dispose();
+    };
+  }, [rimWallGeo, copingGeo]);
+
   useFrame((_, delta) => {
     elapsedRef.current += Math.min(delta, 0.05);
     // Deterministic clock: frozen QA mode pins t = 4.0; every pose below is a pure function of t.
@@ -126,7 +133,10 @@ export function FountainHazardProp({
         const r = 0.04 + u * 0.42;
         const y = 1.36 + Math.sin(u * Math.PI) * 0.26 - u * 0.5;
         drop.position.set(Math.cos(ang) * r, y, Math.sin(ang) * r);
-        drop.scale.setScalar(0.036 + Math.sin(u * Math.PI) * 0.028);
+        const s = 0.032 + Math.sin(u * Math.PI) * 0.026;
+        // Align droplet elongation along radial outward + vertical arc velocity
+        drop.rotation.set(0, -ang, 0);
+        drop.scale.set(s * 1.25, s * 1.15, s * 0.85);
       }
     }
 
@@ -139,7 +149,9 @@ export function FountainHazardProp({
         const r = 0.48 + u * (innerR * 0.8 - 0.48);
         const y = 0.82 + Math.sin(u * Math.PI) * 0.22 - u * 0.62;
         drop.position.set(Math.cos(ang) * r, y, Math.sin(ang) * r);
-        drop.scale.setScalar(0.044 + Math.sin(u * Math.PI) * 0.032);
+        const s = 0.038 + Math.sin(u * Math.PI) * 0.028;
+        drop.rotation.set(0, -ang, 0);
+        drop.scale.set(s * 1.25, s * 1.15, s * 0.85);
       }
     }
 
@@ -335,7 +347,7 @@ export function FountainHazardProp({
         <coneGeometry args={[0.045, 0.06, 8]} />
       </mesh>
 
-      {/* Animated Arching Water Plumes */}
+      {/* Animated Smooth Arching Water Plumes */}
       <group ref={upperPlumeRef}>
         {Array.from({ length: UPPER_PLUME_COUNT }, (_, idx) => (
           <mesh
@@ -346,7 +358,7 @@ export function FountainHazardProp({
                 : TOYBOX_MATERIALS.waterFoamWhite
             }
           >
-            <icosahedronGeometry args={[1, 0]} />
+            <icosahedronGeometry args={[1, 1]} />
           </mesh>
         ))}
       </group>
@@ -360,7 +372,7 @@ export function FountainHazardProp({
                 : TOYBOX_MATERIALS.waterBeadCyan
             }
           >
-            <icosahedronGeometry args={[1, 0]} />
+            <icosahedronGeometry args={[1, 1]} />
           </mesh>
         ))}
       </group>
@@ -388,7 +400,7 @@ export function FountainHazardProp({
             frustumCulled={false}
             material={TOYBOX_MATERIALS.waterBeadCyan}
           >
-            <icosahedronGeometry args={[1, 0]} />
+            <icosahedronGeometry args={[1, 1]} />
           </mesh>
         ))}
       </group>

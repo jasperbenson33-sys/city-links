@@ -621,7 +621,7 @@ export function buildCoaxialWheelSpec(
   );
 
   const hubcapThickness = 0.018;
-  const hubcapOffset = hubWidth * 0.5 + hubcapThickness * 0.5;
+  const hubcapOffset = hubWidth * 0.5 + hubcapThickness * 0.5 - 0.003;
   const outboardPosition: Vec3Tuple =
     axleAxis === 'x'
       ? [hubcapOffset, outerRadius, 0]
@@ -1622,6 +1622,7 @@ export function buildArchedFrameSpec(
     const theta = (i + 0.5) * dTheta;
     const isKeystone = i === midIdx;
     const rScale = isKeystone ? 1.18 : 1.0;
+    const depthScale = isKeystone ? 1.16 : i % 2 === 0 ? 1.0 : 1.06;
     const cx = Math.cos(theta) * archMidRadius;
     const cy = springlineY + Math.sin(theta) * archMidRadius;
     // Rotate box around +Z so its local +Y points radially outward at angle (theta - PI/2)
@@ -1633,9 +1634,9 @@ export function buildArchedFrameSpec(
       index: i,
       angleRad: theta,
       isKeystone,
-      position: [cx, cy, frameDepth * (isKeystone ? 0.58 : 0.5)],
+      position: [cx, cy, frameDepth * depthScale * 0.5],
       rotation,
-      size: [chordLen, frameWidth * rScale, frameDepth * (isKeystone ? 1.16 : 1.0)],
+      size: [chordLen, frameWidth * rScale, frameDepth * depthScale],
       radialDirection,
     });
   }
@@ -1680,12 +1681,12 @@ export function buildArchedFrameSpec(
       bottomY: 0,
     },
     leftJamb: {
-      position: [-jambCenterX, jambPosY, frameDepth * 0.5],
-      size: [frameWidth, jambHeight, frameDepth],
+      position: [-jambCenterX, jambPosY, frameDepth * 0.47],
+      size: [frameWidth, jambHeight, frameDepth * 0.94],
     },
     rightJamb: {
-      position: [jambCenterX, jambPosY, frameDepth * 0.5],
-      size: [frameWidth, jambHeight, frameDepth],
+      position: [jambCenterX, jambPosY, frameDepth * 0.47],
+      size: [frameWidth, jambHeight, frameDepth * 0.94],
     },
     archRingSegments,
     recessedGlass: {

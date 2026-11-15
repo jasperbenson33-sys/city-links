@@ -2,6 +2,7 @@
 
 import { create } from 'zustand';
 import {
+  AUTO_PUTTER_DISTANCE,
   BALL_RADIUS,
   type BallPhase,
   type CameraMode,
@@ -666,9 +667,16 @@ export const useCurbsideStore = create<CurbsideState>((set, get) => ({
 
     set((state) => {
       const nextClub = shouldAutoClub ? recommended : state.selectedClub;
-      // Preserve player's street aim unless they moved meaningfully onto green/courtyard
-      const yawToUse =
-        state.hasTakenFirstStroke && dist < 35 ? nextAimYaw : state.aimYaw;
+      const movedDistXZ = Math.hypot(
+        pos[0] - state.lastSafeBallPosition[0],
+        pos[2] - state.lastSafeBallPosition[2],
+      );
+      // Preserve player's street aim on tiny short chips unless within short putt range or moved meaningfully
+      const shouldAutoAlignCup =
+        state.hasTakenFirstStroke &&
+        dist < 35 &&
+        (movedDistXZ >= 0.65 || dist < AUTO_PUTTER_DISTANCE);
+      const yawToUse = shouldAutoAlignCup ? nextAimYaw : state.aimYaw;
       const aimDir = resolveHorizontalAim(undefined, yawToUse);
       return {
         ballPosition: [...pos],

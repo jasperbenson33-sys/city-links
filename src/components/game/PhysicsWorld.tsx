@@ -20,8 +20,6 @@ import {
 } from '@/config/courseMasterPlan';
 import {
   BALL_RADIUS,
-  CUP_DEPTH,
-  CUP_RADIUS,
   type StoneCurbSegmentSpec,
   type Vec3Tuple,
 } from '@/types';
@@ -84,7 +82,7 @@ function buildCurvedSegments(curb: StoneCurbSegmentSpec) {
     bottomY: curb.bottomY,
     topY: curb.topY,
     wallThickness: 0.25,
-    segments: 12,
+    segments: 24,
   });
 }
 
@@ -148,11 +146,19 @@ export function PhysicsWorld() {
     const patioSouthZone = GROUND_ZONES.find(
       (z) => z.id === 'zone-courtyard-patio-rough-south',
     );
+    const westEntryRamp = WALKABLE_RAMPS.find(
+      (r) => r.id === 'ramp-west-sidewalk-entry',
+    );
+    const westExitRamp = WALKABLE_RAMPS.find(
+      (r) => r.id === 'ramp-west-sidewalk-exit',
+    );
+    const cupRadius = COURSE_MASTER_PLAN.cup.cupRadius;
+    const cupDepth = COURSE_MASTER_PLAN.cup.cupDepth;
     const cupCutoutXZ: RectBoundsXZ = {
-      minX: HOLE_1_CUP.position[0] - CUP_RADIUS,
-      maxX: HOLE_1_CUP.position[0] + CUP_RADIUS,
-      minZ: HOLE_1_CUP.position[2] - CUP_RADIUS,
-      maxZ: HOLE_1_CUP.position[2] + CUP_RADIUS,
+      minX: HOLE_1_CUP.position[0] - cupRadius,
+      maxX: HOLE_1_CUP.position[0] + cupRadius,
+      minZ: HOLE_1_CUP.position[2] - cupRadius,
+      maxZ: HOLE_1_CUP.position[2] + cupRadius,
     };
 
     const groundSlabs = GROUND_ZONES.filter((z) => !z.arcClip).flatMap((zone) => {
@@ -165,6 +171,14 @@ export function PhysicsWorld() {
           fringeZone?.boundsXZ,
           patioNorthZone?.boundsXZ,
           patioSouthZone?.boundsXZ,
+        ].filter((b): b is RectBoundsXZ => Boolean(b));
+        for (const hole of cutouts) {
+          rects = rects.flatMap((r) => subtractRect2D(r, hole));
+        }
+      } else if (zone.id === 'zone-west-5th-sidewalk') {
+        const cutouts = [
+          westEntryRamp?.boundsXZ,
+          westExitRamp?.boundsXZ,
         ].filter((b): b is RectBoundsXZ => Boolean(b));
         for (const hole of cutouts) {
           rects = rects.flatMap((r) => subtractRect2D(r, hole));
@@ -182,17 +196,17 @@ export function PhysicsWorld() {
       }));
     });
 
-    // Cylindrical recessed cup liner flush with +0.60m green surface & 14cm cup floor
+    // Cylindrical recessed cup liner slightly below +0.60m green plane (-1mm avoids coplanar seam snag)
     const cupRimSegments = buildArcWallSegments({
       pivotX: HOLE_1_CUP.position[0],
       pivotZ: HOLE_1_CUP.position[2],
-      radius: CUP_RADIUS + 0.14,
+      radius: cupRadius + 0.14,
       startAngleRad: 0,
       endAngleRad: Math.PI * 2,
-      bottomY: HOLE_1_CUP.position[1] - CUP_DEPTH - 0.04,
-      topY: HOLE_1_CUP.position[1],
+      bottomY: HOLE_1_CUP.position[1] - cupDepth - 0.04,
+      topY: HOLE_1_CUP.position[1] - 0.001,
       wallThickness: 0.28,
-      segments: 16,
+      segments: 24,
     }).map((seg, idx) => ({
       key: `cup-rim-${idx}`,
       seg,
@@ -201,11 +215,11 @@ export function PhysicsWorld() {
     const cupBottomCollider = {
       center: [
         HOLE_1_CUP.position[0],
-        HOLE_1_CUP.position[1] - CUP_DEPTH - 0.04,
+        HOLE_1_CUP.position[1] - cupDepth - 0.04,
         HOLE_1_CUP.position[2],
       ] as Vec3Tuple,
       halfHeight: 0.04,
-      radius: CUP_RADIUS + 0.04,
+      radius: cupRadius + 0.04,
     };
 
     const seApron = GROUND_ZONES.find(
@@ -299,7 +313,7 @@ export function PhysicsWorld() {
         bottomY: -0.25,
         topY: g.channelY,
         wallThickness: g.width + 0.06,
-        segments: 12,
+        segments: 24,
       }).map((seg, idx) => ({
         key: `${g.id}-floor-${idx}`,
         seg,
@@ -350,15 +364,15 @@ export function PhysicsWorld() {
           id: 'gutter-to-west-entry-apron',
           label: 'West 5th Gutter-to-ADA-Entry Flush Apron (-0.02m -> 0.00m)',
           surfaceTag: 'storm_gutter',
-          boundsXZ: { minX: -4.02, maxX: -3.88, minZ: 20, maxZ: 23 },
+          boundsXZ: { minX: -4.0, maxX: -3.88, minZ: 20, maxZ: 23 },
           bottomY: -0.02,
-          topY: 0.0046,
+          topY: 0.0,
           climbDirection: 'west',
-          slopeAngleDeg: 10.0,
+          slopeAngleDeg: 9.462,
           slabThickness: 0.25,
           friction: 0.35,
           restitution: 0.2,
-          aabb: { min: [-4.02, -0.25, 20], max: [-3.88, 0.005, 23] },
+          aabb: { min: [-4.0, -0.25, 20], max: [-3.88, 0.0, 23] },
         }),
       },
       {
@@ -367,15 +381,15 @@ export function PhysicsWorld() {
           id: 'gutter-to-west-exit-apron',
           label: 'West 5th Gutter-to-ADA-Exit Flush Apron (-0.02m -> 0.00m)',
           surfaceTag: 'storm_gutter',
-          boundsXZ: { minX: -4.02, maxX: -3.88, minZ: -16.5, maxZ: -13.5 },
+          boundsXZ: { minX: -4.0, maxX: -3.88, minZ: -16.5, maxZ: -13.5 },
           bottomY: -0.02,
-          topY: 0.0046,
+          topY: 0.0,
           climbDirection: 'west',
-          slopeAngleDeg: 10.0,
+          slopeAngleDeg: 9.462,
           slabThickness: 0.25,
           friction: 0.35,
           restitution: 0.2,
-          aabb: { min: [-4.02, -0.25, -16.5], max: [-3.88, 0.005, -13.5] },
+          aabb: { min: [-4.0, -0.25, -16.5], max: [-3.88, 0.0, -13.5] },
         }),
       },
     ];

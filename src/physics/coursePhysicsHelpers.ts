@@ -84,6 +84,7 @@ export function createBallDimpleTexture(): THREE.CanvasTexture | null {
   const tex = new THREE.CanvasTexture(canvas);
   tex.wrapS = THREE.RepeatWrapping;
   tex.wrapT = THREE.RepeatWrapping;
+  tex.anisotropy = 16;
   tex.needsUpdate = true;
   return tex;
 }
@@ -505,7 +506,10 @@ export function computeMasterPlanRampTransform(
     ramp.climbDirection === 'east' || ramp.climbDirection === 'west';
   const run = alongX ? xSpan : zSpan;
   const cross = alongX ? zSpan : xSpan;
-  const slopeLen = Math.hypot(run, rise) + 0.08;
+  const exactSlopeLen = Math.hypot(run, rise);
+  // Extend only past the bottom entry so topY meets the upper deck flush at 0.000m (zero raised lip)
+  const bottomMargin = 0.08;
+  const slopeLen = exactSlopeLen + bottomMargin;
   const thickness = Math.max(0.24, ramp.slabThickness);
   const halfT = thickness * 0.5;
   const theta = Math.atan2(rise, run);
@@ -515,29 +519,30 @@ export function computeMasterPlanRampTransform(
   const midX = (minX + maxX) * 0.5;
   const midY = (ramp.bottomY + ramp.topY) * 0.5;
   const midZ = (minZ + maxZ) * 0.5;
+  const halfMargin = bottomMargin * 0.5;
 
   let centerOffsetX = 0;
   let centerOffsetZ = 0;
   let rotationEuler: Vec3Tuple = [0, 0, 0];
 
   if (ramp.climbDirection === 'east') {
-    centerOffsetX = halfT * sinT;
+    centerOffsetX = halfT * sinT - halfMargin * cosT;
     rotationEuler = [0, 0, theta];
   } else if (ramp.climbDirection === 'west') {
-    centerOffsetX = -halfT * sinT;
+    centerOffsetX = -halfT * sinT + halfMargin * cosT;
     rotationEuler = [0, 0, -theta];
   } else if (ramp.climbDirection === 'north') {
-    centerOffsetZ = -halfT * sinT;
+    centerOffsetZ = -halfT * sinT + halfMargin * cosT;
     rotationEuler = [theta, 0, 0];
   } else {
-    centerOffsetZ = halfT * sinT;
+    centerOffsetZ = halfT * sinT - halfMargin * cosT;
     rotationEuler = [-theta, 0, 0];
   }
 
   return {
     position: [
       midX + centerOffsetX,
-      midY - halfT * cosT,
+      midY - halfT * cosT - halfMargin * sinT,
       midZ + centerOffsetZ,
     ],
     rotationEuler,

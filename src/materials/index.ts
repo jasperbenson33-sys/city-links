@@ -10,3 +10,13 @@ export {
   getBuildingTrimMaterial,
   type ToyboxFlagColor,
 } from './toyboxPalette';
+export {
+  CURBSIDE_IGN_GLSL,
+  createDitherCutawayMaterial,
+  getPolygonOffsetMaterial,
+  type DitherCutawayHandle,
+} from './ditherCutaway';
+export {
+  createSoftSteamMaterial,
+  type SoftSteamMaterialOptions,
+} from './steamMaterial';

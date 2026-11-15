@@ -22,6 +22,9 @@ const CAMERA_CONFIG = {
 
 const GL_CONFIG = {
   antialias: true,
+  alpha: false,
+  stencil: false,
+  depth: true,
   powerPreference: 'high-performance' as const,
   toneMapping: THREE.ACESFilmicToneMapping,
   toneMappingExposure: 1.06,
@@ -30,14 +33,15 @@ const GL_CONFIG = {
 const SHADOWS_CONFIG = { type: THREE.PCFShadowMap };
 
 /**
- * Anti-shimmer render surface: hardware MSAA, stable PCF shadows, 1.5–2x DPR, a tight depth range
- * (near 0.35 / far 185) for z-buffer precision, and zero post-processing passes (so MSAA stays on).
+ * Anti-shimmer render surface: hardware MSAA on an opaque depth buffer, stable PCF shadows,
+ * exact 2x DPR supersampling, a tight depth range (near 0.35 / far 185) for z-buffer precision,
+ * and zero post-processing passes (so native MSAA stays active).
  */
 export function GameCanvas({ children, className = 'h-full w-full touch-none' }: GameCanvasProps) {
   return (
     <Canvas
       shadows={SHADOWS_CONFIG}
-      dpr={[1.5, 2]}
+      dpr={[2, 2]}
       camera={CAMERA_CONFIG}
       gl={GL_CONFIG}
       className={className}
