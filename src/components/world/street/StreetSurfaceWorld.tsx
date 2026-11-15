@@ -13,6 +13,7 @@ import {
   WALKABLE_RAMPS,
 } from '@/config/courseMasterPlan';
 import type {
+  CourseId,
   CrosswalkLandingPadSpec,
   GroundSurfaceZoneSpec,
   HoleCupSpec,
@@ -24,9 +25,12 @@ import type {
 } from '@/types/course';
 import { VENICE_MATERIALS } from '@/materials';
 import { CupFlagAssembly } from '../tiles/CupFlagAssembly';
+import { getEscapadeSurfaceMaterial } from './escapadeSurfaceMaterials';
+import { EscapadeRampAccents, rampBasis } from './EscapadeRampAccents';
 import {
   buildClippedSeApronGeometry,
   buildContinuousHydrantWaterSheetGeometry,
+  buildInclinedDeckSlabGeometry,
   buildNotchedWestSidewalkGeometry,
   buildRadialArcSlabGeometry,
   buildRectSlabGeometry,
@@ -191,6 +195,7 @@ function getPatioRoughCobbleMaterial(): THREE.MeshStandardMaterial {
 }
 
 export interface StreetSurfaceWorldProps {
+  courseId?: CourseId;
   zones?: GroundSurfaceZoneSpec[];
   gutters?: StormGutterTrackSpec[];
   drainGrates?: StormDrainGrateSpec[];
@@ -228,19 +233,28 @@ function rectPoly(r: RectXZ): XZ[] {
   ];
 }
 
-/** Hole polygons (world x,z) to carve out of the courtyard terrace slab. */
+/** Hole polygons (world x,z) to carve out of a terrace/concourse slab at elevation `terraceTopY`. */
 function computeTerraceHoles(
   zones: GroundSurfaceZoneSpec[],
   terrace: RectXZ,
+  terraceTopY = 0.15,
 ): XZ[][] {
   const inside = (r: RectXZ) =>
     r.minX > terrace.minX &&
     r.maxX < terrace.maxX &&
     r.minZ > terrace.minZ &&
     r.maxZ < terrace.maxZ;
-  const fringe = zones.find((z) => z.surfaceTag === 'green_fringe_collar');
+  const sameLevel = (z: GroundSurfaceZoneSpec) =>
+    Math.abs(z.topY - terraceTopY) < 0.03;
+  const fringe = zones.find(
+    (z) => z.surfaceTag === 'green_fringe_collar' && sameLevel(z),
+  );
   const patios = zones
-    .filter((z) => z.surfaceTag === 'patio_rough')
+    .filter((z) => z.surfaceTag === 'patio_rough' && sameLevel(z))
+    .map((z) => z.boundsXZ)
+    .filter(inside);
+  const carAisles = zones
+    .filter((z) => z.escapadeMaterialVariant === 'subway_car_floor' && sameLevel(z))
     .map((z) => z.boundsXZ)
     .filter(inside);
   const holes: XZ[][] = [];
@@ -280,6 +294,7 @@ function computeTerraceHoles(
     }
   }
   for (const P of patios) holes.push(rectPoly(P));
+  for (const C of carAisles) holes.push(rectPoly(C));
   return holes;
 }
 /**
@@ -299,6 +314,7 @@ const CURB_CAP_RISE = 0.004;
  * putting green + fringe collar, and the recessed Hole 1 cup assembly.
  */
 export const StreetSurfaceWorld = React.memo(function StreetSurfaceWorld({
+  courseId = 'classic',
   zones = GROUND_ZONES,
   gutters = STORM_GUTTERS,
   drainGrates = STORM_DRAIN_GRATES,
@@ -311,6 +327,7 @@ export const StreetSurfaceWorld = React.memo(function StreetSurfaceWorld({
   includeCupAssembly = true,
   showWireframe = false,
 }: StreetSurfaceWorldProps) {
+  const isGrandEscapade = courseId === 'grand-escapade';
   const seCornerGutter = useMemo(
     () => gutters.find((g) => g.kind === 'corner_90') ?? null,
     [gutters],
@@ -319,7 +336,7 @@ export const StreetSurfaceWorld = React.memo(function StreetSurfaceWorld({
   const westSidewalkCutouts = useMemo(
     () =>
       ramps
-        .filter((r) => r.climbDirection === 'west')
+        .filter((r) => r.climbDirection === 'west' || r.climbDirection === 'east')
         .map((r) => r.boundsXZ),
     [ramps],
   );
@@ -348,6 +365,7 @@ export const StreetSurfaceWorld = React.memo(function StreetSurfaceWorld({
   // Build watertight procedural geometries with world-space UVs
   const zoneGeometries = useMemo(() => {
     const map = new Map<string, THREE.BufferGeometry>();
+    const minCupSlabDepth = Math.max(0.55, cup.cupDepth + 0.14);
 
     for (const z of zones) {
       if (
@@ -359,13 +377,42 @@ export const StreetSurfaceWorld = React.memo(function StreetSurfaceWorld({
         continue;
       }
 
-      if (z.id === 'zone-west-5th-sidewalk' && westSidewalkCutouts.length > 0) {
+      const slabBottomY = isGrandEscapade
+        ? z.topY -
+          Math.max(
+            z.surfaceTag === 'putting_green_turf' ||
+              z.surfaceTag === 'green_fringe_collar'
+              ? minCupSlabDepth
+              : 0.25,
+            z.slabThickness ?? 0.45,
+          )
+        : SLAB_FOUNDATION_BOTTOM_Y;
+
+      const isLeftSidewalkCutoutHost =
+        (z.id === 'zone-west-5th-sidewalk' ||
+          z.id === 'zone-z1-sidewalk-west') &&
+        westSidewalkCutouts.some(
+          (c) =>
+            c.minX >= z.boundsXZ.minX - 0.05 &&
+            c.maxX <= z.boundsXZ.maxX + 0.05 &&
+            c.minZ >= z.boundsXZ.minZ &&
+            c.maxZ <= z.boundsXZ.maxZ,
+        );
+
+      if (isLeftSidewalkCutoutHost) {
+        const localCutouts = westSidewalkCutouts.filter(
+          (c) =>
+            c.minX >= z.boundsXZ.minX - 0.05 &&
+            c.maxX <= z.boundsXZ.maxX + 0.05 &&
+            c.minZ >= z.boundsXZ.minZ &&
+            c.maxZ <= z.boundsXZ.maxZ,
+        );
         map.set(
           z.id,
           buildNotchedWestSidewalkGeometry(
             z.boundsXZ,
-            westSidewalkCutouts,
-            SLAB_FOUNDATION_BOTTOM_Y,
+            localCutouts,
+            slabBottomY,
             z.topY,
             2.2,
           ),
@@ -378,7 +425,7 @@ export const StreetSurfaceWorld = React.memo(function StreetSurfaceWorld({
             z.arcClip.pivotXZ[0],
             z.arcClip.pivotXZ[1],
             z.arcClip.radius,
-            SLAB_FOUNDATION_BOTTOM_Y,
+            slabBottomY,
             z.topY,
             2.2,
           ),
@@ -392,7 +439,7 @@ export const StreetSurfaceWorld = React.memo(function StreetSurfaceWorld({
             z.arcClip.radius,
             z.boundsXZ.minX,
             z.boundsXZ.minZ,
-            SLAB_FOUNDATION_BOTTOM_Y,
+            slabBottomY,
             z.topY,
             3.6,
           ),
@@ -403,7 +450,7 @@ export const StreetSurfaceWorld = React.memo(function StreetSurfaceWorld({
           z.id,
           buildRectSlabGeometry(
             z.boundsXZ,
-            SLAB_FOUNDATION_BOTTOM_Y,
+            slabBottomY,
             z.topY,
             1.6,
             cupCutout,
@@ -412,7 +459,9 @@ export const StreetSurfaceWorld = React.memo(function StreetSurfaceWorld({
       } else if (z.surfaceTag === 'green_fringe_collar') {
         // Fringe is a frame around the putting-green window.
         const greenBounds = zones.find(
-          (o) => o.surfaceTag === 'putting_green_turf',
+          (o) =>
+            o.surfaceTag === 'putting_green_turf' &&
+            Math.abs(o.topY - z.topY) < 0.03,
         )?.boundsXZ;
         map.set(
           z.id,
@@ -420,13 +469,13 @@ export const StreetSurfaceWorld = React.memo(function StreetSurfaceWorld({
             ? buildRectSlabWithRectHoleGeometry(
                 z.boundsXZ,
                 greenBounds,
-                SLAB_FOUNDATION_BOTTOM_Y,
+                slabBottomY,
                 z.topY,
                 1.6,
               )
             : buildRectSlabGeometry(
                 z.boundsXZ,
-                SLAB_FOUNDATION_BOTTOM_Y,
+                slabBottomY,
                 z.topY,
                 1.6,
                 cupCutout,
@@ -437,31 +486,31 @@ export const StreetSurfaceWorld = React.memo(function StreetSurfaceWorld({
           z.id,
           buildRectSlabGeometry(
             z.boundsXZ,
-            SLAB_FOUNDATION_BOTTOM_Y,
+            slabBottomY,
             z.topY,
             1.8,
             null,
           ),
         );
       } else if (z.surfaceTag === 'courtyard_paver') {
-        // Terrace is carved open under fringe + coping + patios (they fill the windows flush).
-        const holes = computeTerraceHoles(zones, z.boundsXZ);
+        // Terrace is carved open under fringe + coping + patios + inset train aisle on the same level.
+        const holes = computeTerraceHoles(zones, z.boundsXZ, z.topY);
         map.set(
           z.id,
           holes.length > 0
             ? buildRectSlabWithPolygonHolesGeometry(
                 z.boundsXZ,
                 holes,
-                SLAB_FOUNDATION_BOTTOM_Y,
+                slabBottomY,
                 z.topY,
                 2.2,
               )
             : buildRectSlabGeometry(
                 z.boundsXZ,
-                SLAB_FOUNDATION_BOTTOM_Y,
+                slabBottomY,
                 z.topY,
                 2.2,
-                cupCutout,
+                null,
               ),
         );
       } else if (z.surfaceTag === 'road_asphalt') {
@@ -469,7 +518,7 @@ export const StreetSurfaceWorld = React.memo(function StreetSurfaceWorld({
           z.id,
           buildRectSlabGeometry(
             z.boundsXZ,
-            SLAB_FOUNDATION_BOTTOM_Y,
+            slabBottomY,
             z.topY,
             3.6,
             null,
@@ -480,7 +529,7 @@ export const StreetSurfaceWorld = React.memo(function StreetSurfaceWorld({
           z.id,
           buildRectSlabGeometry(
             z.boundsXZ,
-            SLAB_FOUNDATION_BOTTOM_Y,
+            slabBottomY,
             z.topY,
             2.2,
             null,
@@ -490,7 +539,13 @@ export const StreetSurfaceWorld = React.memo(function StreetSurfaceWorld({
     }
 
     return map;
-  }, [zones, westSidewalkCutouts, sePivotX, sePivotZ, seInnerR, cupCutout]);
+  }, [
+    zones,
+    westSidewalkCutouts,
+    cupCutout,
+    cup.cupDepth,
+    isGrandEscapade,
+  ]);
 
   const seRoadSpandrelGeo = useMemo(() => {
     const roadWestX = seCornerGutter?.aabb.min[0] ?? 3.55;
@@ -510,20 +565,38 @@ export const StreetSurfaceWorld = React.memo(function StreetSurfaceWorld({
   const rampGeometries = useMemo(() => {
     const map = new Map<string, THREE.BufferGeometry>();
     for (const ramp of ramps) {
+      const useInclinedDeck =
+        isGrandEscapade &&
+        (ramp.id.includes('scaffold') ||
+          ramp.id.includes('plank-bridge') ||
+          ramp.id.includes('terraced-cascade') ||
+          ramp.id.includes('subway-'));
+      const rampBottomY = isGrandEscapade
+        ? ramp.bottomY - Math.max(0.35, ramp.slabThickness ?? 0.5)
+        : SLAB_FOUNDATION_BOTTOM_Y;
       map.set(
         ramp.id,
-        buildSolidRampGeometry(
-          ramp.boundsXZ,
-          ramp.bottomY,
-          ramp.topY,
-          ramp.climbDirection,
-          SLAB_FOUNDATION_BOTTOM_Y,
-          2.0,
-        ),
+        useInclinedDeck
+          ? buildInclinedDeckSlabGeometry(
+              ramp.boundsXZ,
+              ramp.bottomY,
+              ramp.topY,
+              ramp.climbDirection,
+              Math.min(0.6, Math.max(0.35, ramp.slabThickness ?? 0.45)),
+              2.0,
+            )
+          : buildSolidRampGeometry(
+              ramp.boundsXZ,
+              ramp.bottomY,
+              ramp.topY,
+              ramp.climbDirection,
+              rampBottomY,
+              2.0,
+            ),
       );
     }
     return map;
-  }, [ramps]);
+  }, [ramps, isGrandEscapade]);
 
   const curvedGutterGeo = useMemo(
     () =>
@@ -650,9 +723,12 @@ export const StreetSurfaceWorld = React.memo(function StreetSurfaceWorld({
     return straight.map((g) => {
       const s = g.start as number[];
       const e = g.end as number[];
+      const dy = e[1] - s[1];
+      const sloped = Math.abs(dy) > 0.02;
       const alongX = Math.abs(e[0] - s[0]) >= Math.abs(e[2] - s[2]);
       const half = g.width * 0.5;
       const meets = (pt: number[]) =>
+        !sloped &&
         straight.some((o) => {
           if (o === g) return false;
           const os = o.start as number[];
@@ -677,12 +753,19 @@ export const StreetSurfaceWorld = React.memo(function StreetSurfaceWorld({
       const cross = alongX ? s[2] : s[0];
       return {
         id: g.id,
+        start: s,
+        end: e,
+        sloped,
         channelY: g.channelY,
         alongX,
         lo,
         hi,
         cross,
         width: g.width,
+        hasWaterFlow:
+          g.id.includes('hydrant') ||
+          g.id.includes('boost') ||
+          g.id.includes('water'),
       };
     });
   }, [gutters]);
@@ -711,22 +794,26 @@ export const StreetSurfaceWorld = React.memo(function StreetSurfaceWorld({
           const geo = zoneGeometries.get(z.id);
           if (!geo) return null;
 
-          let mat = VENICE_MATERIALS.sidewalkLimestone;
-          if (
-            z.surfaceTag === 'road_asphalt' ||
-            z.arcClip?.keepSide === 'outside'
-          ) {
-            mat = VENICE_MATERIALS.asphaltRoadSlate;
-          } else if (z.surfaceTag === 'subway_brick_plaza') {
-            mat = VENICE_MATERIALS.subwayBrickPlaza;
-          } else if (z.surfaceTag === 'courtyard_paver') {
-            mat = VENICE_MATERIALS.courtyardPaver;
-          } else if (z.surfaceTag === 'putting_green_turf') {
-            mat = VENICE_MATERIALS.puttingGreenTurf;
-          } else if (z.surfaceTag === 'green_fringe_collar') {
-            mat = VENICE_MATERIALS.puttingGreenFringe;
-          } else if (z.surfaceTag === 'patio_rough') {
-            mat = getPatioRoughCobbleMaterial();
+          let mat =
+            getEscapadeSurfaceMaterial(z.escapadeMaterialVariant) ??
+            VENICE_MATERIALS.sidewalkLimestone;
+          if (!z.escapadeMaterialVariant) {
+            if (
+              z.surfaceTag === 'road_asphalt' ||
+              z.arcClip?.keepSide === 'outside'
+            ) {
+              mat = VENICE_MATERIALS.asphaltRoadSlate;
+            } else if (z.surfaceTag === 'subway_brick_plaza') {
+              mat = VENICE_MATERIALS.subwayBrickPlaza;
+            } else if (z.surfaceTag === 'courtyard_paver') {
+              mat = VENICE_MATERIALS.courtyardPaver;
+            } else if (z.surfaceTag === 'putting_green_turf') {
+              mat = VENICE_MATERIALS.puttingGreenTurf;
+            } else if (z.surfaceTag === 'green_fringe_collar') {
+              mat = VENICE_MATERIALS.puttingGreenFringe;
+            } else if (z.surfaceTag === 'patio_rough') {
+              mat = getPatioRoughCobbleMaterial();
+            }
           }
 
           return (
@@ -741,8 +828,8 @@ export const StreetSurfaceWorld = React.memo(function StreetSurfaceWorld({
           );
         })}
 
-        {/* Fallback SE Intersection Roadway Spandrel if master plan omits an arcClip outside zone */}
-        {!hasExplicitSpandrelZone && (
+        {/* Fallback SE Intersection Roadway Spandrel only when course has a corner_90 intersection */}
+        {Boolean(seCornerGutter) && !hasExplicitSpandrelZone && (
           <mesh
             name="zone-se-road-spandrel"
             geometry={seRoadSpandrelGeo}
@@ -754,6 +841,7 @@ export const StreetSurfaceWorld = React.memo(function StreetSurfaceWorld({
 
       {/* 2. Subtle Road Centerline Markings, Crosswalk A-Position & Delivery Loading Stripes */}
       <StreetMarkingsOverlay
+        zones={zones}
         crosswalk={crosswalk}
         vanLoadingZone={vanLoadingZone}
       />
@@ -763,10 +851,12 @@ export const StreetSurfaceWorld = React.memo(function StreetSurfaceWorld({
         <PuttingGreenBorderAndTeeMarker
           bounds={fringeZone.boundsXZ}
           copingBaseY={fringeZone.topY}
+          isGrandEscapade={isGrandEscapade}
+          cupDepth={cup.cupDepth}
         />
       )}
 
-      {/* 4. Recessed Storm Gutters (-0.02m), Hydrant Water Flow Sheen & Drain Grates */}
+      {/* 4. Recessed Storm Gutters (-0.02m / elevated channels), Hydrant Water Flow Sheen & Drain Grates */}
       <group name="storm-gutters-and-grates">
         {gutters.map((g) => {
           if (g.kind === 'corner_90') {
@@ -784,42 +874,114 @@ export const StreetSurfaceWorld = React.memo(function StreetSurfaceWorld({
 
           const rect = straightGutterRects.find((r) => r.id === g.id);
           if (!rect) return null;
+
+          if (rect.sloped) {
+            const dx = rect.end[0] - rect.start[0];
+            const dy = rect.end[1] - rect.start[1];
+            const dz = rect.end[2] - rect.start[2];
+            const horiz = Math.hypot(dx, dz);
+            const len3d = Math.hypot(dx, dy, dz);
+            const yaw = Math.atan2(-dz, dx);
+            const pitch = Math.atan2(dy, horiz);
+            const midX = (rect.start[0] + rect.end[0]) * 0.5;
+            const midY = (rect.start[1] + rect.end[1]) * 0.5;
+            const midZ = (rect.start[2] + rect.end[2]) * 0.5;
+            const channelThickness = 0.24;
+            return (
+              <group
+                key={g.id}
+                name={`gutter-${g.id}`}
+                position={[midX, midY, midZ]}
+                rotation={[0, yaw, 0]}
+              >
+                <group rotation={[0, 0, pitch]}>
+                  <mesh
+                    position={[0, -channelThickness * 0.5, 0]}
+                    material={VENICE_MATERIALS.gutterConcreteChannel}
+                    receiveShadow
+                    castShadow={false}
+                  >
+                    <boxGeometry args={[len3d, channelThickness, rect.width]} />
+                  </mesh>
+                  {isGrandEscapade && rect.hasWaterFlow && (
+                    <mesh
+                      position={[0, DECAL_LIFT, 0]}
+                      rotation={[-Math.PI * 0.5, 0, 0]}
+                      material={decals().waterSheen}
+                      castShadow={false}
+                      receiveShadow={false}
+                    >
+                      <planeGeometry args={[len3d - 0.1, rect.width * 0.68]} />
+                    </mesh>
+                  )}
+                </group>
+              </group>
+            );
+          }
+
           const len = rect.hi - rect.lo;
           const mid = (rect.hi + rect.lo) * 0.5;
-          const slabH = rect.channelY - SLAB_FOUNDATION_BOTTOM_Y;
+          const botY = isGrandEscapade
+            ? rect.channelY - 0.24
+            : SLAB_FOUNDATION_BOTTOM_Y;
+          const slabH = Math.max(0.18, rect.channelY - botY);
 
           return (
-            <mesh
-              key={g.id}
-              name={`gutter-${g.id}`}
-              position={
-                rect.alongX
-                  ? [mid, SLAB_FOUNDATION_BOTTOM_Y + slabH * 0.5, rect.cross]
-                  : [rect.cross, SLAB_FOUNDATION_BOTTOM_Y + slabH * 0.5, mid]
-              }
-              material={VENICE_MATERIALS.gutterConcreteChannel}
-              receiveShadow
-              castShadow={false}
-            >
-              <boxGeometry
-                args={
+            <group key={g.id} name={`gutter-${g.id}`}>
+              <mesh
+                position={
                   rect.alongX
-                    ? [len, slabH, rect.width]
-                    : [rect.width, slabH, len]
+                    ? [mid, botY + slabH * 0.5, rect.cross]
+                    : [rect.cross, botY + slabH * 0.5, mid]
                 }
-              />
-            </mesh>
+                material={VENICE_MATERIALS.gutterConcreteChannel}
+                receiveShadow
+                castShadow={false}
+              >
+                <boxGeometry
+                  args={
+                    rect.alongX
+                      ? [len, slabH, rect.width]
+                      : [rect.width, slabH, len]
+                  }
+                />
+              </mesh>
+              {isGrandEscapade && rect.hasWaterFlow && (
+                <mesh
+                  name={`hydrant-gutter-water-${g.id}`}
+                  position={
+                    rect.alongX
+                      ? [mid, rect.channelY + DECAL_LIFT, rect.cross]
+                      : [rect.cross, rect.channelY + DECAL_LIFT, mid]
+                  }
+                  rotation={[-Math.PI * 0.5, 0, 0]}
+                  material={decals().waterSheen}
+                  castShadow={false}
+                  receiveShadow={false}
+                >
+                  <planeGeometry
+                    args={
+                      rect.alongX
+                        ? [Math.max(0.2, len - 0.12), rect.width * 0.68]
+                        : [rect.width * 0.68, Math.max(0.2, len - 0.12)]
+                    }
+                  />
+                </mesh>
+              )}
+            </group>
           );
         })}
 
-        {/* Continuous single-sheet water sheen (Hydrant splash -> 90-deg corner -> Mercer gutter, stops before Courtyard Ramp) */}
-        <mesh
-          name="hydrant-gutter-water-flow"
-          geometry={hydrantWaterSheetGeo}
-          material={decals().waterSheen}
-          castShadow={false}
-          receiveShadow={false}
-        />
+        {/* Classic single-sheet SE intersection water sheen (only when Classic corner_90 gutter exists) */}
+        {!isGrandEscapade && Boolean(seCornerGutter) && (
+          <mesh
+            name="hydrant-gutter-water-flow"
+            geometry={hydrantWaterSheetGeo}
+            material={decals().waterSheen}
+            castShadow={false}
+            receiveShadow={false}
+          />
+        )}
 
         {/* Slotted Cast-Iron Storm Drain Grates */}
         {drainGrates.map((grate) => (
@@ -852,35 +1014,52 @@ export const StreetSurfaceWorld = React.memo(function StreetSurfaceWorld({
             );
           }
 
-          return <StraightGraniteCurb key={curb.id} curb={curb} />;
+          return (
+            <StraightGraniteCurb
+              key={curb.id}
+              curb={curb}
+              isGrandEscapade={isGrandEscapade}
+            />
+          );
         })}
       </group>
 
-      {/* 6. Walkable Stone Ramps (step cheek retaining walls are rendered via ARCHITECTURAL_WALLS) */}
+      {/* 6. Walkable Stone Ramps, Stairwells & Timber Scaffolds */}
       <group name="walkable-ramps">
         {ramps.map((ramp) => {
           const geo = rampGeometries.get(ramp.id);
           if (!geo) return null;
           const isCourtyardRamp = ramp.surfaceTag === 'courtyard_ramp';
+          const isSpecialAccent =
+            ramp.id.includes('stairwell') ||
+            ramp.id.includes('steps') ||
+            ramp.id.includes('scaffold') ||
+            ramp.id.includes('plank-bridge');
+          const rampMat =
+            getEscapadeSurfaceMaterial(ramp.escapadeMaterialVariant) ??
+            (isCourtyardRamp
+              ? VENICE_MATERIALS.courtyardRampStone
+              : VENICE_MATERIALS.sidewalkLimestone);
           return (
             <group key={ramp.id} name={`ramp-group-${ramp.id}`}>
               <mesh
                 name={`ramp-${ramp.id}`}
                 geometry={geo}
-                material={
-                  isCourtyardRamp
-                    ? VENICE_MATERIALS.courtyardRampStone
-                    : VENICE_MATERIALS.sidewalkLimestone
-                }
+                material={rampMat}
                 receiveShadow
               />
-              {isCourtyardRamp && <CourtyardRampStoneCourses ramp={ramp} />}
+              {isCourtyardRamp && !isSpecialAccent && (
+                <CourtyardRampStoneCourses ramp={ramp} />
+              )}
+              {isGrandEscapade && isSpecialAccent && (
+                <EscapadeRampAccents ramp={ramp} />
+              )}
             </group>
           );
         })}
       </group>
 
-      {/* 7. Recessed Hole 1 Cup & Flag Assembly (optional when hosted outside static backdrop) */}
+      {/* 7. Recessed Cup & Flag Assembly (optional when hosted outside static backdrop) */}
       {includeCupAssembly && (
         <CupFlagAssembly
           position={[cup.position[0], cupSurfaceY, cup.position[2]]}
@@ -889,6 +1068,7 @@ export const StreetSurfaceWorld = React.memo(function StreetSurfaceWorld({
           cupRadius={cup.cupRadius}
           cupDepth={cup.cupDepth}
           poleHeight={cup.pinHeight}
+          isGoldenPin={cup.isGoldenPin}
         />
       )}
 
@@ -921,18 +1101,8 @@ export const StreetSurfaceWorld = React.memo(function StreetSurfaceWorld({
 });
 
 function CourtyardRampStoneCourses({ ramp }: { ramp: WalkableRampSpec }) {
-  const { minX, maxX, minZ, maxZ } = ramp.boundsXZ;
-  const spanX = maxX - minX;
-  const spanZ = maxZ - minZ;
-  const riseY = ramp.topY - ramp.bottomY;
-  const slopeLen = Math.hypot(spanX, riseY);
-  const tiltZ =
-    ramp.climbDirection === 'east'
-      ? Math.atan2(riseY, spanX)
-      : -Math.atan2(riseY, spanX);
-  const cx = (minX + maxX) * 0.5;
-  const cy = (ramp.bottomY + ramp.topY) * 0.5;
-  const cz = (minZ + maxZ) * 0.5;
+  const b = rampBasis(ramp);
+  const slopeLen = b.slopeLen;
   const courseCount = 6;
   const d = decals();
 
@@ -959,60 +1129,79 @@ function CourtyardRampStoneCourses({ ramp }: { ramp: WalkableRampSpec }) {
   return (
     <group
       name={`ramp-courses-${ramp.id}`}
-      position={[cx, cy, cz]}
-      rotation={[0, 0, tiltZ]}
+      position={[b.cx, b.cy, b.cz]}
+      rotation={[0, b.yaw, 0]}
     >
-      {/* Granite Side Coping Stringers */}
-      {[-1, 1].map((side) => (
-        <mesh
-          key={`stringer-${side}`}
-          position={[0, layerY, side * (spanZ * 0.5 - 0.14)]}
-          material={d.rampCourseStone}
-          receiveShadow
-          castShadow={false}
-        >
-          <boxGeometry args={[slopeLen - 0.04, layerH, 0.24]} />
-        </mesh>
-      ))}
-
-      {/* Flush Transverse Stone Step-Course Header Strips */}
-      {courses.map((c) => (
-        <mesh
-          key={`course-${c.idx}`}
-          position={[c.lx, layerY, 0]}
-          material={c.isEnd ? d.rampCourseStone : d.rampCourseAccent}
-          receiveShadow
-          castShadow={false}
-        >
-          <boxGeometry args={[c.w, layerH, spanZ - 0.52]} />
-        </mesh>
-      ))}
-
-      {/* Central Stone Joint Runner Bands (segmented between courses) */}
-      {[-spanZ * 0.24, 0, spanZ * 0.24].map((lz, jIdx) =>
-        runnerSegments.map((seg) => (
+      <group rotation={[0, 0, b.tiltZ]}>
+        {/* Granite Side Coping Stringers */}
+        {[-1, 1].map((side) => (
           <mesh
-            key={`runner-${jIdx}-${seg.key}`}
-            position={[seg.mid, layerY, lz]}
-            material={d.rampCourseAccent}
+            key={`stringer-${side}`}
+            position={[0, layerY, side * (b.crossSpan * 0.5 - 0.14)]}
+            material={d.rampCourseStone}
             receiveShadow
             castShadow={false}
           >
-            <boxGeometry args={[seg.len, layerH, 0.06]} />
+            <boxGeometry args={[slopeLen - 0.04, layerH, 0.24]} />
           </mesh>
-        )),
-      )}
+        ))}
+
+        {/* Flush Transverse Stone Step-Course Header Strips */}
+        {courses.map((c) => (
+          <mesh
+            key={`course-${c.idx}`}
+            position={[c.lx, layerY, 0]}
+            material={c.isEnd ? d.rampCourseStone : d.rampCourseAccent}
+            receiveShadow
+            castShadow={false}
+          >
+            <boxGeometry args={[c.w, layerH, b.crossSpan - 0.52]} />
+          </mesh>
+        ))}
+
+        {/* Central Stone Joint Runner Bands (segmented between courses) */}
+        {[-b.crossSpan * 0.24, 0, b.crossSpan * 0.24].map((lz, jIdx) =>
+          runnerSegments.map((seg) => (
+            <mesh
+              key={`runner-${jIdx}-${seg.key}`}
+              position={[seg.mid, layerY, lz]}
+              material={d.rampCourseAccent}
+              receiveShadow
+              castShadow={false}
+            >
+              <boxGeometry args={[seg.len, layerH, 0.06]} />
+            </mesh>
+          )),
+        )}
+      </group>
     </group>
   );
 }
 
 function StreetMarkingsOverlay({
+  zones,
   crosswalk,
   vanLoadingZone,
 }: {
+  zones: GroundSurfaceZoneSpec[];
   crosswalk: CrosswalkLandingPadSpec;
   vanLoadingZone: VanLoadingZoneSpec;
 }) {
+  const roadZones = zones.filter((z) => z.surfaceTag === 'road_asphalt');
+  const onRoad = (x: number, z: number, pad = 0.25) =>
+    roadZones.some(
+      (rz) =>
+        x >= rz.boundsXZ.minX + pad &&
+        x <= rz.boundsXZ.maxX - pad &&
+        z >= rz.boundsXZ.minZ + pad &&
+        z <= rz.boundsXZ.maxZ - pad,
+    );
+  const hasStopBarOnRoad = onRoad(1.7, crosswalk.boundsXZ.maxZ + 0.75, 0.1);
+  const hasVanLoadingOnRoad = onRoad(
+    (vanLoadingZone.boundsXZ.minX + vanLoadingZone.boundsXZ.maxX) * 0.5,
+    (vanLoadingZone.boundsXZ.minZ + vanLoadingZone.boundsXZ.maxZ) * 0.5,
+    0.0,
+  );
   const cwMinX = crosswalk.boundsXZ.minX;
   const cwMaxX = crosswalk.boundsXZ.maxX;
   const cwMinZ = crosswalk.boundsXZ.minZ;
@@ -1042,44 +1231,50 @@ function StreetMarkingsOverlay({
 
   return (
     <group name="street-road-markings">
-      {/* 5th Ave Dashed Centerline (interrupted cleanly across Crosswalk) */}
-      {[-12.0, -7.0, -2.0, 3.0, 8.0, 13.0, 18.0, 23.0].map((zPos, i) => (
-        <mesh
-          key={`dash-5th-${i}`}
-          position={[0, t1Y, zPos]}
-          rotation={[-Math.PI * 0.5, 0, 0]}
-          material={d.laneLine}
-          receiveShadow
-          castShadow={false}
-        >
-          <planeGeometry args={[0.14, 2.3]} />
-        </mesh>
-      ))}
+      {/* 5th Ave Dashed Centerline (only over actual road_asphalt bounds) */}
+      {[-12.0, -7.0, -2.0, 3.0, 8.0, 13.0, 18.0, 23.0]
+        .filter((zPos) => onRoad(0, zPos))
+        .map((zPos, i) => (
+          <mesh
+            key={`dash-5th-${i}`}
+            position={[0, t1Y, zPos]}
+            rotation={[-Math.PI * 0.5, 0, 0]}
+            material={d.laneLine}
+            receiveShadow
+            castShadow={false}
+          >
+            <planeGeometry args={[0.14, 2.3]} />
+          </mesh>
+        ))}
 
-      {/* Mercer St Dashed Centerline */}
-      {[5.5, 9.8].map((xPos, i) => (
-        <mesh
-          key={`dash-mercer-${i}`}
-          position={[xPos, t1Y, -22.0]}
-          rotation={[-Math.PI * 0.5, 0, 0]}
-          material={d.laneLine}
-          receiveShadow
-          castShadow={false}
-        >
-          <planeGeometry args={[2.2, 0.14]} />
-        </mesh>
-      ))}
+      {/* Mercer St Dashed Centerline (only over actual eastbound road_asphalt bounds) */}
+      {[5.5, 9.8]
+        .filter((xPos) => onRoad(xPos, -22.0))
+        .map((xPos, i) => (
+          <mesh
+            key={`dash-mercer-${i}`}
+            position={[xPos, t1Y, -22.0]}
+            rotation={[-Math.PI * 0.5, 0, 0]}
+            material={d.laneLine}
+            receiveShadow
+            castShadow={false}
+          >
+            <planeGeometry args={[2.2, 0.14]} />
+          </mesh>
+        ))}
 
       {/* Stop Bar before South Crosswalk */}
-      <mesh
-        position={[1.7, t1Y, cwMaxZ + 0.75]}
-        rotation={[-Math.PI * 0.5, 0, 0]}
-        material={d.crosswalk}
-        receiveShadow
-        castShadow={false}
-      >
-        <planeGeometry args={[2.9, 0.34]} />
-      </mesh>
+      {hasStopBarOnRoad && (
+        <mesh
+          position={[1.7, t1Y, cwMaxZ + 0.75]}
+          rotation={[-Math.PI * 0.5, 0, 0]}
+          material={d.crosswalk}
+          receiveShadow
+          castShadow={false}
+        >
+          <planeGeometry args={[2.9, 0.34]} />
+        </mesh>
+      )}
 
       {/* Crosswalk A-Position 7 Crisp Zebra Bars */}
       {Array.from({ length: stripeCount }, (_, idx) => {
@@ -1100,7 +1295,8 @@ function StreetMarkingsOverlay({
       })}
 
       {/* Van Loading Zone Amber Perimeter Frame & Diagonal Stripes */}
-      <group name="van-loading-zone-markings">
+      {hasVanLoadingOnRoad && (
+        <group name="van-loading-zone-markings">
         {/* West line owns both corner squares; North & South lines start after it
             so the three perimeter decal strips never overlap. */}
         <mesh
@@ -1151,7 +1347,8 @@ function StreetMarkingsOverlay({
             </group>
           );
         })}
-      </group>
+        </group>
+      )}
     </group>
   );
 }
@@ -1159,9 +1356,13 @@ function StreetMarkingsOverlay({
 function PuttingGreenBorderAndTeeMarker({
   bounds,
   copingBaseY,
+  isGrandEscapade = false,
+  cupDepth = 0.44,
 }: {
   bounds: { minX: number; maxX: number; minZ: number; maxZ: number };
   copingBaseY: number;
+  isGrandEscapade?: boolean;
+  cupDepth?: number;
 }) {
   const { minX, maxX, minZ, maxZ } = bounds;
   const w = maxX - minX;
@@ -1175,7 +1376,9 @@ function PuttingGreenBorderAndTeeMarker({
   // shares its plan area. Box runs down into the foundation (solid).
   const terraceY = copingBaseY;
   const topY = terraceY + COPING_RISE;
-  const botY = SLAB_FOUNDATION_BOTTOM_Y;
+  const botY = isGrandEscapade
+    ? copingBaseY - Math.max(0.55, cupDepth + 0.14)
+    : SLAB_FOUNDATION_BOTTOM_Y;
   const h = topY - botY;
   const y = (topY + botY) * 0.5;
   const mat = VENICE_MATERIALS.puttingGreenStoneBorder;
@@ -1218,7 +1421,13 @@ function PuttingGreenBorderAndTeeMarker({
   );
 }
 
-function StraightGraniteCurb({ curb }: { curb: StoneCurbSegmentSpec }) {
+function StraightGraniteCurb({
+  curb,
+  isGrandEscapade = false,
+}: {
+  curb: StoneCurbSegmentSpec;
+  isGrandEscapade?: boolean;
+}) {
   const [sx, _, sz] = curb.size;
   const alongX = sx >= sz;
   const length = alongX ? sx : sz;
@@ -1227,11 +1436,14 @@ function StraightGraniteCurb({ curb }: { curb: StoneCurbSegmentSpec }) {
   const d = decals();
 
   // Body: widened by CURB_FACE_INSET each side (no coplanar wall/top with the sidewalk slab it
-  // sits on) and lifted CURB_BODY_LIFT; spans y in [-0.04, topY + lift].
+  // sits on) and lifted CURB_BODY_LIFT; spans y in [botY, topY + lift].
   const bodyW = width + CURB_FACE_INSET * 2;
   const bodyTop = curb.topY + CURB_BODY_LIFT;
-  const bodyH = bodyTop + 0.04;
-  const bodyY = (bodyTop - 0.04) * 0.5;
+  const bodyBot = isGrandEscapade
+    ? curb.topY - Math.max(curb.size[1] + 0.06, 0.24)
+    : -0.04;
+  const bodyH = bodyTop - bodyBot;
+  const bodyY = (bodyTop + bodyBot) * 0.5;
 
   const capTop = bodyTop + CURB_CAP_RISE;
   const capH = 0.022;

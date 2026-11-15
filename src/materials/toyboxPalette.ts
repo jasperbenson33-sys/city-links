@@ -1,14 +1,19 @@
 import * as THREE from 'three';
-import type { BuildingPaletteId } from '@/types';
+import type { BuildingPaletteId, EscapadeMaterialVariant } from '@/types';
 import {
   createAsphaltAggregateTexture,
+  createCedarPlankTexture,
   createCourtyardPaverTexture,
+  createCreamSubwayTileTexture,
+  createEmeraldSubwayTileTexture,
   createPatioCobblestoneTexture,
   createPuttingGreenStripeTexture,
   createSidewalkFlagstoneTexture,
   createSubwayBrickTexture,
+  createSubwayRattanFloorTexture,
   createTerracottaRoofTexture,
 } from './proceduralTextures';
+import { createSunlitGrateShaftMaterial } from './grateLightShaftMaterial';
 import { createSoftSteamMaterial } from './steamMaterial';
 
 function smoothstepRamp(edge0: number, edge1: number, x: number): number {
@@ -125,6 +130,10 @@ export const VENICE_TEXTURES = {
   subwayBrick: createSubwayBrickTexture(),
   puttingGreenStripes: createPuttingGreenStripeTexture(),
   terracottaRoof: createTerracottaRoofTexture(),
+  cedarPlank: createCedarPlankTexture(),
+  creamSubwayTile: createCreamSubwayTileTexture(),
+  emeraldSubwayTile: createEmeraldSubwayTileTexture(),
+  subwayRattanFloor: createSubwayRattanFloorTexture(),
 } as const;
 
 /**
@@ -350,6 +359,94 @@ export const VENICE_MATERIALS = {
   skylineLimestone: matteMat('#DFCBB4', { roughness: 0.9, metalness: 0.02 }),
   skylineBrick: matteMat('#B87664', { roughness: 0.92, metalness: 0.02 }),
   horizonEarthApron: matteMat('#DEC4A4', { roughness: 0.96, metalness: 0.0 }),
+
+  // === Stage 2 ("The Grand Curbside Escapade") Pooled 16x-Anisotropy Materials ===
+  cedarWaterTower: matteMat('#FFFFFF', {
+    map: VENICE_TEXTURES.cedarPlank,
+    roughness: 0.82,
+    metalness: 0.02,
+  }),
+  timberBridgePlank: matteMat('#F5E6D3', {
+    map: VENICE_TEXTURES.cedarPlank,
+    roughness: 0.84,
+    metalness: 0.02,
+  }),
+  patinaCopperChute: matteMat('#D47A4A', {
+    roughness: 0.36,
+    metalness: 0.34,
+    emissive: '#7C3A19',
+    emissiveIntensity: 0.08,
+  }),
+  copperPatinaVerdigris: matteMat('#4D9082', {
+    roughness: 0.54,
+    metalness: 0.22,
+  }),
+  skylightGlass: matteMat('#A5E8FF', {
+    roughness: 0.26,
+    metalness: 0.16,
+    emissive: '#38BDF8',
+    emissiveIntensity: 0.18,
+    transparent: true,
+    opacity: 0.78,
+    depthWrite: false,
+  }),
+  creamSubwayTile: matteMat('#FFFFFF', {
+    map: VENICE_TEXTURES.creamSubwayTile,
+    roughness: 0.44,
+    metalness: 0.04,
+  }),
+  emeraldSubwayTile: matteMat('#FFFFFF', {
+    map: VENICE_TEXTURES.emeraldSubwayTile,
+    roughness: 0.42,
+    metalness: 0.06,
+  }),
+  brassTurnstile: matteMat('#EAB308', {
+    roughness: 0.34,
+    metalness: 0.36,
+    emissive: '#B45309',
+    emissiveIntensity: 0.12,
+  }),
+  vintageSubwayEnamel: matteMat('#294A3E', {
+    roughness: 0.46,
+    metalness: 0.18,
+    emissive: '#13261F',
+    emissiveIntensity: 0.06,
+  }),
+  subwayRattanFloor: matteMat('#FFFFFF', {
+    map: VENICE_TEXTURES.subwayRattanFloor,
+    roughness: 0.72,
+    metalness: 0.02,
+  }),
+  goldenFlagPin: matteMat('#FBBF24', {
+    roughness: 0.28,
+    metalness: 0.42,
+    emissive: '#D97706',
+    emissiveIntensity: 0.36,
+    side: THREE.DoubleSide,
+  }),
+  sunlitGrateShaft: createSunlitGrateShaftMaterial(),
+  amberStationSconceGlow: matteMat('#FFD48A', {
+    roughness: 0.34,
+    metalness: 0.0,
+    emissive: '#FFA133',
+    emissiveIntensity: 1.55,
+  }),
+  bronzeBellPatina: matteMat('#C28E3E', {
+    roughness: 0.36,
+    metalness: 0.36,
+    emissive: '#784F18',
+    emissiveIntensity: 0.1,
+  }),
+  beauxArtsGranite: matteMat('#F7F1E5', {
+    map: VENICE_TEXTURES.sidewalkFlagstone,
+    roughness: 0.8,
+    metalness: 0.03,
+  }),
+  tenementRooftopDeck: matteMat('#D8C3AB', {
+    map: VENICE_TEXTURES.courtyardPaver,
+    roughness: 0.86,
+    metalness: 0.02,
+  }),
 } as const;
 
 const DYNAMIC_COLOR_MAT_CACHE = new Map<string, THREE.MeshStandardMaterial>();
@@ -607,6 +704,24 @@ export const TOYBOX_MATERIALS = {
   skylineNear: VENICE_MATERIALS.skylineTerracotta,
   skylineFar: VENICE_MATERIALS.skylineLimestone,
 
+  // Stage 2 ("The Grand Curbside Escapade") Shared Aliases
+  cedarWaterTower: VENICE_MATERIALS.cedarWaterTower,
+  timberBridgePlank: VENICE_MATERIALS.timberBridgePlank,
+  patinaCopperChute: VENICE_MATERIALS.patinaCopperChute,
+  copperPatinaVerdigris: VENICE_MATERIALS.copperPatinaVerdigris,
+  skylightGlass: VENICE_MATERIALS.skylightGlass,
+  creamSubwayTile: VENICE_MATERIALS.creamSubwayTile,
+  emeraldSubwayTile: VENICE_MATERIALS.emeraldSubwayTile,
+  brassTurnstile: VENICE_MATERIALS.brassTurnstile,
+  vintageSubwayEnamel: VENICE_MATERIALS.vintageSubwayEnamel,
+  subwayRattanFloor: VENICE_MATERIALS.subwayRattanFloor,
+  goldenFlagPin: VENICE_MATERIALS.goldenFlagPin,
+  sunlitGrateShaft: VENICE_MATERIALS.sunlitGrateShaft,
+  amberStationSconceGlow: VENICE_MATERIALS.amberStationSconceGlow,
+  bronzeBellPatina: VENICE_MATERIALS.bronzeBellPatina,
+  beauxArtsGranite: VENICE_MATERIALS.beauxArtsGranite,
+  tenementRooftopDeck: VENICE_MATERIALS.tenementRooftopDeck,
+
   // QA Inspector Wireframe / Grid Overlays
   qaColliderWireframe: new THREE.MeshBasicMaterial({
     color: '#06B6D4',
@@ -627,6 +742,81 @@ export const TOYBOX_MATERIALS = {
     opacity: 0.75,
   }),
 } as const;
+
+/**
+ * Pooled GPU-shared Stage 2 ("The Grand Curbside Escapade") material palette
+ * covering Rooftop Cedar Water Towers, Helical Copper Chutes, Beaux-Arts Plazas,
+ * and the Vaulted Ceramic-Tile Subway Station Finale.
+ */
+export const ESCAPADE_MATERIALS = {
+  cedarWaterTower: VENICE_MATERIALS.cedarWaterTower,
+  timberBridgePlank: VENICE_MATERIALS.timberBridgePlank,
+  patinaCopperChute: VENICE_MATERIALS.patinaCopperChute,
+  copperPatinaVerdigris: VENICE_MATERIALS.copperPatinaVerdigris,
+  skylightGlass: VENICE_MATERIALS.skylightGlass,
+  creamSubwayTile: VENICE_MATERIALS.creamSubwayTile,
+  emeraldSubwayTile: VENICE_MATERIALS.emeraldSubwayTile,
+  brassTurnstile: VENICE_MATERIALS.brassTurnstile,
+  vintageSubwayEnamel: VENICE_MATERIALS.vintageSubwayEnamel,
+  subwayRattanFloor: VENICE_MATERIALS.subwayRattanFloor,
+  goldenFlagPin: VENICE_MATERIALS.goldenFlagPin,
+  sunlitGrateShaft: VENICE_MATERIALS.sunlitGrateShaft,
+  amberStationSconceGlow: VENICE_MATERIALS.amberStationSconceGlow,
+  bronzeBellPatina: VENICE_MATERIALS.bronzeBellPatina,
+  beauxArtsGranite: VENICE_MATERIALS.beauxArtsGranite,
+  tenementRooftopDeck: VENICE_MATERIALS.tenementRooftopDeck,
+  viaductLimestone: VENICE_MATERIALS.courtyardPaver,
+  cobblestoneHill: VENICE_MATERIALS.patioRoughStone,
+} as const;
+
+/**
+ * Pooled 24k Golden Pin material set for Stage 2 Zone 7 Subway Station Finale.
+ */
+export const GOLDEN_PIN_MATERIALS = {
+  hex: '#F59E0B',
+  banner: VENICE_MATERIALS.goldenFlagPin,
+  pole: matteMat('#FDE68A', {
+    roughness: 0.3,
+    metalness: 0.38,
+    emissive: '#D97706',
+    emissiveIntensity: 0.2,
+  }),
+  halo: new THREE.MeshBasicMaterial({
+    color: '#FBBF24',
+    transparent: true,
+    opacity: 0.85,
+    depthWrite: false,
+    side: THREE.DoubleSide,
+  }),
+} as const;
+
+/**
+ * Resolves a pooled 16x-anisotropy material for a Stage 2 `EscapadeMaterialVariant`.
+ */
+export function getEscapadeZoneMaterial(
+  variant?: EscapadeMaterialVariant,
+): THREE.MeshStandardMaterial | null {
+  switch (variant) {
+    case 'cobblestone_hill':
+      return ESCAPADE_MATERIALS.cobblestoneHill;
+    case 'tenement_rooftop_deck':
+      return ESCAPADE_MATERIALS.tenementRooftopDeck;
+    case 'timber_bridge_plank':
+      return ESCAPADE_MATERIALS.timberBridgePlank;
+    case 'viaduct_limestone':
+      return ESCAPADE_MATERIALS.viaductLimestone;
+    case 'copper_chute_metal':
+      return ESCAPADE_MATERIALS.patinaCopperChute;
+    case 'beaux_arts_granite':
+      return ESCAPADE_MATERIALS.beauxArtsGranite;
+    case 'subway_ceramic_tile':
+      return ESCAPADE_MATERIALS.creamSubwayTile;
+    case 'subway_car_floor':
+      return ESCAPADE_MATERIALS.subwayRattanFloor;
+    default:
+      return null;
+  }
+}
 
 export type ToyboxFlagColor = 'red' | 'yellow' | 'blue' | 'purple' | 'green';
 

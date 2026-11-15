@@ -16,7 +16,7 @@ const CurbsideGameRoot = dynamic(
       >
         <div className="inline-flex items-center gap-2 rounded-full border border-[#E2C294] bg-[#FFFDF8]/95 px-4 py-2 text-[13px] font-black tracking-tight text-[#231914] shadow-sm">
           <span aria-hidden="true">⛳</span>
-          <span>5th &amp; Mercer • Par 4</span>
+          <span>The Grand Crosstown Escapade • Par 18</span>
         </div>
       </div>
     ),

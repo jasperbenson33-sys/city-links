@@ -1,6 +1,8 @@
 'use client';
 
 import { useMemo } from 'react';
+import { useCurbsideStore } from '@/store';
+import { EscapadePhysicsWorld } from './EscapadePhysicsWorld';
 import * as THREE from 'three';
 import {
   CuboidCollider,
@@ -87,6 +89,14 @@ function buildCurvedSegments(curb: StoneCurbSegmentSpec) {
 }
 
 export function PhysicsWorld() {
+  const activePlan = useCurbsideStore((s) => s.activePlan);
+  if (activePlan.courseId !== 'classic') {
+    return <EscapadePhysicsWorld plan={activePlan} />;
+  }
+  return <ClassicPhysicsWorld />;
+}
+
+function ClassicPhysicsWorld() {
   const {
     groundSlabs,
     cornerApronFillBoxes,

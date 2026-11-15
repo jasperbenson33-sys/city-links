@@ -215,6 +215,28 @@ interface ExposedFaceConfig {
   uMax: number;
   isPrimaryStreetFront: boolean;
   effectiveStreetY: number;
+  /** Omit ground retail shopfronts when face adjoins an elevated sloped street or mid-block terrace. */
+  suppressStorefronts?: boolean;
+}
+
+function clipWorldIntervalToFaceU(
+  face: CardinalDirection,
+  boundsXZ: { minX: number; maxX: number; minZ: number; maxZ: number },
+  worldMin: number,
+  worldMax: number,
+): [number, number] {
+  const cx = (boundsXZ.minX + boundsXZ.maxX) * 0.5;
+  const cz = (boundsXZ.minZ + boundsXZ.maxZ) * 0.5;
+  switch (face) {
+    case 'south':
+      return [worldMin - cx, worldMax - cx];
+    case 'north':
+      return [cx - worldMax, cx - worldMin];
+    case 'east':
+      return [cz - worldMax, cz - worldMin];
+    case 'west':
+      return [worldMin - cz, worldMax - cz];
+  }
 }
 
 function getFaceTransform(
@@ -234,6 +256,106 @@ function getFaceTransform(
   }
 }
 
+interface EscapadeFaceOverride {
+  primaryStreetY: number;
+  suppressPrimaryStorefronts?: boolean;
+  extraFaces?: Array<{
+    face: CardinalDirection;
+    worldRange?: [number, number];
+    effectiveStreetY: number;
+    suppressStorefronts?: boolean;
+  }>;
+}
+
+const ESCAPADE_FACE_OVERRIDES: Record<string, EscapadeFaceOverride> = {
+  'esc-bld-z2-west-brownstone-1': {
+    primaryStreetY: 4.35,
+    suppressPrimaryStorefronts: true,
+  },
+  'esc-bld-z2-west-brownstone-2': {
+    primaryStreetY: 9.65,
+    suppressPrimaryStorefronts: true,
+  },
+  'esc-bld-z3-north-west': {
+    primaryStreetY: 11.2,
+    suppressPrimaryStorefronts: true,
+  },
+  'esc-bld-z3-north-east': {
+    primaryStreetY: 12.7,
+    suppressPrimaryStorefronts: true,
+  },
+  'esc-bld-central-bodega-east': {
+    primaryStreetY: 0.15,
+    extraFaces: [
+      {
+        face: 'east',
+        worldRange: [11.6, 39.0],
+        effectiveStreetY: 2.15,
+        suppressStorefronts: true,
+      },
+    ],
+  },
+  'esc-bld-central-vista-low-roof': {
+    primaryStreetY: 9.65,
+    suppressPrimaryStorefronts: true,
+    extraFaces: [
+      {
+        face: 'north',
+        effectiveStreetY: 9.85,
+        suppressStorefronts: true,
+      },
+      {
+        face: 'east',
+        effectiveStreetY: 9.65,
+        suppressStorefronts: true,
+      },
+    ],
+  },
+  'esc-bld-central-vista-south-courtyard': {
+    primaryStreetY: 6.5,
+    suppressPrimaryStorefronts: true,
+  },
+  'esc-bld-central-conservatory-west-wing': {
+    primaryStreetY: 2.15,
+    suppressPrimaryStorefronts: true,
+    extraFaces: [
+      {
+        face: 'east',
+        effectiveStreetY: 14.15,
+        suppressStorefronts: true,
+      },
+      {
+        face: 'north',
+        effectiveStreetY: 13.75,
+        suppressStorefronts: true,
+      },
+    ],
+  },
+  'esc-bld-z4-east-viaduct-palazzo': {
+    primaryStreetY: 16.65,
+    suppressPrimaryStorefronts: true,
+  },
+  'esc-bld-z5-east-clocktower-hall': {
+    primaryStreetY: 16.65,
+    suppressPrimaryStorefronts: true,
+  },
+  'esc-bld-z6-east-transit-exchange-north': {
+    primaryStreetY: 2.15,
+    suppressPrimaryStorefronts: true,
+  },
+  'esc-bld-z6-east-transit-exchange-south': {
+    primaryStreetY: 0.15,
+    extraFaces: [
+      {
+        face: 'north',
+        worldRange: [46.2, 62.3],
+        effectiveStreetY: 2.15,
+        suppressStorefronts: true,
+      },
+    ],
+  },
+};
+
 /**
  * Determines which outer street/courtyard faces of a building are exposed to playfield
  * sightlines and their unobstructed horizontal [uMin, uMax] frontage intervals.
@@ -245,7 +367,14 @@ function resolveExposedFaces(building: PerimeterBuildingSpec): ExposedFaceConfig
     building.corridorSector === 'north_courtyard' ||
     building.corridorSector === 'east_courtyard_backstop' ||
     building.corridorSector === 'south_courtyard';
-  const streetY = isCourtyard ? ELEVATIONS.COURTYARD_GREEN_Y : ELEVATIONS.SIDEWALK_Y;
+  const escOverride = building.id.startsWith('esc-')
+    ? ESCAPADE_FACE_OVERRIDES[building.id]
+    : undefined;
+  const streetY = building.id.startsWith('esc-')
+    ? (escOverride?.primaryStreetY ?? 0.15)
+    : isCourtyard
+      ? ELEVATIONS.COURTYARD_GREEN_Y
+      : ELEVATIONS.SIDEWALK_Y;
 
   const { fullSpan } = getFaceTransform(building.frontFace, widthX, depthZ);
   let uMin = -fullSpan * 0.5;
@@ -278,6 +407,7 @@ function resolveExposedFaces(building: PerimeterBuildingSpec): ExposedFaceConfig
       uMax,
       isPrimaryStreetFront: true,
       effectiveStreetY: streetY,
+      suppressStorefronts: escOverride?.suppressPrimaryStorefronts,
     },
   ];
 
@@ -291,8 +421,28 @@ function resolveExposedFaces(building: PerimeterBuildingSpec): ExposedFaceConfig
       isPrimaryStreetFront: true,
       effectiveStreetY: ELEVATIONS.SIDEWALK_Y,
     });
-  } else if (building.id === 'bld-west-5-nw-corner') {
-    // South end meets bld-west-4; North face is outer perimeter, no extra street face needed.
+  } else if (escOverride?.extraFaces) {
+    for (const extra of escOverride.extraFaces) {
+      const { fullSpan: extraSpan } = getFaceTransform(extra.face, widthX, depthZ);
+      const [euMin, euMax] = extra.worldRange
+        ? clipWorldIntervalToFaceU(
+            extra.face,
+            building.boundsXZ,
+            extra.worldRange[0],
+            extra.worldRange[1],
+          )
+        : [-extraSpan * 0.5, extraSpan * 0.5];
+      if (euMax - euMin >= 2.2) {
+        faces.push({
+          face: extra.face,
+          uMin: euMin,
+          uMax: euMax,
+          isPrimaryStreetFront: !extra.suppressStorefronts,
+          effectiveStreetY: extra.effectiveStreetY,
+          suppressStorefronts: extra.suppressStorefronts,
+        });
+      }
+    }
   }
 
   return faces;
@@ -875,26 +1025,44 @@ function FacadeFaceDetail({
   const exposedSpan = faceConfig.uMax - faceConfig.uMin;
   const uCenter = (faceConfig.uMin + faceConfig.uMax) * 0.5;
   const streetY = faceConfig.effectiveStreetY;
-  const suppressLowProtrusions = Boolean(building.isScaffoldingHost);
+  const suppressStorefronts = Boolean(faceConfig.suppressStorefronts);
+  const suppressLowProtrusions =
+    Boolean(building.isScaffoldingHost) || suppressStorefronts;
   // Flush trim bands/quoins are decal-like layers over the wall: local polygonOffset clone, backs embedded 2cm.
   const flushTrimMat = decalMat(trimMat, 1);
 
-  // Ground-floor storefront bays
-  const bayCount = Math.max(
-    1,
-    Math.min(
-      building.shopfrontBayCount || 2,
-      Math.floor(exposedSpan / 2.65),
-    ),
-  );
-  const baySpan = Math.max(2.2, (exposedSpan - 0.9) / bayCount);
+  // Ground-floor storefront bays (omitted on faces bordering elevated sloped streets/rooftops)
+  const bayCount = suppressStorefronts
+    ? 0
+    : Math.max(
+        1,
+        Math.min(
+          building.shopfrontBayCount || 2,
+          Math.floor(exposedSpan / 2.65),
+        ),
+      );
+  const baySpan = bayCount > 0 ? Math.max(2.2, (exposedSpan - 0.9) / bayCount) : 0;
   const doorBayIdx = Math.floor(bayCount * 0.5);
 
-  // Upper residential stories
-  const upperStartY = streetY + 3.65;
-  const upperSpanY = Math.max(2.6, roofStartY - upperStartY - 0.45);
-  const upperStories = Math.max(1, building.stories - 1);
-  const storyH = upperSpanY / upperStories;
+  // Upper residential stories strictly bounded between elevated deck datum and eave cornice
+  const upperStartY = suppressStorefronts ? streetY + 0.28 : streetY + 3.65;
+  const availUpperY = roofStartY - upperStartY - 0.34;
+  const maxStoriesCap = Math.max(1, building.stories - (suppressStorefronts ? 0 : 1));
+  const upperStories =
+    availUpperY >= 1.35
+      ? Math.max(1, Math.min(maxStoriesCap, Math.floor(availUpperY / 2.75) || 1))
+      : 0;
+  const storyH = upperStories > 0 ? availUpperY / upperStories : 0;
+  const plinthHeight = Math.min(
+    suppressStorefronts ? streetY + 0.08 : streetY + 0.58,
+    Math.max(0.45, roofStartY - 0.15),
+  );
+  const beltY = suppressStorefronts ? streetY + 0.1 : streetY + 3.45;
+  const fireStartY = upperStartY;
+  const showFireEscape =
+    building.hasFireEscape &&
+    exposedSpan >= 6.0 &&
+    roofStartY - 0.55 - fireStartY >= 4.2;
 
   const colCount = Math.max(
     2,
@@ -912,46 +1080,55 @@ function FacadeFaceDetail({
       <mesh
         castShadow
         receiveShadow
-        position={[uCenter, (streetY + 0.58) * 0.5, 0.02]}
+        position={[uCenter, plinthHeight * 0.5, 0.02]}
         material={flushTrimMat}
       >
-        <boxGeometry args={[exposedSpan - 0.03, streetY + 0.58, 0.08]} />
+        <boxGeometry args={[exposedSpan - 0.03, plinthHeight, 0.08]} />
       </mesh>
 
-      {/* Belt Course Ledge Separating Ground Retail & Upper Apartments */}
-      <mesh
-        castShadow
-        receiveShadow
-        position={[uCenter, streetY + 3.45, suppressLowProtrusions ? 0.02 : 0.06]}
-        material={flushTrimMat}
-      >
-        <boxGeometry
-          args={[exposedSpan + 0.06, 0.18, suppressLowProtrusions ? 0.08 : 0.16]}
-        />
-      </mesh>
+      {/* Belt Course Ledge Separating Ground Retail/Dado & Upper Apartments */}
+      {beltY < roofStartY - 0.25 && (
+        <mesh
+          castShadow
+          receiveShadow
+          position={[uCenter, beltY, suppressLowProtrusions ? 0.02 : 0.06]}
+          material={flushTrimMat}
+        >
+          <boxGeometry
+            args={[exposedSpan + 0.06, 0.18, suppressLowProtrusions ? 0.08 : 0.16]}
+          />
+        </mesh>
+      )}
 
       {/* Storefront Bays */}
-      {Array.from({ length: bayCount }, (_, bIdx) => {
-        const bu =
-          uCenter - (bayCount - 1) * 0.5 * baySpan + bIdx * baySpan;
-        return (
-          <group key={`bay-${bIdx}`} position={[bu, streetY, 0]}>
-            <StorefrontBay
-              bayWidth={baySpan}
-              isDoorBay={bIdx === doorBayIdx}
-              awningHex={building.shopfrontAwningHex}
-              trimMat={trimMat}
-              suppressProtrusions={suppressLowProtrusions}
-            />
-          </group>
-        );
-      })}
+      {!suppressStorefronts &&
+        Array.from({ length: bayCount }, (_, bIdx) => {
+          const bu =
+            uCenter - (bayCount - 1) * 0.5 * baySpan + bIdx * baySpan;
+          return (
+            <group key={`bay-${bIdx}`} position={[bu, streetY, 0]}>
+              <StorefrontBay
+                bayWidth={baySpan}
+                isDoorBay={bIdx === doorBayIdx}
+                awningHex={building.shopfrontAwningHex}
+                trimMat={trimMat}
+                suppressProtrusions={suppressLowProtrusions}
+              />
+            </group>
+          );
+        })}
 
       {/* Upper-Story Shuttered Windows & Juliet Balconies */}
       {Array.from({ length: upperStories }, (_, sIdx) => {
-        const sillY = upperStartY + sIdx * storyH + 0.36;
+        const sillOffset = storyH < 2.2 ? 0.14 : 0.36;
+        const sillY = upperStartY + sIdx * storyH + sillOffset;
         const isGrandFloor = sIdx === 0;
-        const jambH = Math.min(1.42, storyH * (isGrandFloor ? 0.54 : 0.48));
+        const maxSafeJamb = Math.max(0.4, roofStartY - sillY - 0.42);
+        const jambH = Math.min(
+          1.42,
+          maxSafeJamb,
+          storyH * (isGrandFloor && storyH >= 2.2 ? 0.54 : 0.46),
+        );
         const winW = Math.min(1.08, colSpan * 0.46);
 
         return (
@@ -1008,10 +1185,10 @@ function FacadeFaceDetail({
       })}
 
       {/* Wrought-Iron Fire Escape (placed cleanly clear of any lower scaffolding) */}
-      {building.hasFireEscape && exposedSpan >= 6.0 && (
+      {showFireEscape && (
         <group position={[faceConfig.uMax - 1.35, 0, 0]}>
           <FireEscapeAssembly
-            startY={streetY + 3.65}
+            startY={fireStartY}
             topY={roofStartY - 0.55}
             storiesAboveGround={Math.max(2, upperStories)}
           />
@@ -1405,6 +1582,51 @@ export function BuildingFacadeModule({
             material={VENICE_MATERIALS.brickBrownstone}
           >
             <boxGeometry args={[0.65, 1.16, 0.65]} />
+          </mesh>
+        </group>
+      )}
+
+      {building.roofStyle === 'campanile_spire' && (
+        <group position={[0, bodyHeight, 0]}>
+          {/* Gallery Cornice Ledge */}
+          <mesh position={[0, 0.14, 0]} material={trimMat} castShadow receiveShadow>
+            <boxGeometry args={[widthX + 0.35, 0.28, depthZ + 0.35]} />
+          </mesh>
+          {/* Open Belfry Corner Piers */}
+          {[
+            [-widthX * 0.36, -depthZ * 0.36],
+            [widthX * 0.36, -depthZ * 0.36],
+            [-widthX * 0.36, depthZ * 0.36],
+            [widthX * 0.36, depthZ * 0.36],
+          ].map(([px, pz], idx) => (
+            <mesh
+              key={`bld-belfry-${idx}`}
+              position={[px, 1.35, pz]}
+              material={trimMat}
+              castShadow
+            >
+              <boxGeometry args={[0.55, 2.2, 0.55]} />
+            </mesh>
+          ))}
+          {/* Warm Lit Clocktower / Bell Core */}
+          <mesh position={[0, 1.3, 0]} material={VENICE_MATERIALS.storefrontWarmInterior}>
+            <boxGeometry args={[widthX * 0.45, 1.7, depthZ * 0.45]} />
+          </mesh>
+          {/* Patinated Copper Pyramid Spire */}
+          <mesh
+            position={[0, 2.45 + 1.05, 0]}
+            rotation={[0, Math.PI * 0.25, 0]}
+            material={VENICE_MATERIALS.campanileSpireCopper}
+            castShadow
+          >
+            <coneGeometry args={[Math.min(widthX, depthZ) * 0.54, 2.1, 4]} />
+          </mesh>
+          {/* Golden Finial */}
+          <mesh
+            position={[0, 4.6, 0]}
+            material={VENICE_MATERIALS.flowerBoxBlossomGold}
+          >
+            <sphereGeometry args={[0.22, 10, 8]} />
           </mesh>
         </group>
       )}

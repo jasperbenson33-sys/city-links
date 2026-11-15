@@ -11,7 +11,6 @@ import * as THREE from 'three';
 import { useFrame, useThree } from '@react-three/fiber';
 import { BALL_RADIUS, type ClubId, type Vec3Tuple } from '@/types';
 import {
-  AUDIT_CAMERA_STATIONS,
   getMasterPlanGroundElevationAt,
   getVanRampOrRoofElevationAt,
 } from '@/config/courseMasterPlan';
@@ -118,6 +117,7 @@ export function AimControlsAndArc({
 }: AimControlsAndArcProps) {
   const { camera, gl, size } = useThree();
 
+  const activePlan = useCurbsideStore((s) => s.activePlan);
   const shotPhase = useCurbsideStore((s) => s.shotPhase);
   const selectedClub = useCurbsideStore((s) => s.selectedClub);
   const aimYaw = useCurbsideStore((s) => s.aimYaw);
@@ -424,8 +424,10 @@ export function AimControlsAndArc({
       aimYaw,
       simulateAwningBounce: true,
       simulateObstacles: true,
+      courseId: activePlan.courseId,
+      plan: activePlan,
     });
-  }, [showGuides, aimPower, ballPosition, selectedClub, aimYaw]);
+  }, [showGuides, aimPower, ballPosition, selectedClub, aimYaw, activePlan]);
 
   // Terrain-following idle aim breadcrumbs clear of the ball collar & bottom club dock
   const idleDots = useMemo<Vec3Tuple[]>(() => {
@@ -433,7 +435,7 @@ export function AimControlsAndArc({
     const [dx, dz] = resolveHorizontalAim(undefined, aimYaw);
     const ballBaseY = ballPosition[1] - BALL_RADIUS;
     const auditStation = cameraAuditStationId
-      ? AUDIT_CAMERA_STATIONS.find((s) => s.id === cameraAuditStationId)
+      ? activePlan.auditStations.find((s) => s.id === cameraAuditStationId) ?? null
       : null;
     const pts: Vec3Tuple[] = [];
     for (let i = 0; i < 8; i++) {
@@ -447,14 +449,15 @@ export function AimControlsAndArc({
       ) {
         continue;
       }
-      const gY = getMasterPlanGroundElevationAt(px, pz);
-      const vY = getVanRampOrRoofElevationAt(px, pz);
+      const gY = getMasterPlanGroundElevationAt(px, pz, activePlan);
+      const vY =
+        activePlan.courseId === 'classic' ? getVanRampOrRoofElevationAt(px, pz) : null;
       const surfY =
         vY !== null && Math.abs(ballBaseY - vY) < 0.45 ? Math.max(gY, vY) : gY;
       pts.push([px, surfY + 0.06, pz]);
     }
     return pts;
-  }, [showGuides, aimPower, aimYaw, ballPosition, cameraAuditStationId]);
+  }, [showGuides, aimPower, aimYaw, ballPosition, cameraAuditStationId, activePlan]);
 
   const activeDots = useMemo(() => {
     if (trajectory) {

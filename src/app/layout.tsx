@@ -2,10 +2,10 @@ import type { Metadata, Viewport } from 'next';
 import './globals.css';
 
 export const metadata: Metadata = {
-  title: 'Curbside Links — 5th & Mercer',
+  title: 'Curbside Links — Grand Crosstown Escapade',
   description:
-    'Hole 1: 5th & Mercer (Par 4 • 72m). Sunlit Walkabout-warm urban street golf — instant tee-off, zero menus.',
-  applicationName: 'Curbside Links — 5th & Mercer',
+    'Par 18 • 380m Continuous 7-Zone Rooftop-to-Subway Urban Golf Odyssey — instant tee-off, zero menus.',
+  applicationName: 'Curbside Links — Grand Crosstown Escapade',
   appleWebApp: {
     capable: true,
     statusBarStyle: 'black-translucent',

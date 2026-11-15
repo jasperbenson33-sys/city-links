@@ -356,3 +356,157 @@ export function createPatioCobblestoneTexture(): THREE.DataTexture {
     return lerp3(jointCol, stoneCol, stoneMask);
   });
 }
+
+/**
+ * Weathered NYC cedar water-tower staves & rooftop timber bridge planks (256x256 tileable, 16x anisotropy).
+ */
+export function createCedarPlankTexture(): THREE.DataTexture {
+  const size = 256;
+  const plankW = 32; // 8 planks across 256px
+  const plankH = 128; // staggered end joints
+  const woods = [
+    hexToRgb('#8E5A38'),
+    hexToRgb('#835132'),
+    hexToRgb('#996340'),
+    hexToRgb('#7C4B2D'),
+  ];
+  const seam = hexToRgb('#59341E');
+
+  return makeDataTexture(size, (x, y) => {
+    const col = Math.floor(x / plankW);
+    const yShift = (col % 2) * (plankH / 2);
+    const wy = (y + yShift) % size;
+    const row = Math.floor(wy / plankH);
+    const lx = x % plankW;
+    const ly = wy % plankH;
+
+    const minEdge = Math.min(
+      edgeDistanceInCell(lx, plankW),
+      edgeDistanceInCell(ly, plankH) * 1.15,
+    );
+    const plankMask = smoothstep(0.9, 2.8, minEdge);
+
+    const tone = woods[(col * 3 + row * 5) % woods.length]!;
+    // Longitudinal wood grain (fine X, stretched Y) — seamlessly periodic
+    const grainStreak =
+      (periodicValueNoise2D(x, y, size, 4, 2111) - 0.5) * 8.0 *
+        0.55 +
+      (periodicValueNoise2D(x, Math.floor(y / 8), 32, 2, 2207) - 0.5) * 9.0;
+    const woodCol: [number, number, number] = [
+      tone[0] + grainStreak,
+      tone[1] + grainStreak * 0.85,
+      tone[2] + grainStreak * 0.7,
+    ];
+    return lerp3(seam, woodCol, plankMask);
+  });
+}
+
+/**
+ * Classic NYC Guastavino / IRT bevel-glazed warm cream ceramic subway tile (256x256 running bond).
+ */
+export function createCreamSubwayTileTexture(): THREE.DataTexture {
+  const size = 256;
+  const tileW = 64; // 4 courses wide
+  const tileH = 32; // 8 courses tall (2:1 subway brick ratio)
+  const glazes = [
+    hexToRgb('#F7EFE0'),
+    hexToRgb('#F2E8D5'),
+    hexToRgb('#FAF3E6'),
+    hexToRgb('#EDE2CD'),
+  ];
+  const mortar = hexToRgb('#CFC2AB');
+
+  return makeDataTexture(size, (x, y) => {
+    const row = Math.floor(y / tileH);
+    const shift = (row % 2) * (tileW / 2);
+    const tx = (x + shift) % size;
+    const col = Math.floor(tx / tileW);
+    const lx = tx % tileW;
+    const ly = y % tileH;
+
+    const minEdge = Math.min(
+      edgeDistanceInCell(lx, tileW),
+      edgeDistanceInCell(ly, tileH),
+    );
+    const tileMask = smoothstep(1.0, 3.2, minEdge);
+    const glazePillow =
+      smoothstep(2.0, 5.2, minEdge) * (1 - smoothstep(5.2, 10.0, minEdge)) * 4.5;
+
+    const tone = glazes[(row * 5 + col * 3) % glazes.length]!;
+    const Craquelure = (periodicValueNoise2D(x, y, size, 8, 3109) - 0.5) * 3.5;
+    const tileCol: [number, number, number] = [
+      tone[0] + glazePillow + Craquelure,
+      tone[1] + glazePillow + Craquelure,
+      tone[2] + glazePillow + Craquelure,
+    ];
+    return lerp3(mortar, tileCol, tileMask);
+  });
+}
+
+/**
+ * Classic NYC IRT glazed emerald-jade ceramic subway wainscot & mosaic border tile (256x256).
+ */
+export function createEmeraldSubwayTileTexture(): THREE.DataTexture {
+  const size = 256;
+  const tileW = 64;
+  const tileH = 32;
+  const glazes = [
+    hexToRgb('#1F6E58'),
+    hexToRgb('#1A614D'),
+    hexToRgb('#257A62'),
+    hexToRgb('#1D6853'),
+  ];
+  const mortar = hexToRgb('#C8BFA9');
+
+  return makeDataTexture(size, (x, y) => {
+    const row = Math.floor(y / tileH);
+    const shift = (row % 2) * (tileW / 2);
+    const tx = (x + shift) % size;
+    const col = Math.floor(tx / tileW);
+    const lx = tx % tileW;
+    const ly = y % tileH;
+
+    const minEdge = Math.min(
+      edgeDistanceInCell(lx, tileW),
+      edgeDistanceInCell(ly, tileH),
+    );
+    const tileMask = smoothstep(1.0, 3.1, minEdge);
+    const glazeHighlight =
+      smoothstep(2.2, 5.0, minEdge) * (1 - smoothstep(5.0, 9.5, minEdge)) * 6.0;
+
+    const tone = glazes[(row * 3 + col * 7) % glazes.length]!;
+    const depthVar = (periodicValueNoise2D(x, y, size, 8, 3313) - 0.5) * 5.0;
+    const tileCol: [number, number, number] = [
+      tone[0] + glazeHighlight * 0.7 + depthVar,
+      tone[1] + glazeHighlight + depthVar,
+      tone[2] + glazeHighlight * 0.85 + depthVar,
+    ];
+    return lerp3(mortar, tileCol, tileMask);
+  });
+}
+
+/**
+ * Warm ribbed maple & rattan vintage IRT subway coach walkthrough aisle floor (256x256).
+ */
+export function createSubwayRattanFloorTexture(): THREE.DataTexture {
+  const size = 256;
+  const slatPitch = 16; // 16 longitudinal floor ribs across 256px
+  const mapleLight = hexToRgb('#C9965B');
+  const mapleDark = hexToRgb('#A3733E');
+  const groove = hexToRgb('#7D552B');
+
+  return makeDataTexture(size, (x, y) => {
+    const lx = x % slatPitch;
+    const edgeDist = edgeDistanceInCell(lx, slatPitch);
+    const ribMask = smoothstep(0.9, 2.8, edgeDist);
+    const col = Math.floor(x / slatPitch);
+    const base = col % 2 === 0 ? mapleLight : mapleDark;
+    const grain = (periodicValueNoise2D(x, y, size, 8, 3517) - 0.5) * 6.0;
+    const slatCol: [number, number, number] = [
+      base[0] + grain,
+      base[1] + grain * 0.9,
+      base[2] + grain * 0.75,
+    ];
+    return lerp3(groove, slatCol, ribMask);
+  });
+}

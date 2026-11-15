@@ -6,7 +6,17 @@ import {
   COURSE_PROPS,
   TEE_SET_LOCAL_BOUNDS,
 } from '@/config/courseMasterPlan';
-import type { CoursePropSpec, PlacedProp, PropType } from '@/types/course';
+import {
+  ESCAPADE_COURSE_PROPS,
+  GRAND_ESCAPADE_QA_PROP_SPECS,
+} from '@/config/grandEscapadeMasterPlan';
+import { TOYBOX_MATERIALS } from '@/materials';
+import type {
+  CoursePropSpec,
+  GrandEscapadePropType,
+  PlacedProp,
+  PropType,
+} from '@/types/course';
 import { HotdogCartProp, CoaxialWheelMeshGroup } from './HotdogCartProp';
 import { FireHydrantJetProp } from './FireHydrantJetProp';
 import { SubwaySteamGrateProp } from './SubwaySteamGrateProp';
@@ -35,6 +45,26 @@ import {
   PlanterHedgeProp,
   SubwayPortalProp,
 } from './UrbanCornerProps';
+import {
+  RooftopWaterTowerProp,
+  AngledSkylightBankProp,
+  GreenhousePergolaProp,
+  HvacUpdraftFanProp,
+} from './GrandEscapadeRooftopProps';
+import {
+  StoneViaductArchProp,
+  CurvedBalustradeBankProp,
+  GlassConservatoryProp,
+  RooftopBellTowerProp,
+  CopperSpiralChuteProp,
+} from './GrandEscapadeViaductChuteProps';
+import {
+  NewspaperKioskProp,
+  BrassTurnstileGateProp,
+  VintageSubwayCarProp,
+  SubwayMosaicPillarProp,
+  GrandSubwayHeadhouseProp,
+} from './GrandEscapadeTransitSubwayProps';
 
 export { HotdogCartProp, CoaxialWheelMeshGroup };
 export { FireHydrantJetProp };
@@ -61,15 +91,33 @@ export {
   PlanterHedgeProp,
   SubwayPortalProp,
 };
+export {
+  RooftopWaterTowerProp,
+  AngledSkylightBankProp,
+  GreenhousePergolaProp,
+  HvacUpdraftFanProp,
+  StoneViaductArchProp,
+  CurvedBalustradeBankProp,
+  GlassConservatoryProp,
+  RooftopBellTowerProp,
+  CopperSpiralChuteProp,
+  NewspaperKioskProp,
+  BrassTurnstileGateProp,
+  VintageSubwayCarProp,
+  SubwayMosaicPillarProp,
+  GrandSubwayHeadhouseProp,
+};
 
 export type ExtendedQaPropType =
   | PropType
+  | GrandEscapadePropType
   | 'golf_bag_tee'
   | 'corner_building_accent';
 
 export interface MinimalQaPropSpec {
   id: string;
   type: ExtendedQaPropType;
+  escapadePropType?: GrandEscapadePropType;
   position: [number, number, number];
   rotationY: number;
   localSize: [number, number, number];
@@ -134,8 +182,28 @@ export const PlacedPropRenderer = React.memo(function PlacedPropRenderer({
     prop.position[2],
   ];
   const rotY = prop.rotationY;
+  const resolvedType: ExtendedQaPropType =
+    courseProp.escapadePropType ?? prop.type;
 
-  switch (prop.type) {
+  const wrapStage2 = (node: React.ReactNode) => (
+    <group
+      name={`esc-prop-${prop.id}`}
+      position={pos}
+      rotation={[0, rotY, 0]}
+    >
+      {node}
+      {showWireframe && (
+        <mesh
+          position={[0, prop.localSize[1] * 0.5, 0]}
+          material={TOYBOX_MATERIALS.qaBoundsWireframe}
+        >
+          <boxGeometry args={prop.localSize} />
+        </mesh>
+      )}
+    </group>
+  );
+
+  switch (resolvedType) {
     case 'hotdog_cart_umbrella':
       return (
         <HotdogCartProp
@@ -334,6 +402,40 @@ export const PlacedPropRenderer = React.memo(function PlacedPropRenderer({
           showWireframe={showWireframe}
         />
       );
+    case 'rooftop_water_tower':
+      return wrapStage2(<RooftopWaterTowerProp propId={prop.id} />);
+    case 'angled_skylight_bank':
+      return wrapStage2(<AngledSkylightBankProp propId={prop.id} />);
+    case 'greenhouse_pergola':
+      return wrapStage2(<GreenhousePergolaProp propId={prop.id} />);
+    case 'hvac_updraft_fan':
+      return wrapStage2(
+        <HvacUpdraftFanProp
+          propId={prop.id}
+          isStandaloneQA={isStandaloneQA}
+          forceAction={forceAction}
+        />,
+      );
+    case 'stone_viaduct_arch':
+      return wrapStage2(<StoneViaductArchProp propId={prop.id} />);
+    case 'curved_balustrade_bank':
+      return wrapStage2(<CurvedBalustradeBankProp />);
+    case 'glass_conservatory':
+      return wrapStage2(<GlassConservatoryProp propId={prop.id} />);
+    case 'rooftop_bell_tower':
+      return wrapStage2(<RooftopBellTowerProp propId={prop.id} />);
+    case 'copper_spiral_chute':
+      return wrapStage2(<CopperSpiralChuteProp propId={prop.id} />);
+    case 'newspaper_kiosk':
+      return wrapStage2(<NewspaperKioskProp propId={prop.id} />);
+    case 'brass_turnstile_gate':
+      return wrapStage2(<BrassTurnstileGateProp propId={prop.id} />);
+    case 'vintage_subway_car':
+      return wrapStage2(<VintageSubwayCarProp propId={prop.id} />);
+    case 'subway_mosaic_pillar':
+      return wrapStage2(<SubwayMosaicPillarProp propId={prop.id} />);
+    case 'grand_subway_headhouse':
+      return wrapStage2(<GrandSubwayHeadhouseProp propId={prop.id} />);
     default:
       return null;
   }
@@ -410,6 +512,7 @@ export interface PropQAGalleryEntry {
   id: string;
   title: string;
   propType: ExtendedQaPropType;
+  escapadePropType?: GrandEscapadePropType;
   category:
     | 'hero-obstacle'
     | 'dynamic-hazard'
@@ -597,4 +700,50 @@ export const PROP_QA_REGISTRY: PropQAGalleryEntry[] = [
     localBoundsMax: [2.2, 5.6, 0.36],
     coaxialAxles: [],
   },
+  ...GRAND_ESCAPADE_QA_PROP_SPECS.map((spec): PropQAGalleryEntry => {
+    const matchProp = ESCAPADE_COURSE_PROPS.find(
+      (p) => p.escapadePropType === spec.escapadePropType,
+    );
+    const axles: CoaxialAxleIndicator[] =
+      spec.escapadePropType === 'rooftop_water_tower'
+        ? [{ label: 'Cedar Barrel Axis (Y)', start: [0, 0, 0], end: [0, 5.7, 0] }]
+        : spec.escapadePropType === 'hvac_updraft_fan'
+          ? [{ label: 'Impeller Turbine Axis (Y)', start: [0, 0, 0], end: [0, 0.34, 0] }]
+          : spec.escapadePropType === 'rooftop_bell_tower'
+            ? [
+                { label: 'Belfry Tower Axis (Y)', start: [0, 0, 0], end: [0, 6.4, 0] },
+                { label: 'Bell Yoke Axis (X)', start: [-0.7, 4.18, 0], end: [0.7, 4.18, 0] },
+              ]
+            : spec.escapadePropType === 'copper_spiral_chute'
+              ? [{ label: 'Helical Downspout Mast (Y)', start: [0, 0, 0], end: [0, 12.8, 0] }]
+              : spec.escapadePropType === 'vintage_subway_car'
+                ? [
+                    { label: 'Pass-Through Aisle (Z)', start: [0, 0.2, -6.8], end: [0, 0.2, 6.8] },
+                    { label: 'Side Door Center Axis (X)', start: [-1.55, 1.3, 0], end: [1.55, 1.3, 0] },
+                  ]
+                : spec.escapadePropType === 'grand_subway_headhouse'
+                  ? [{ label: 'Open Portal Throat (Z)', start: [0, 0.2, -1.2], end: [0, 0.2, 1.2] }]
+                  : [];
+    return {
+      id: spec.id,
+      title: `Z${spec.zoneNumber}: ${spec.title}`,
+      propType: spec.escapadePropType,
+      escapadePropType: spec.escapadePropType,
+      category: spec.category,
+      description: spec.description,
+      localSize: [spec.localSize[0], spec.localSize[1], spec.localSize[2]],
+      localBoundsMin: [
+        spec.localBoundsMin[0],
+        spec.localBoundsMin[1],
+        spec.localBoundsMin[2],
+      ],
+      localBoundsMax: [
+        spec.localBoundsMax[0],
+        spec.localBoundsMax[1],
+        spec.localBoundsMax[2],
+      ],
+      coaxialAxles: axles,
+      courseProp: matchProp,
+    };
+  }),
 ];

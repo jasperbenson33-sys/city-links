@@ -24,6 +24,8 @@ export interface CupFlagAssemblyProps {
   cupDepth?: number;
   /** Flagpole height in meters (2.35m street-level pin). */
   poleHeight?: number;
+  /** Render ornate 24k golden pin, finial crown & warm gold beacon (Stage 2 Zone 7 finale). */
+  isGoldenPin?: boolean;
 }
 
 const CONFETTI_COUNT = 22;
@@ -74,6 +76,31 @@ const POLE_MAT = (() => {
   m.metalness = 0.06;
   return m;
 })();
+const GOLDEN_POLE_MAT = new THREE.MeshStandardMaterial({
+  color: '#F6C945',
+  roughness: 0.28,
+  metalness: 0.62,
+  emissive: '#B45309',
+  emissiveIntensity: 0.22,
+});
+const GOLDEN_BANNER_MAT = new THREE.MeshStandardMaterial({
+  color: '#FDE047',
+  roughness: 0.3,
+  metalness: 0.48,
+  emissive: '#D97706',
+  emissiveIntensity: 0.38,
+  side: THREE.DoubleSide,
+});
+const GOLDEN_HALO_MAT = layered(
+  new THREE.MeshBasicMaterial({
+    color: '#FDE047',
+    transparent: true,
+    opacity: 0.88,
+    depthWrite: false,
+    side: THREE.DoubleSide,
+  }),
+  2,
+);
 const HALO_MATS = new Map<ToyboxFlagColor, THREE.MeshBasicMaterial>();
 function haloMaterialFor(color: ToyboxFlagColor): THREE.MeshBasicMaterial {
   let m = HALO_MATS.get(color);
@@ -99,6 +126,7 @@ export const CupFlagAssembly = React.memo(function CupFlagAssembly({
   cupRadius = 0.42,
   cupDepth = 0.42,
   poleHeight = 2.35,
+  isGoldenPin = false,
 }: CupFlagAssemblyProps) {
   const pennantGroupRef = useRef<THREE.Group>(null);
   const activeBannerRef = useRef<THREE.Mesh>(null);
@@ -296,7 +324,7 @@ export const CupFlagAssembly = React.memo(function CupFlagAssembly({
         scale={isSunk ? 0 : 1}
         position={[0, HALO_Y, 0]}
         rotation={[-Math.PI * 0.5, 0, 0]}
-        material={haloMaterialFor(color)}
+        material={isGoldenPin ? GOLDEN_HALO_MAT : haloMaterialFor(color)}
         castShadow={false}
         frustumCulled={false}
       >
@@ -321,19 +349,37 @@ export const CupFlagAssembly = React.memo(function CupFlagAssembly({
       <mesh
         castShadow
         position={[0, (poleHeight - cupDepth) * 0.5, 0]}
-        material={POLE_MAT}
+        material={isGoldenPin ? GOLDEN_POLE_MAT : POLE_MAT}
       >
         <cylinderGeometry args={[0.017, 0.02, poleHeight + cupDepth, 12]} />
       </mesh>
 
-      {/* Brass Finial Orb */}
+      {/* Brass Finial Orb (crowned w/ spire & collar when isGoldenPin) */}
       <mesh
         position={[0, poleHeight + 0.045, 0]}
-        material={TOYBOX_MATERIALS.brassAccent}
+        material={isGoldenPin ? GOLDEN_POLE_MAT : TOYBOX_MATERIALS.brassAccent}
         castShadow
       >
-        <sphereGeometry args={[0.085, 12, 10]} />
+        <sphereGeometry args={[isGoldenPin ? 0.1 : 0.085, 12, 10]} />
       </mesh>
+      {isGoldenPin && (
+        <>
+          <mesh
+            position={[0, poleHeight - 0.04, 0]}
+            material={GOLDEN_POLE_MAT}
+            castShadow
+          >
+            <cylinderGeometry args={[0.055, 0.04, 0.04, 12]} />
+          </mesh>
+          <mesh
+            position={[0, poleHeight + 0.18, 0]}
+            material={GOLDEN_POLE_MAT}
+            castShadow
+          >
+            <coneGeometry args={[0.045, 0.14, 10]} />
+          </mesh>
+        </>
+      )}
 
       {/* Swallowtail Flag Banner (both active & ghost meshes mounted visible={true} from frame 0) */}
       <group ref={pennantGroupRef} position={[0, poleHeight - 0.34, 0]}>
@@ -344,7 +390,7 @@ export const CupFlagAssembly = React.memo(function CupFlagAssembly({
           castShadow={false}
           frustumCulled={false}
           geometry={pennantGeo}
-          material={palette.banner}
+          material={isGoldenPin ? GOLDEN_BANNER_MAT : palette.banner}
         />
         <mesh
           ref={sunkBannerRef}

@@ -1,6 +1,8 @@
 import type {
   ClubId,
   ComputeTrajectoryOptions,
+  CourseId,
+  CourseMasterPlan,
   DeterministicTrajectoryResult,
   PhysicsSurfaceTag,
   Vec3Tuple,
@@ -10,14 +12,11 @@ import {
   WORLD_GRAVITY_Y,
 } from '@/types/clubs';
 import {
-  ARCHITECTURAL_WALLS,
   COURSE_MASTER_PLAN,
-  COURSE_PROPS,
-  PERIMETER_BUILDINGS,
-  STONE_CURBS,
   getMasterPlanGroundElevationAt,
   getMasterPlanSurfaceTagAt,
 } from '@/config/courseMasterPlan';
+import { getMasterPlanByCourseId } from '@/config/grandEscapadeMasterPlan';
 import {
   computeAwningBounceVelocity,
   intersectRayAABB3D,
@@ -44,6 +43,10 @@ export type TrajectoryImpactKind =
   | 'van';
 
 export interface TrajectoryComputeExtendedOptions extends ComputeTrajectoryOptions {
+  /** Active course master plan ID (defaults to 'classic' for backwards-compatible layout checks). */
+  courseId?: CourseId;
+  /** Optional resolved master plan instance. */
+  plan?: CourseMasterPlan;
   /** Whether to reflect descending shots off hotdog-cart-corner's 28 deg awning (default true). */
   simulateAwningBounce?: boolean;
   /** Whether to stop/reflect preview rays at solid curbs/walls/tree canopy/van (default true). */
@@ -181,17 +184,25 @@ interface AwningColliderCache {
   restitution: number;
 }
 
-let cachedAwning: AwningColliderCache | null = null;
+const cachedAwningByCourse = new Map<CourseId, AwningColliderCache | null>();
 
 function dot3(a: Vec3Tuple, b: Vec3Tuple): number {
   return a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
 }
 
-function getHotdogAwningData(): AwningColliderCache | null {
-  if (cachedAwning) return cachedAwning;
-  const cart = COURSE_PROPS.find((p) => p.id === 'hotdog-cart-corner');
+function getHotdogAwningData(plan: CourseMasterPlan): AwningColliderCache | null {
+  const cid: CourseId = plan.courseId ?? 'classic';
+  if (cachedAwningByCourse.has(cid)) {
+    return cachedAwningByCourse.get(cid) ?? null;
+  }
+  const cart = plan.props.find(
+    (p) => Boolean(p.hotdogAwningMeta) || p.id === 'hotdog-cart-corner',
+  );
   const meta = cart?.hotdogAwningMeta;
-  if (!cart || !meta) return null;
+  if (!cart || !meta) {
+    cachedAwningByCourse.set(cid, null);
+    return null;
+  }
   const rotY = cart.rotationY ?? 0;
   // Local +X axis rotated around world Y by rotationY
   const axisU: Vec3Tuple = [Math.cos(rotY), 0, -Math.sin(rotY)];
@@ -202,7 +213,7 @@ function getHotdogAwningData(): AwningColliderCache | null {
   const vz = axisU[0] * axisN[1] - axisU[1] * axisN[0];
   const vLen = Math.hypot(vx, vy, vz) || 1;
   const axisV: Vec3Tuple = [vx / vLen, vy / vLen, vz / vLen];
-  cachedAwning = {
+  const built: AwningColliderCache = {
     center: meta.awningCenter,
     axisU,
     axisN,
@@ -212,7 +223,8 @@ function getHotdogAwningData(): AwningColliderCache | null {
     halfD: meta.awningSize[2] * 0.5 + BALL_RADIUS * 0.5,
     restitution: meta.restitution,
   };
-  return cachedAwning;
+  cachedAwningByCourse.set(cid, built);
+  return built;
 }
 
 function intersectSegmentWithAwningObb(
@@ -262,13 +274,15 @@ interface SolidObstacleEntry {
   aabb: SimpleAabb3d;
 }
 
-let cachedObstacles: SolidObstacleEntry[] | null = null;
+const cachedObstaclesByCourse = new Map<CourseId, SolidObstacleEntry[]>();
 
-function getSolidObstacles(): SolidObstacleEntry[] {
-  if (cachedObstacles) return cachedObstacles;
+function getSolidObstacles(plan: CourseMasterPlan): SolidObstacleEntry[] {
+  const cid: CourseId = plan.courseId ?? 'classic';
+  const existing = cachedObstaclesByCourse.get(cid);
+  if (existing) return existing;
   const list: SolidObstacleEntry[] = [];
 
-  for (const b of PERIMETER_BUILDINGS) {
+  for (const b of plan.perimeterBuildings) {
     list.push({
       kind: 'wall',
       aabb: {
@@ -278,7 +292,7 @@ function getSolidObstacles(): SolidObstacleEntry[] {
     });
   }
 
-  for (const w of ARCHITECTURAL_WALLS) {
+  for (const w of plan.architecturalWalls) {
     list.push({
       kind: 'wall',
       aabb: {
@@ -296,13 +310,39 @@ function getSolidObstacles(): SolidObstacleEntry[] {
     });
   }
 
-  const tree = COURSE_PROPS.find((p) => p.id === 'tree-overhang-east')?.treeOverhangMeta;
+  const tree = plan.props.find((p) => p.treeOverhangMeta)?.treeOverhangMeta;
   if (tree) {
     list.push({ kind: 'tree', aabb: tree.canopyAabb });
     list.push({ kind: 'tree', aabb: tree.trunkAabb });
   }
 
-  for (const curb of STONE_CURBS) {
+  if (plan.courseId !== 'classic') {
+    for (const prop of plan.props) {
+      if (prop.type === 'subway_steam_grate' || prop.type === 'delivery_box_van') {
+        continue;
+      }
+      for (const col of prop.solidColliders) {
+        if (col.max[1] - col.min[1] < 0.35) continue;
+        list.push({
+          kind: prop.type === 'overhanging_street_tree' ? 'tree' : 'wall',
+          aabb: {
+            min: [
+              col.min[0] - BALL_RADIUS * 0.65,
+              col.min[1],
+              col.min[2] - BALL_RADIUS * 0.65,
+            ],
+            max: [
+              col.max[0] + BALL_RADIUS * 0.65,
+              col.max[1] + BALL_RADIUS * 0.3,
+              col.max[2] + BALL_RADIUS * 0.65,
+            ],
+          },
+        });
+      }
+    }
+  }
+
+  for (const curb of plan.curbs) {
     if (curb.kind === 'beveled_45' || curb.kind === 'curved_90') continue;
     list.push({
       kind: 'curb',
@@ -321,13 +361,14 @@ function getSolidObstacles(): SolidObstacleEntry[] {
     });
   }
 
-  cachedObstacles = list;
+  cachedObstaclesByCourse.set(cid, list);
   return list;
 }
 
 function findFirstSolidSegmentHit(
   from: Vec3Tuple,
   to: Vec3Tuple,
+  obstacles: SolidObstacleEntry[],
 ): { kind: SolidObstacleEntry['kind']; point: Vec3Tuple; normal: Vec3Tuple } | null {
   const dx = to[0] - from[0];
   const dy = to[1] - from[1];
@@ -343,7 +384,7 @@ function findFirstSolidSegmentHit(
     normal: Vec3Tuple;
   } | null = null;
 
-  for (const obs of getSolidObstacles()) {
+  for (const obs of obstacles) {
     const hit = intersectRayAABB3D(from, dir, obs.aabb, segLen);
     if (!hit.hit || !hit.point || !hit.normal || hit.tMin <= 0 || hit.tMin > bestT) {
       continue;
@@ -366,6 +407,9 @@ function findFirstSolidSegmentHit(
 export function computeDeterministicTrajectory(
   opts: TrajectoryComputeExtendedOptions,
 ): ExtendedTrajectoryResult {
+  const activePlan =
+    opts.plan ??
+    (opts.courseId ? getMasterPlanByCourseId(opts.courseId) : COURSE_MASTER_PLAN);
   const profile = getClubProfile(opts.clubId);
   const power = clamp01(opts.power);
   const horizontalDirection = resolveHorizontalAim(opts.aimDirection, opts.aimYaw);
@@ -381,7 +425,7 @@ export function computeDeterministicTrajectory(
     opts.sampleGroundY ??
     (opts.groundY !== undefined
       ? () => opts.groundY as number
-      : getMasterPlanGroundElevationAt);
+      : (x: number, z: number) => getMasterPlanGroundElevationAt(x, z, activePlan));
   const simulateAwning = opts.simulateAwningBounce ?? true;
   const simulateObstacles = opts.simulateObstacles ?? true;
 
@@ -421,7 +465,8 @@ export function computeDeterministicTrajectory(
     };
   }
 
-  const awning = simulateAwning ? getHotdogAwningData() : null;
+  const awning = simulateAwning ? getHotdogAwningData(activePlan) : null;
+  const solidObstacles = simulateObstacles ? getSolidObstacles(activePlan) : [];
   let elapsed = 0;
   let settledOnGround = false;
   const maxTotalSteps = Math.max(maxFlightSteps, 480);
@@ -432,7 +477,7 @@ export function computeDeterministicTrajectory(
     const surfaceTag: PhysicsSurfaceTag =
       opts.surfaceTag ??
       (opts.sampleGroundY || opts.groundY === undefined
-        ? getMasterPlanSurfaceTagAt(px, pz)
+        ? getMasterPlanSurfaceTagAt(px, pz, activePlan)
         : 'road_asphalt');
 
     const airborne =
@@ -491,7 +536,11 @@ export function computeDeterministicTrajectory(
 
     // 2. Check solid obstacles (walls / perimeter buildings / overhanging canopy / raised curbs)
     if (simulateObstacles && elapsed > 0.04) {
-      const solidHit = findFirstSolidSegmentHit(prev, [nextX, nextY, nextZ]);
+      const solidHit = findFirstSolidSegmentHit(
+        prev,
+        [nextX, nextY, nextZ],
+        solidObstacles,
+      );
       if (solidHit) {
         if (!firstImpactPoint) {
           firstImpactKind = solidHit.kind;
@@ -531,7 +580,7 @@ export function computeDeterministicTrajectory(
     const nextSurface: PhysicsSurfaceTag =
       opts.surfaceTag ??
       (opts.sampleGroundY || opts.groundY === undefined
-        ? getMasterPlanSurfaceTagAt(px, pz)
+        ? getMasterPlanSurfaceTagAt(px, pz, activePlan)
         : 'road_asphalt');
 
     if (py <= nextGroundY + BALL_RADIUS) {
@@ -579,8 +628,8 @@ export function computeDeterministicTrajectory(
       break;
     }
 
-    // Clamp overly deep out-of-world drift
-    const bounds = COURSE_MASTER_PLAN.worldBoundsXZ;
+    // Clamp overly deep out-of-world drift against active course bounds
+    const bounds = activePlan.worldBoundsXZ;
     if (
       px < bounds.minX - 2 ||
       px > bounds.maxX + 2 ||

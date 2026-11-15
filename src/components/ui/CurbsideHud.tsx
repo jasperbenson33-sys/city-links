@@ -2,14 +2,26 @@
 
 import React, { useEffect, useRef } from 'react';
 import {
+  BALL_RADIUS,
   CLUB_ORDER,
   CLUB_SPECS,
   type ClubId,
+  type CourseId,
+  type GrandEscapadeZoneNumber,
   type PhysicsSurfaceTag,
   type SoundEventPayload,
   type Vec3Tuple,
 } from '@/types';
-import { HOLE_1_CUP, TEE_POSITION } from '@/config/courseMasterPlan';
+import { COURSE_MASTER_PLAN, TEE_POSITION } from '@/config/courseMasterPlan';
+import {
+  computeRemainingCourseDistance,
+  DEFAULT_ACTIVE_COURSE_ID,
+  ESCAPADE_TEE_POSITION,
+  GRAND_ESCAPADE_MASTER_PLAN,
+  GRAND_ESCAPADE_ZONES,
+  getEscapadeZoneAtPosition,
+  isSubterraneanSubwayPosition,
+} from '@/config/grandEscapadeMasterPlan';
 import { useCurbsideStore } from '@/store';
 import { soundEngine } from '@/lib/sound';
 import { ClubHeadIcon } from './ClubHeadIcon';
@@ -25,6 +37,12 @@ type ShotPhase =
   | 'holed_out';
 
 interface StoreCompat {
+  courseId?: CourseId;
+  activeCourseId?: CourseId;
+  activeZoneNumber?: GrandEscapadeZoneNumber;
+  setCourseId?: (courseId: CourseId) => void;
+  setCourse?: (courseId: CourseId) => void;
+  switchCourse?: (courseId: CourseId) => void;
   holeNumber?: number;
   holeName?: string;
   par?: number;
@@ -46,8 +64,13 @@ interface StoreCompat {
   ballPosition?: Vec3Tuple;
   currentSurfaceTag?: PhysicsSurfaceTag;
   isStreetScoutActive?: boolean;
+  isCourseFlyoverActive?: boolean;
+  isFlyoverActive?: boolean;
   cameraMode?: string;
   toggleStreetScout?: () => void;
+  toggleCourseFlyover?: () => void;
+  startCourseFlyover?: () => void;
+  stopCourseFlyover?: () => void;
   toggleCameraMode?: () => void;
   isMuted?: boolean;
   muted?: boolean;
@@ -57,6 +80,7 @@ interface StoreCompat {
   isRoundComplete?: boolean;
   penaltyStrokes?: number;
   lastEventBanner?: string | null;
+  setEventBanner?: (banner: string | null) => void;
   trickToast?: { seq: number; label: string } | null;
   replayHole?: () => void;
   resetHole?: () => void;
@@ -64,6 +88,16 @@ interface StoreCompat {
   soundEventSeq?: number;
   lastSoundEvent?: SoundEventPayload | null;
 }
+
+const ZONE_SHORT_NAMES: Record<GrandEscapadeZoneNumber, string> = {
+  1: 'Mercer Row',
+  2: 'Brownstone Hill',
+  3: 'Rooftops',
+  4: 'Viaduct',
+  5: 'Conservatory',
+  6: 'Transit Plaza',
+  7: 'Subway Finale',
+};
 
 const CLUB_UI_META: Record<
   ClubId,
@@ -148,6 +182,14 @@ function formatLieDisplay(
 
 function getBannerBadgeEmoji(banner: string): string {
   const lower = banner.toLowerCase();
+  if (lower.includes('golden') || lower.includes('pin')) return '🏆';
+  if (lower.includes('bell')) return '🔔';
+  if (lower.includes('copper') || lower.includes('chute')) return '🌀';
+  if (lower.includes('updraft') || lower.includes('hvac') || lower.includes('fan')) return '🌬️';
+  if (lower.includes('skylight') || lower.includes('glass')) return '✨';
+  if (lower.includes('turnstile')) return '🚇';
+  if (lower.includes('subway') || lower.includes('train')) return '🚃';
+  if (lower.includes('rooftop') || lower.includes('viaduct')) return '🏙️';
   if (lower.includes('awning') || lower.includes('umbrella')) return '🎪';
   if (lower.includes('gutter') || lower.includes('hydrant')) return '💦';
   if (lower.includes('steam')) return '💨';
@@ -158,6 +200,14 @@ function getBannerBadgeEmoji(banner: string): string {
   return '✨';
 }
 
+function formatElevationTag(surfaceY: number): string {
+  if (!Number.isFinite(surfaceY) || Math.abs(surfaceY) < 0.05) return '0m';
+  const sign = surfaceY > 0 ? '+' : '';
+  const rounded =
+    Math.abs(surfaceY) >= 10 ? Math.round(surfaceY).toString() : surfaceY.toFixed(1);
+  return `${sign}${rounded}m`;
+}
+
 function formatPinDistance(meters: number): string {
   const clamped = Math.max(0, meters);
   if (clamped < 10) {
@@ -166,17 +216,44 @@ function formatPinDistance(meters: number): string {
   return `${Math.round(clamped)}m`;
 }
 
+function cleanBannerLabel(banner: string | null | undefined): string | null {
+  if (!banner) return null;
+  return banner.replace(/^(Zone \d+:\s*)\1/i, '$1');
+}
+
 export function CurbsideHud() {
+  const qaFreeze = useQaFreeze();
+  const courseId = useCurbsideStore((s) => {
+    const st = s as unknown as StoreCompat;
+    if (st.courseId) return st.courseId;
+    if (st.activeCourseId) return st.activeCourseId;
+    if (st.par === 18) return 'grand-escapade';
+    if (st.par === 4) return 'classic';
+    return DEFAULT_ACTIVE_COURSE_ID;
+  });
+  const isEscapade = courseId === 'grand-escapade';
+
   const holeNumber = useCurbsideStore(
     (s) => (s as unknown as StoreCompat).holeNumber ?? 1,
   );
-  const holeName = useCurbsideStore(
-    (s) => (s as unknown as StoreCompat).holeName ?? '5th & Mercer',
-  );
-  const par = useCurbsideStore((s) => (s as unknown as StoreCompat).par ?? 4);
-  const holeDistanceMeters = useCurbsideStore(
-    (s) => (s as unknown as StoreCompat).holeDistanceMeters ?? 72,
-  );
+  const holeName = useCurbsideStore((s) => {
+    const st = s as unknown as StoreCompat;
+    return (
+      st.holeName ??
+      (isEscapade ? GRAND_ESCAPADE_MASTER_PLAN.holeName : '5th & Mercer')
+    );
+  });
+  const par = useCurbsideStore((s) => {
+    const st = s as unknown as StoreCompat;
+    return st.par ?? (isEscapade ? GRAND_ESCAPADE_MASTER_PLAN.par : 4);
+  });
+  const holeDistanceMeters = useCurbsideStore((s) => {
+    const st = s as unknown as StoreCompat;
+    return (
+      st.holeDistanceMeters ??
+      (isEscapade ? GRAND_ESCAPADE_MASTER_PLAN.targetCenterlineMeters : 72)
+    );
+  });
 
   const strokes = useCurbsideStore((s) => {
     const st = s as unknown as StoreCompat;
@@ -212,16 +289,21 @@ export function CurbsideHud() {
   const ballPosition = useCurbsideStore(
     (s) => (s as unknown as StoreCompat).ballPosition,
   );
+  const storeZoneNumber = useCurbsideStore(
+    (s) => (s as unknown as StoreCompat).activeZoneNumber,
+  );
 
   const distanceToPinMeters = useCurbsideStore((s) => {
     const st = s as unknown as StoreCompat;
+    if (Array.isArray(st.ballPosition)) {
+      const plan =
+        courseId === 'grand-escapade'
+          ? GRAND_ESCAPADE_MASTER_PLAN
+          : COURSE_MASTER_PLAN;
+      return computeRemainingCourseDistance(plan, st.ballPosition);
+    }
     if (typeof st.distanceToPinMeters === 'number') {
       return st.distanceToPinMeters;
-    }
-    if (Array.isArray(st.ballPosition)) {
-      const dx = HOLE_1_CUP.position[0] - st.ballPosition[0];
-      const dz = HOLE_1_CUP.position[2] - st.ballPosition[2];
-      return Math.hypot(dx, dz);
     }
     return holeDistanceMeters;
   });
@@ -230,8 +312,24 @@ export function CurbsideHud() {
     (s) => (s as unknown as StoreCompat).currentSurfaceTag,
   );
 
+  const isFlyoverActive = useCurbsideStore((s) => {
+    const st = s as unknown as StoreCompat;
+    return Boolean(
+      st.isCourseFlyoverActive ||
+        st.isFlyoverActive ||
+        st.cameraMode === 'flyover_scout',
+    );
+  });
+
   const isStreetScoutActive = useCurbsideStore((s) => {
     const st = s as unknown as StoreCompat;
+    if (
+      st.isCourseFlyoverActive ||
+      st.isFlyoverActive ||
+      st.cameraMode === 'flyover_scout'
+    ) {
+      return true;
+    }
     if (typeof st.isStreetScoutActive === 'boolean') {
       return st.isStreetScoutActive;
     }
@@ -251,10 +349,22 @@ export function CurbsideHud() {
     );
   });
 
-  const lastEventBanner = useCurbsideStore((s) => {
+  const rawLastEventBanner = useCurbsideStore((s) => {
     const st = s as unknown as StoreCompat;
-    return st.lastEventBanner ?? st.trickToast?.label ?? null;
+    return cleanBannerLabel(st.lastEventBanner ?? null);
   });
+  const lastEventBanner = qaFreeze ? null : rawLastEventBanner;
+
+  useEffect(() => {
+    if (!rawLastEventBanner || qaFreeze) return;
+    const timer = window.setTimeout(() => {
+      const st = useCurbsideStore.getState() as unknown as StoreCompat;
+      if (st.setEventBanner) {
+        st.setEventBanner(null);
+      }
+    }, 2400);
+    return () => window.clearTimeout(timer);
+  }, [rawLastEventBanner, qaFreeze]);
 
   // Track Personal Best prior to completion so ScorecardModal knows when beaten
   const previousBestRef = useRef<number | null>(null);
@@ -288,6 +398,30 @@ export function CurbsideHud() {
     };
   }, []);
 
+  // Sync zone-aware Web Audio room acoustics (sunlit street vs rooftop sky vs subway vault)
+  const ballX = Array.isArray(ballPosition) ? ballPosition[0] : 0;
+  const ballY = Array.isArray(ballPosition) ? ballPosition[1] : 0;
+  const ballZ = Array.isArray(ballPosition) ? ballPosition[2] : 0;
+  useEffect(() => {
+    if (!isEscapade) {
+      soundEngine.setAcousticEnvironment({
+        courseId: 'classic',
+        elevationY: ballY,
+        ambientProfile: 'sunlit_street',
+        isSubterranean: false,
+      });
+      return;
+    }
+    const zone = getEscapadeZoneAtPosition([ballX, ballY, ballZ]);
+    soundEngine.setAcousticEnvironment({
+      courseId: 'grand-escapade',
+      elevationY: ballY,
+      ambientProfile: zone.ambientProfile,
+      isSubterranean:
+        zone.isSubterranean || isSubterraneanSubwayPosition([ballX, ballY, ballZ]),
+    });
+  }, [isEscapade, ballX, ballY, ballZ]);
+
   const handleSelectClub = (clubId: ClubId) => {
     soundEngine.unlock();
     soundEngine.playUiClick(0.75);
@@ -303,10 +437,54 @@ export function CurbsideHud() {
     soundEngine.unlock();
     soundEngine.playUiClick(0.8);
     const st = useCurbsideStore.getState() as unknown as StoreCompat;
+    if (isEscapade) {
+      if (st.toggleCourseFlyover) {
+        st.toggleCourseFlyover();
+        return;
+      }
+      if (st.isCourseFlyoverActive || st.isFlyoverActive) {
+        if (st.stopCourseFlyover) {
+          st.stopCourseFlyover();
+          return;
+        }
+      } else if (st.startCourseFlyover) {
+        st.startCourseFlyover();
+        return;
+      }
+    }
     if (st.toggleStreetScout) {
       st.toggleStreetScout();
     } else {
       st.toggleCameraMode?.();
+    }
+  };
+
+  const handleSwitchCourse = () => {
+    soundEngine.unlock();
+    soundEngine.playUiClick(0.85);
+    const nextCourse: CourseId = isEscapade ? 'classic' : 'grand-escapade';
+    const st = useCurbsideStore.getState() as unknown as StoreCompat;
+    if (st.switchCourse) {
+      st.switchCourse(nextCourse);
+      return;
+    }
+    if (st.setCourseId) {
+      st.setCourseId(nextCourse);
+      return;
+    }
+    if (st.setCourse) {
+      st.setCourse(nextCourse);
+      return;
+    }
+    if (typeof window !== 'undefined') {
+      const url = new URL(window.location.href);
+      if (nextCourse === 'classic') {
+        url.searchParams.set('course', 'classic');
+      } else {
+        url.searchParams.delete('course');
+      }
+      url.searchParams.delete('qaTeleportZone');
+      window.location.assign(url.toString());
     }
   };
 
@@ -340,14 +518,30 @@ export function CurbsideHud() {
     }
   };
 
-  const qaFreeze = useQaFreeze();
+  const activeTee = isEscapade ? ESCAPADE_TEE_POSITION : TEE_POSITION;
   const isOnTeeBox =
     Array.isArray(ballPosition) &&
     Math.hypot(
-      ballPosition[0] - TEE_POSITION[0],
-      ballPosition[2] - TEE_POSITION[2],
-    ) <= 2.0;
+      ballPosition[0] - activeTee[0],
+      ballPosition[2] - activeTee[2],
+    ) <= 2.0 &&
+    Math.abs(ballPosition[1] - activeTee[1]) <= 1.2;
   const lie = formatLieDisplay(currentSurfaceTag, strokes, isOnTeeBox);
+  const resolvedZone = isEscapade
+    ? (storeZoneNumber
+        ? GRAND_ESCAPADE_ZONES.find((z) => z.zoneNumber === storeZoneNumber)
+        : undefined) ??
+      (Array.isArray(ballPosition)
+        ? getEscapadeZoneAtPosition(ballPosition)
+        : GRAND_ESCAPADE_ZONES[0])
+    : null;
+  const elevText = formatElevationTag(ballY - BALL_RADIUS);
+  const zonePillText = resolvedZone
+    ? `Z${resolvedZone.zoneNumber} · ${ZONE_SHORT_NAMES[resolvedZone.zoneNumber]} ${elevText}`
+    : lie.label;
+  const cleanClassicHoleName = holeName
+    .replace(new RegExp(`^Hole\\s*${holeNumber}\\s*[:•·-]\\s*`, 'i'), '')
+    .trim();
 
   const activeClubAccent = CLUB_SPECS[selectedClub]?.accentHex ?? '#FF6B4A';
   const showScoutHint =
@@ -365,6 +559,7 @@ export function CurbsideHud() {
   const transitionCls = qaFreeze
     ? 'transition-none'
     : 'transition-[transform,opacity,background-color,color,box-shadow] duration-[180ms] ease-[cubic-bezier(0.22,1,0.36,1)]';
+  const glassCls = qaFreeze ? 'bg-[#FFFDF8]/96' : 'bg-[#FFFDF8]/92 backdrop-blur-sm';
 
   return (
     <div
@@ -381,7 +576,7 @@ export function CurbsideHud() {
           'max(0.625rem, var(--safe-right, env(safe-area-inset-right, 0px)))',
       }}
     >
-      {/* TOP WHISPER BAR + DYNAMIC LIE / EVENT TOAST (fades out cleanly behind ScorecardModal) */}
+      {/* TOP WHISPER BAR + DYNAMIC ZONE/ELEVATION & COURSE PILL (fades out cleanly behind ScorecardModal) */}
       <div
         aria-hidden={isHoleComplete}
         className={`pointer-events-none flex flex-col gap-1.5 ${
@@ -391,21 +586,31 @@ export function CurbsideHud() {
         } ${isHoleComplete ? 'opacity-0' : 'opacity-100'}`}
       >
         <header className="pointer-events-none flex items-start justify-between gap-1.5">
-          {/* Left Compact Hole Pill */}
+          {/* Left Compact Hole & Par/Stroke/Distance Pill */}
           <div
-            aria-label={`Hole ${holeNumber}, ${holeName}, Par ${par}, ${formatPinDistance(displayDistance)} to pin`}
-            className="pointer-events-none inline-flex min-h-[44px] min-w-0 shrink flex-col justify-center rounded-2xl border border-[#E2C294] bg-[#FFFDF8]/92 px-3 py-1 text-[#231914] shadow-[0_6px_18px_-6px_rgba(35,25,20,0.2)] backdrop-blur-sm"
+            aria-label={`Hole ${holeNumber}, ${cleanClassicHoleName}, Par ${par}, Stroke ${strokes}, ${formatPinDistance(displayDistance)} to pin`}
+            className={`pointer-events-none inline-flex min-h-[44px] min-w-0 shrink flex-col justify-center rounded-2xl border border-[#E2C294] ${glassCls} px-3 py-1 text-[#231914] shadow-[0_6px_18px_-6px_rgba(35,25,20,0.2)]`}
           >
             <div className="flex items-center gap-1.5 text-[11px] leading-tight font-black tracking-tight uppercase">
-              <span className="inline-block h-2 w-2 shrink-0 rounded-full bg-[#D95D39]" />
+              <span
+                className={`inline-block h-2 w-2 shrink-0 rounded-full ${
+                  isEscapade ? 'bg-[#D99B26]' : 'bg-[#D95D39]'
+                }`}
+              />
               <span className="truncate">
-                Hole {holeNumber} • {holeName}
+                {isEscapade
+                  ? 'Grand Escapade'
+                  : `Hole ${holeNumber} • ${cleanClassicHoleName}`}
               </span>
             </div>
-            <div className="mt-0.5 flex items-center gap-1.5 text-[10.5px] leading-tight font-extrabold text-[#543E32] tabular-nums">
-              <span>PAR {par}</span>
+            <div className="mt-0.5 flex items-center gap-1 text-[10.5px] leading-tight font-extrabold text-[#543E32] tabular-nums">
+              <span>Par {par}</span>
               <span aria-hidden="true" className="text-[#C7A67B]">
-                •
+                ·
+              </span>
+              <span>Stroke {strokes}</span>
+              <span aria-hidden="true" className="text-[#C7A67B]">
+                ·
               </span>
               <span className="text-[#B93815]">
                 {formatPinDistance(displayDistance)} to pin
@@ -417,19 +622,23 @@ export function CurbsideHud() {
           <div
             data-hud-interactive="true"
             onPointerDown={(e) => e.stopPropagation()}
-            className={`${isHoleComplete ? 'pointer-events-none' : 'pointer-events-auto'} inline-flex shrink-0 items-center rounded-full border border-[#E2C294] bg-[#FFFDF8]/92 p-0.5 shadow-[0_6px_18px_-6px_rgba(35,25,20,0.2)] backdrop-blur-sm`}
+            className={`${isHoleComplete ? 'pointer-events-none' : 'pointer-events-auto'} inline-flex shrink-0 items-center rounded-full border border-[#E2C294] ${glassCls} p-0.5 shadow-[0_6px_18px_-6px_rgba(35,25,20,0.2)]`}
           >
-            {/* 1-Tap Street Scout Peek Toggle */}
+            {/* 1-Tap Course Flyover Scout / Street Scout Peek Toggle */}
             <button
               type="button"
               tabIndex={isHoleComplete ? -1 : undefined}
               aria-label={
-                isStreetScoutActive
-                  ? 'Exit Street Scout Peek'
-                  : 'Street Scout Peek'
+                isEscapade
+                  ? isStreetScoutActive
+                    ? 'Exit Course Flyover'
+                    : 'Course Flyover Scout'
+                  : isStreetScoutActive
+                    ? 'Exit Street Scout Peek'
+                    : 'Street Scout Peek'
               }
               aria-pressed={isStreetScoutActive}
-              title="Street Scout Peek"
+              title={isEscapade ? 'Course Flyover Scout' : 'Street Scout Peek'}
               onClick={handleToggleStreetScout}
               style={{ willChange: qaFreeze ? undefined : 'transform, opacity' }}
               className={`relative flex h-11 w-11 items-center justify-center rounded-full ${transitionCls} active:scale-[0.93] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#231914] ${
@@ -552,35 +761,54 @@ export function CurbsideHud() {
           </div>
         </header>
 
-        {/* Sub-Row: Subtle Lie Pill (Left) + Stroke & Personal Best Badge (Right) */}
+        {/* Sub-Row: Subtle Zone/Elevation & Lie Pill (Left) + Course Switcher & Best Badge (Right) */}
         <div className="pointer-events-none flex items-center justify-between gap-2">
           <div
-            aria-label={`Current lie: ${lie.label}`}
-            className={`pointer-events-none inline-flex items-center gap-1.5 rounded-full border border-[#E2C294]/90 bg-[#FFFDF8]/88 px-2.5 py-1 text-[11px] leading-none font-extrabold tracking-tight text-[#231914] shadow-[0_4px_12px_-4px_rgba(35,25,20,0.16)] backdrop-blur-sm ${transitionCls}`}
+            aria-label={
+              resolvedZone
+                ? `Zone ${resolvedZone.zoneNumber}: ${resolvedZone.name}, elevation ${elevText}, lie ${lie.label}`
+                : `Current lie: ${lie.label}`
+            }
+            className={`pointer-events-none inline-flex min-w-0 items-center gap-1.5 rounded-full border border-[#E2C294]/90 ${glassCls} px-2.5 py-1 text-[11px] leading-none font-extrabold tracking-tight text-[#231914] shadow-[0_4px_12px_-4px_rgba(35,25,20,0.16)] tabular-nums ${transitionCls}`}
           >
             <span
               aria-hidden="true"
-              className={`inline-block h-2 w-2 rounded-full ${transitionCls}`}
+              className={`inline-block h-2 w-2 shrink-0 rounded-full ${transitionCls}`}
               style={{ backgroundColor: lie.dotColor }}
             />
-            <span>{lie.label}</span>
+            <span className="truncate">{zonePillText}</span>
           </div>
 
           <div
-            aria-label={`Stroke ${strokes}${personalBest !== null ? `, Best ${personalBest}` : ''}`}
-            className="pointer-events-none inline-flex items-center gap-1.5 rounded-full border border-[#E2C294]/90 bg-[#FFFDF8]/92 px-2.5 py-1 text-[11px] leading-none font-extrabold tracking-tight text-[#231914] shadow-[0_4px_12px_-4px_rgba(35,25,20,0.16)] backdrop-blur-sm tabular-nums"
+            data-hud-interactive="true"
+            onPointerDown={(e) => e.stopPropagation()}
+            className={`${isHoleComplete ? 'pointer-events-none' : 'pointer-events-auto'} inline-flex shrink-0 items-center gap-1.5`}
           >
-            <span className="text-[#6B5142] uppercase">Stroke</span>
-            <span className="text-[12.5px] font-black text-[#231914]">
-              {strokes}
-            </span>
+            <button
+              type="button"
+              tabIndex={isHoleComplete ? -1 : undefined}
+              aria-label={
+                isEscapade
+                  ? 'Switch to Classic 5th & Mercer course'
+                  : 'Switch to Grand Crosstown Escapade course'
+              }
+              title={isEscapade ? 'Switch to Classic Par 4' : 'Switch to Grand Escapade Par 18'}
+              onClick={handleSwitchCourse}
+              style={{ willChange: qaFreeze ? undefined : 'transform, opacity' }}
+              className={`inline-flex items-center gap-1 rounded-full border border-[#E2C294]/90 ${glassCls} px-2.5 py-1 text-[10.5px] leading-none font-black tracking-tight text-[#543E32] shadow-[0_4px_12px_-4px_rgba(35,25,20,0.16)] ${transitionCls} hover:bg-[#F5E6CE]/90 active:scale-[0.95] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#231914]`}
+            >
+              <span>{isEscapade ? 'Classic' : 'Escapade'}</span>
+              <span aria-hidden="true" className="text-[#B93815]">
+                ⇄
+              </span>
+            </button>
             {personalBest !== null && (
-              <>
-                <span aria-hidden="true" className="h-3 w-[1px] bg-[#E2C294]" />
-                <span className="inline-flex items-center rounded-full border border-[#D99B26]/70 bg-[#FEF08A] px-1.5 py-0.5 text-[9.5px] font-black text-[#422006]">
-                  BEST {personalBest}
-                </span>
-              </>
+              <span
+                aria-label={`Personal Best ${personalBest}`}
+                className="pointer-events-none inline-flex items-center rounded-full border border-[#D99B26]/70 bg-[#FEF08A] px-2 py-1 text-[10px] leading-none font-black text-[#422006] shadow-[0_4px_12px_-4px_rgba(35,25,20,0.16)] tabular-nums"
+              >
+                BEST {personalBest}
+              </span>
             )}
           </div>
         </div>
@@ -610,12 +838,14 @@ export function CurbsideHud() {
       {/* BOTTOM THUMB ZONE: Pull Meter / Gesture Hint + 4-Club Selector Dock */}
       {!isHoleComplete && (
         <div className="pointer-events-none flex flex-col items-center gap-1.5">
-          {/* Pre-Stroke 1 or Street Scout Non-Intrusive Gesture Hint */}
+          {/* Pre-Stroke 1 or Flyover / Street Scout Non-Intrusive Gesture Hint */}
           {(showScoutHint || showPullHint) && (
             <div className="pointer-events-none flex justify-center">
-              <div className="pointer-events-none inline-flex items-center rounded-full border border-[#E2C294]/90 bg-[#FFFDF8]/90 px-3 py-1 text-[11px] font-extrabold tracking-tight text-[#231914] shadow-[0_6px_16px_-6px_rgba(35,25,20,0.18)] backdrop-blur-sm">
+              <div className={`pointer-events-none inline-flex items-center rounded-full border border-[#E2C294]/90 ${glassCls} px-3 py-1 text-[11px] font-extrabold tracking-tight text-[#231914] shadow-[0_6px_16px_-6px_rgba(35,25,20,0.18)]`}>
                 {showScoutHint
-                  ? 'Drag screen to orbit • Tap eye icon to aim'
+                  ? isFlyoverActive
+                    ? 'Course Flyover • Tap eye icon to aim'
+                    : 'Drag screen to orbit • Tap eye icon to aim'
                   : 'Pull back to power & aim • Drag screen to look'}
               </div>
             </div>
@@ -656,7 +886,9 @@ export function CurbsideHud() {
             aria-label="Golf Clubs"
             data-hud-interactive="true"
             onPointerDown={(e) => e.stopPropagation()}
-            className="pointer-events-auto mx-auto grid w-full max-w-[23.5rem] grid-cols-4 gap-1 rounded-[1.45rem] border border-[#E2C294] bg-[#FFFDF8]/95 p-1 shadow-[0_12px_28px_-8px_rgba(35,25,20,0.26)] backdrop-blur-sm"
+            className={`pointer-events-auto mx-auto grid w-full max-w-[23.5rem] grid-cols-4 gap-1 rounded-[1.45rem] border border-[#E2C294] ${
+              qaFreeze ? 'bg-[#FFFDF8]/96' : 'bg-[#FFFDF8]/95 backdrop-blur-sm'
+            } p-1 shadow-[0_12px_28px_-8px_rgba(35,25,20,0.26)]`}
           >
             {CLUB_ORDER.map((clubId) => {
               const meta = CLUB_UI_META[clubId];

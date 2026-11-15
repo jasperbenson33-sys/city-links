@@ -21,26 +21,30 @@ import {
 import {
   BALL_RADIUS,
   WORLD_GRAVITY_Y,
+  type CourseMasterPlan,
   type Vec3Tuple,
 } from '@/types';
 import {
-  COURSE_MASTER_PLAN,
-  COURSE_PROPS,
-  HOLE_1_CUP,
   getMasterPlanGroundElevationAt,
   getMasterPlanSurfaceTagAt,
   getVanRampOrRoofElevationAt,
 } from '@/config/courseMasterPlan';
+import { COPPER_SPIRAL_CHUTE_SPEC } from '@/config/grandEscapadeMasterPlan';
 import { computeAwningBounceVelocity } from '@/lib/geometryHelpers';
 import { stepBallAerodynamics } from '@/lib/aerodynamics';
 import { isQaFreezeActive, resolveAnimTime } from '@/components/world/qaFreeze';
 import { getClubProfile } from '@/lib/clubs';
 import {
   computeDeterministicUmbrellaBounce,
+  COPPER_CHUTE_RIDE_DURATION_SEC,
   createBallDimpleTexture,
+  evaluateCopperChuteCapture,
   evaluateMasterPlanGutterAtPoint,
   isPointInFountainBasin,
+  isPointInReactiveZone,
   isPointInSteamBay,
+  isStage2OutOfBounds,
+  sampleCopperChuteRideState,
   sampleFountainDropArcPoint,
 } from '@/physics';
 import { soundEngine } from '@/lib/sound';
@@ -57,22 +61,38 @@ const COULOMB_CREEP_STOP_SPEED_MPS = 0.32;
 const COULOMB_CREEP_DECEL_MPS2 = 1.35;
 const CUP_DROP_TWEEN_SECONDS = 0.15;
 
-// Memoized static prop descriptors so 120Hz physics steps do zero per-step array scans
-const HOTDOG_AWNING_META = COURSE_PROPS.find(
-  (p) => p.id === 'hotdog-cart-corner',
-)?.hotdogAwningMeta;
-const STEAM_GRATE_PROP = COURSE_PROPS.find(
-  (p) => p.id === 'steam-grate-corner',
-);
-const DELIVERY_VAN_PROP = COURSE_PROPS.find(
-  (p) => p.id === 'delivery-van-east',
-);
-const BISTRO_UMBRELLA_PROPS = COURSE_PROPS.filter(
-  (p) => p.type === 'bistro_umbrella_set',
-);
-const PIGEON_FLOCK_PROP = COURSE_PROPS.find(
-  (p) => p.type === 'pigeon_flock',
-);
+function getVanSupportElevationForPlan(
+  wx: number,
+  wz: number,
+  plan: CourseMasterPlan,
+): number | null {
+  if (plan.courseId === 'classic') {
+    return getVanRampOrRoofElevationAt(wx, wz);
+  }
+  const van = plan.props.find((p) => Boolean(p.vanRampMeta));
+  const meta = van?.vanRampMeta;
+  if (!meta) return null;
+  const checkSlope = (spec: typeof meta.slopedRampSpec) => {
+    if (!spec) return null;
+    const b = spec.boundsXZ;
+    if (wx < b.minX || wx > b.maxX || wz < b.minZ || wz > b.maxZ) return null;
+    const span = Math.max(0.1, b.maxZ - b.minZ);
+    const t =
+      spec.climbDirection === 'north'
+        ? (b.maxZ - wz) / span
+        : (wz - b.minZ) / span;
+    return spec.bottomY + (spec.topY - spec.bottomY) * Math.max(0, Math.min(1, t));
+  };
+  const rampY = checkSlope(meta.slopedRampSpec);
+  if (rampY !== null) return rampY;
+  const kickerY = checkSlope(meta.roofAccessKickerSpec);
+  if (kickerY !== null) return kickerY;
+  const deck = meta.roofLaunchDeckBoundsXZ;
+  if (deck && wx >= deck.minX && wx <= deck.maxX && wz >= deck.minZ && wz <= deck.maxZ) {
+    return meta.roofDeckTopY;
+  }
+  return null;
+}
 
 export function GolfBall({
   ballWorldPositionRef,
@@ -98,7 +118,7 @@ export function GolfBall({
   const prevVelRef = useRef<Vec3Tuple>([0, 0, 0]);
   const telemetryAccumRef = useRef(0);
 
-  // Per-shot / cooldown guards for reactive props
+  // Per-shot / cooldown guards for reactive props (Stage 1 + Stage 2)
   const awningCooldownRef = useRef(0);
   const vanKickerCooldownRef = useRef(0);
   const vanLaunchCooldownRef = useRef(0);
@@ -108,6 +128,23 @@ export function GolfBall({
   const pigeonCooldownRef = useRef(0);
   const lipOutCooldownRef = useRef(0);
   const curbAudioCooldownRef = useRef(0);
+  const chuteCooldownRef = useRef(0);
+  const skylightCooldownRef = useRef(0);
+  const bellCooldownRef = useRef(0);
+  const turnstileCooldownRef = useRef(0);
+  const hvacCooldownRef = useRef(0);
+  const hydrantJetCooldownRef = useRef(0);
+  const stairwellSlideCooldownRef = useRef(0);
+  const subwayCarCooldownRef = useRef(0);
+  const copperChuteRideRef = useRef<{
+    active: boolean;
+    elapsed: number;
+    entryOrigin: Vec3Tuple | null;
+  }>({
+    active: false,
+    elapsed: 0,
+    entryOrigin: null,
+  });
   const cupDropTweenRef = useRef<{
     from: Vec3Tuple;
     to: Vec3Tuple;
@@ -128,11 +165,7 @@ export function GolfBall({
   }, [dimpleTexture]);
 
   const initialPos = useMemo<Vec3Tuple>(
-    () => [
-      COURSE_MASTER_PLAN.teePosition[0],
-      COURSE_MASTER_PLAN.teePosition[1] + BALL_RADIUS,
-      COURSE_MASTER_PLAN.teePosition[2],
-    ],
+    () => [...useCurbsideStore.getState().ballPosition] as Vec3Tuple,
     [],
   );
 
@@ -175,6 +208,17 @@ export function GolfBall({
     pigeonCooldownRef.current = 0;
     lipOutCooldownRef.current = 0;
     curbAudioCooldownRef.current = 0;
+    chuteCooldownRef.current = 0;
+    skylightCooldownRef.current = 0;
+    bellCooldownRef.current = 0;
+    turnstileCooldownRef.current = 0;
+    hvacCooldownRef.current = 0;
+    hydrantJetCooldownRef.current = 0;
+    stairwellSlideCooldownRef.current = 0;
+    subwayCarCooldownRef.current = 0;
+    copperChuteRideRef.current.active = false;
+    copperChuteRideRef.current.elapsed = 0;
+    copperChuteRideRef.current.entryOrigin = null;
     flightElapsedRef.current = 0;
     lowSpeedTimeRef.current = 0;
     telemetryAccumRef.current = 0;
@@ -195,6 +239,7 @@ export function GolfBall({
       if (!rb.isEnabled()) {
         rb.setEnabled(true);
       }
+      rb.setGravityScale(1, false);
       rb.resetForces(false);
       rb.resetTorques(false);
       rb.setRotation({ x: 0, y: 0, z: 0, w: 1 }, false);
@@ -251,7 +296,8 @@ export function GolfBall({
       resetReactionGuards(false);
       const [vx, vy, vz] = shot.launchVelocity;
       const pos = rb.translation();
-      const groundY = getMasterPlanGroundElevationAt(pos.x, pos.z);
+      const activePlan = useCurbsideStore.getState().activePlan;
+      const groundY = getMasterPlanGroundElevationAt(pos.x, pos.z, activePlan);
       const startY = Math.max(pos.y, groundY + BALL_RADIUS + 0.002);
       rb.resetForces(false);
       rb.resetTorques(false);
@@ -303,12 +349,15 @@ export function GolfBall({
     const preSpeed = Math.hypot(preV[0], preV[1], preV[2]);
 
     if (propId === 'hotdog-cart-awning' && awningCooldownRef.current <= 0) {
-      if (HOTDOG_AWNING_META) {
+      const awningMeta = state.activePlan.props.find(
+        (p) => Boolean(p.hotdogAwningMeta),
+      )?.hotdogAwningMeta;
+      if (awningMeta) {
         awningCooldownRef.current = 0.4;
         const bounced = computeAwningBounceVelocity(
           preV,
-          HOTDOG_AWNING_META.worldNormal,
-          HOTDOG_AWNING_META.restitution,
+          awningMeta.worldNormal,
+          awningMeta.restitution,
         );
         rb.setLinvel(
           { x: bounced[0], y: bounced[1], z: bounced[2] },
@@ -321,6 +370,69 @@ export function GolfBall({
         state.recordPropHit('hotdog-cart-corner', 'Awning Cushion!');
         return;
       }
+    }
+
+    if (propId === 'esc-z3-angled-skylight-bank' && skylightCooldownRef.current <= 0) {
+      skylightCooldownRef.current = 0.35;
+      const skylightProp = state.activePlan.props.find(
+        (p) => p.id === 'esc-z3-angled-skylight-bank',
+      );
+      const pm = skylightProp?.pitchedBankMeta;
+      if (pm && preSpeed > 1.2) {
+        const reflected = computeAwningBounceVelocity(
+          preV,
+          pm.worldNormal,
+          pm.restitution,
+        );
+        const bv = pm.boostVelocity;
+        if (bv && preV[0] > 0.6) {
+          const speedScale = THREE.MathUtils.clamp(preSpeed / 12.5, 0.55, 1.08);
+          rb.setLinvel(
+            {
+              x: Math.max(reflected[0], bv[0] * speedScale),
+              y: Math.max(reflected[1], bv[1] * speedScale),
+              z: Math.min(reflected[2], bv[2] * speedScale),
+            },
+            true,
+          );
+        } else {
+          rb.setLinvel(
+            { x: reflected[0], y: reflected[1], z: reflected[2] },
+            true,
+          );
+        }
+      }
+      soundEngine.play('skylight_glass_bank', {
+        impactSpeed: preSpeed,
+        surfaceKey: propId,
+      });
+      state.recordPropHit(propId, 'Skylight Glass Bank!');
+      return;
+    }
+
+    if (propId === 'esc-z5-rooftop-bell-tower' && bellCooldownRef.current <= 0) {
+      bellCooldownRef.current = 1.1;
+      soundEngine.play('bell_tower_chime', {
+        impactSpeed: preSpeed,
+        surfaceKey: propId,
+      });
+      state.recordPropHit(propId, 'Conservatory Bell Chime!');
+      return;
+    }
+
+    if (
+      (propId === 'esc-z7-brass-turnstiles' ||
+        propId === 'esc-z7-brass-turnstile-west' ||
+        propId === 'esc-z7-brass-turnstile-east') &&
+      turnstileCooldownRef.current <= 0
+    ) {
+      turnstileCooldownRef.current = 0.7;
+      soundEngine.play('turnstile_click', {
+        impactSpeed: preSpeed,
+        surfaceKey: propId,
+      });
+      state.recordPropHit(propId, 'Turnstile Spin!');
+      return;
     }
 
     if (propId === 'tree-overhang-east' && curbAudioCooldownRef.current <= 0) {
@@ -378,8 +490,17 @@ export function GolfBall({
     pigeonCooldownRef.current = Math.max(0, pigeonCooldownRef.current - dt);
     lipOutCooldownRef.current = Math.max(0, lipOutCooldownRef.current - dt);
     curbAudioCooldownRef.current = Math.max(0, curbAudioCooldownRef.current - dt);
+    chuteCooldownRef.current = Math.max(0, chuteCooldownRef.current - dt);
+    skylightCooldownRef.current = Math.max(0, skylightCooldownRef.current - dt);
+    bellCooldownRef.current = Math.max(0, bellCooldownRef.current - dt);
+    turnstileCooldownRef.current = Math.max(0, turnstileCooldownRef.current - dt);
+    hvacCooldownRef.current = Math.max(0, hvacCooldownRef.current - dt);
+    hydrantJetCooldownRef.current = Math.max(0, hydrantJetCooldownRef.current - dt);
+    stairwellSlideCooldownRef.current = Math.max(0, stairwellSlideCooldownRef.current - dt);
+    subwayCarCooldownRef.current = Math.max(0, subwayCarCooldownRef.current - dt);
 
     const store = useCurbsideStore.getState();
+    const activePlan = store.activePlan;
 
     // Keep resting/holed/fountain-arc rigid bodies strictly asleep so zero micro-buzz occurs
     if (
@@ -389,7 +510,7 @@ export function GolfBall({
       store.shotPhase === 'fountain_drop'
     ) {
       if (store.shotPhase === 'holed_out') {
-        const cup = HOLE_1_CUP.position;
+        const cup = activePlan.cup.position;
         if (!cupDropTweenRef.current && rb.isEnabled()) {
           lockBodyAtRest(rb, cup[0], cup[1] - 0.08, cup[2]);
           rb.setEnabled(false);
@@ -414,6 +535,67 @@ export function GolfBall({
       return;
     }
 
+    // Active Copper Spiral Chute helical spline ride (+14.0m -> +2.0m onto Grand Transit Plaza)
+    if (copperChuteRideRef.current.active) {
+      flightElapsedRef.current += dt;
+      copperChuteRideRef.current.elapsed += dt;
+      const u = Math.min(
+        1,
+        copperChuteRideRef.current.elapsed / COPPER_CHUTE_RIDE_DURATION_SEC,
+      );
+      const sample = sampleCopperChuteRideState(u);
+      const entryOrig = copperChuteRideRef.current.entryOrigin;
+      let ridePos: Vec3Tuple = sample.position;
+      if (entryOrig && u < 0.14) {
+        const blendRaw = u / 0.14;
+        const blendSmooth = blendRaw * blendRaw * (3 - 2 * blendRaw);
+        ridePos = [
+          entryOrig[0] + (sample.position[0] - entryOrig[0]) * blendSmooth,
+          entryOrig[1] + (sample.position[1] - entryOrig[1]) * blendSmooth,
+          entryOrig[2] + (sample.position[2] - entryOrig[2]) * blendSmooth,
+        ];
+      }
+      rb.setGravityScale(0, false);
+      rb.setTranslation(
+        { x: ridePos[0], y: ridePos[1], z: ridePos[2] },
+        true,
+      );
+      const rideSpeed = 10.5;
+      rb.setLinvel(
+        {
+          x: sample.tangent[0] * rideSpeed,
+          y: sample.tangent[1] * rideSpeed,
+          z: sample.tangent[2] * rideSpeed,
+        },
+        true,
+      );
+      prevVelRef.current = [
+        sample.tangent[0] * rideSpeed,
+        sample.tangent[1] * rideSpeed,
+        sample.tangent[2] * rideSpeed,
+      ];
+      telemetryAccumRef.current += dt;
+      if (telemetryAccumRef.current >= 0.08) {
+        telemetryAccumRef.current = 0;
+        store.updateBallTelemetry(ridePos, 'storm_gutter');
+      }
+      if (u >= 1) {
+        copperChuteRideRef.current.active = false;
+        copperChuteRideRef.current.entryOrigin = null;
+        chuteCooldownRef.current = 1.6;
+        rb.setGravityScale(1, true);
+        const spout = COPPER_SPIRAL_CHUTE_SPEC.exitSpoutPosition;
+        const launchV = COPPER_SPIRAL_CHUTE_SPEC.exitLaunchVelocity;
+        rb.setTranslation(
+          { x: spout[0], y: spout[1] + BALL_RADIUS + 0.04, z: spout[2] },
+          true,
+        );
+        rb.setLinvel({ x: launchV[0], y: launchV[1], z: launchV[2] }, true);
+        prevVelRef.current = [...launchV];
+      }
+      return;
+    }
+
     const pos = rb.translation();
     const vel = rb.linvel();
     flightElapsedRef.current += dt;
@@ -421,33 +603,44 @@ export function GolfBall({
     let vy = vel.y;
     let vz = vel.z;
 
-    // 1. Out-of-bounds safety recover
-    const wb = COURSE_MASTER_PLAN.worldBoundsXZ;
+    // 0. Check Zone 5 Copper Spiral Chute helical funnel capture
     if (
-      pos.y < -3.5 ||
-      pos.x < wb.minX - 6 ||
-      pos.x > wb.maxX + 6 ||
-      pos.z < wb.minZ - 6 ||
-      pos.z > wb.maxZ + 6
+      chuteCooldownRef.current <= 0 &&
+      evaluateCopperChuteCapture([pos.x, pos.y, pos.z], activePlan)
     ) {
-      const [rx, ry, rz] = store.lastSafeBallPosition;
-      lockBodyAtRest(rb, rx, ry, rz);
-      store.markBallResting(store.lastSafeBallPosition, { autoSelectClub: false });
+      copperChuteRideRef.current = {
+        active: true,
+        elapsed: 0,
+        entryOrigin: [pos.x, pos.y, pos.z],
+      };
+      telemetryAccumRef.current = 0;
+      store.updateBallTelemetry([pos.x, pos.y, pos.z], 'storm_gutter');
+      rb.setGravityScale(0, false);
+      soundEngine.play('copper_chute_whoosh', { intensity: 0.95 });
+      store.recordPropHit('esc-z5-copper-spiral-chute', 'Copper Spiral Chute!');
+      return;
+    }
+
+    // 1. Out-of-bounds safety recovery (< 0.6s, +1 stroke back to exact previous lie)
+    if (isStage2OutOfBounds([pos.x, pos.y, pos.z], activePlan)) {
+      lockBodyAtRest(rb, pos.x, pos.y, pos.z);
+      fountainDropElapsedRef.current = 0;
+      store.triggerOobHazard([pos.x, pos.y, pos.z]);
       return;
     }
 
     // 2. Fountain water basin check -> brisk < 0.6s parabolic drop arc +1 penalty
-    if (isPointInFountainBasin(pos.x, pos.y, pos.z)) {
+    if (isPointInFountainBasin(pos.x, pos.y, pos.z, activePlan)) {
       lockBodyAtRest(rb, pos.x, pos.y, pos.z);
       fountainDropElapsedRef.current = 0;
       store.triggerFountainHazard(undefined, [pos.x, pos.y, pos.z]);
       return;
     }
 
-    // 3. Hole 1 recessed Cup capture & realistic high-speed lip-out check
-    const cupPos = HOLE_1_CUP.position;
-    const cupRadius = COURSE_MASTER_PLAN.cup.cupRadius;
-    const cupDepth = COURSE_MASTER_PLAN.cup.cupDepth;
+    // 3. Recessed Cup capture & realistic high-speed lip-out check
+    const cupPos = activePlan.cup.position;
+    const cupRadius = activePlan.cup.cupRadius;
+    const cupDepth = activePlan.cup.cupDepth;
     const dxCup = pos.x - cupPos[0];
     const dzCup = pos.z - cupPos[2];
     const distToCupXZ = Math.hypot(dxCup, dzCup);
@@ -536,16 +729,20 @@ export function GolfBall({
       }
     }
 
-    // 4. Subway Steam Grate rhythmic upward pop -> forward +X carry over Fountain onto front green fringe
-    const steamMeta = STEAM_GRATE_PROP?.steamLiftMeta;
+    // 4. Subway Steam Grate & Stage 2 Hillside / Rooftop / Subway Reactive Zones
     const currentShotSeq = store.pendingShot?.seq ?? 0;
+    const classicSteamProp =
+      activePlan.courseId === 'classic'
+        ? activePlan.props.find((p) => p.id === 'steam-grate-corner')
+        : undefined;
+    const steamMeta = classicSteamProp?.steamLiftMeta;
     if (
       steamMeta &&
       steamCooldownRef.current <= 0 &&
       lastSteamPopShotSeqRef.current !== currentShotSeq &&
       vx > 0.8 &&
       pos.x >= 12.15 &&
-      isPointInSteamBay(pos.x, pos.y, pos.z)
+      isPointInSteamBay(pos.x, pos.y, pos.z, activePlan)
     ) {
       const cycle = steamMeta.cycleSeconds || 3.2;
       const activeWindow = steamMeta.activeSeconds || 1.6;
@@ -578,11 +775,15 @@ export function GolfBall({
       }
     }
 
-    // Apply firm front-fringe landing check after a Steam Grate pop so the ball holds for a skill putt
+    // Apply firm front-fringe landing check after a classic Steam Grate pop so the ball holds for a skill putt
     if (
+      activePlan.courseId === 'classic' &&
       steamPopCheckPendingRef.current &&
       pos.x >= 21.65 &&
-      pos.y <= getMasterPlanGroundElevationAt(pos.x, pos.z) + BALL_RADIUS + 0.16
+      pos.y <=
+        getMasterPlanGroundElevationAt(pos.x, pos.z, activePlan) +
+          BALL_RADIUS +
+          0.16
     ) {
       steamPopCheckPendingRef.current = false;
       vx *= 0.08;
@@ -592,10 +793,170 @@ export function GolfBall({
       rb.setAngvel({ x: 0, y: 0, z: 0 }, true);
     }
 
+    // Stage 2 Grand Escapade multi-zone reactive triggers
+    if (activePlan.courseId !== 'classic') {
+      const sharedTime = resolveAnimTime(clock.elapsedTime);
+      for (const prop of activePlan.props) {
+        if (
+          prop.escapadePropType === 'brass_turnstile_gate' &&
+          turnstileCooldownRef.current <= 0 &&
+          Math.abs(pos.z - prop.position[2]) <= 0.65 &&
+          Math.abs(pos.x - prop.position[0]) <= 1.55 &&
+          Math.abs(pos.y - (prop.groundY + BALL_RADIUS)) <= 0.65
+        ) {
+          turnstileCooldownRef.current = 1.1;
+          soundEngine.play('turnstile_click', {
+            impactSpeed: Math.hypot(vx, vy, vz),
+            surfaceKey: prop.id,
+          });
+          store.recordPropHit(prop.id, 'Turnstile Spin!');
+          continue;
+        }
+        const reactive = prop.reactive;
+        if (!reactive) continue;
+
+        if (
+          reactive.kind === 'hydrant_water_jet' &&
+          hydrantJetCooldownRef.current <= 0 &&
+          isPointInReactiveZone(
+            [pos.x, pos.y, pos.z],
+            reactive.zoneCenter,
+            reactive.zoneHalfExtents,
+            reactive.zoneRadius,
+            0.22,
+          )
+        ) {
+          hydrantJetCooldownRef.current = 1.15;
+          const bv = reactive.boostVelocity ?? [0, 3.2, -11.5];
+          vx = bv[0] !== 0 ? bv[0] : vx * 0.65;
+          vy = Math.max(vy, bv[1]);
+          vz = bv[2] !== 0 ? bv[2] : vz * 0.65;
+          rb.setLinvel({ x: vx, y: vy, z: vz }, true);
+          soundEngine.playGutterBoost({
+            impactSpeed: Math.hypot(vx, vy, vz),
+            surfaceKey: prop.id,
+          });
+          store.recordPropHit(prop.id, 'Hydrant Jet Boost!');
+        } else if (
+          reactive.kind === 'steam_updraft' &&
+          steamCooldownRef.current <= 0 &&
+          isPointInReactiveZone(
+            [pos.x, pos.y, pos.z],
+            reactive.zoneCenter,
+            reactive.zoneHalfExtents,
+            reactive.zoneRadius,
+            0.22,
+          )
+        ) {
+          const cycle =
+            reactive.cycleSeconds ?? prop.steamLiftMeta?.cycleSeconds ?? 4.0;
+          const activeWin =
+            reactive.dutyCycle !== undefined
+              ? cycle * reactive.dutyCycle
+              : (prop.steamLiftMeta?.activeSeconds ?? 2.6);
+          const isSteamOn =
+            store.forceSteamActive !== null
+              ? store.forceSteamActive
+              : sharedTime % cycle < activeWin;
+          if (isSteamOn) {
+            steamCooldownRef.current = 1.15;
+            const bv = reactive.boostVelocity ?? [0, 8.2, -9.2];
+            vx = vx * 0.45 + bv[0];
+            vy = Math.max(vy, bv[1]);
+            vz = vz * 0.45 + bv[2];
+            rb.setLinvel({ x: vx, y: vy, z: vz }, true);
+            soundEngine.playSteamPop({
+              impactSpeed: Math.hypot(vx, vy, vz),
+              surfaceKey: prop.id,
+            });
+            store.recordPropHit(prop.id, 'Terrace Steam Boost!');
+          }
+        } else if (
+          reactive.kind === 'hvac_updraft_boost' &&
+          hvacCooldownRef.current <= 0 &&
+          isPointInReactiveZone(
+            [pos.x, pos.y, pos.z],
+            reactive.zoneCenter,
+            reactive.zoneHalfExtents,
+            reactive.zoneRadius,
+            0.35,
+          )
+        ) {
+          hvacCooldownRef.current = 1.05;
+          const bv = reactive.boostVelocity ?? [7.8, 6.8, 0.0];
+          vx = Math.max(vx, bv[0]);
+          vy = Math.max(vy, bv[1]);
+          vz = vz * 0.55 + bv[2];
+          rb.setLinvel({ x: vx, y: vy, z: vz }, true);
+          soundEngine.play('hvac_updraft_hum', {
+            impactSpeed: Math.hypot(vx, vy, vz),
+            surfaceKey: prop.id,
+          });
+          store.recordPropHit(prop.id, 'HVAC Rooftop Updraft!');
+        } else if (
+          reactive.kind === 'bell_tower_chime' &&
+          bellCooldownRef.current <= 0 &&
+          isPointInReactiveZone(
+            [pos.x, pos.y, pos.z],
+            reactive.zoneCenter,
+            reactive.zoneHalfExtents,
+            reactive.zoneRadius,
+            0.45,
+          )
+        ) {
+          bellCooldownRef.current = 1.4;
+          soundEngine.play('bell_tower_chime', {
+            impactSpeed: Math.hypot(vx, vy, vz),
+            surfaceKey: prop.id,
+          });
+          store.recordPropHit(prop.id, 'Conservatory Bell Chime!');
+        } else if (
+          reactive.kind === 'stairwell_brass_slide' &&
+          stairwellSlideCooldownRef.current <= 0 &&
+          vz > 0.45 &&
+          isPointInReactiveZone(
+            [pos.x, pos.y, pos.z],
+            reactive.zoneCenter,
+            reactive.zoneHalfExtents,
+            reactive.zoneRadius,
+            0.25,
+          )
+        ) {
+          stairwellSlideCooldownRef.current = 1.6;
+          vz = Math.max(vz, 6.8);
+          rb.setLinvel({ x: vx * 0.65, y: vy, z: vz }, true);
+          soundEngine.play('subway_stair_slide', {
+            impactSpeed: Math.hypot(vx, vy, vz),
+            surfaceKey: prop.id,
+          });
+          store.recordPropHit(prop.id, 'Subway Brass Slide!');
+        } else if (
+          reactive.kind === 'subway_car_tunnel' &&
+          subwayCarCooldownRef.current <= 0 &&
+          Math.abs(pos.x - 34.0) <= 0.95 &&
+          pos.z >= 88.5 &&
+          pos.z <= 104.5 &&
+          pos.y <= -5.8
+        ) {
+          subwayCarCooldownRef.current = 1.8;
+          if (vz > 0.35 && vz < 5.2) {
+            vz = Math.min(5.2, vz + 1.25);
+            rb.setLinvel({ x: vx * 0.75, y: vy, z: vz }, true);
+          }
+          soundEngine.play('subway_train_chime', {
+            impactSpeed: Math.hypot(vx, vy, vz),
+            surfaceKey: prop.id,
+          });
+          store.recordPropHit(prop.id, 'Through the IRT Subway Car!');
+        }
+      }
+    }
+
     // 5. Delivery Van ramp climb & roof launch
-    const vanMeta = DELIVERY_VAN_PROP?.vanRampMeta;
+    const vanProp = activePlan.props.find((p) => Boolean(p.vanRampMeta));
+    const vanMeta = vanProp?.vanRampMeta;
     const kickerBounds = vanMeta?.roofAccessKickerSpec?.boundsXZ;
-    const vanReactive = DELIVERY_VAN_PROP?.reactive;
+    const vanReactive = vanProp?.reactive;
     if (vanMeta) {
       // Smoothly assist upward momentum along the interior roof-access kicker (1.08m -> 2.24m)
       if (
@@ -615,7 +976,7 @@ export function GolfBall({
         rb.setLinvel({ x: vx, y: vy, z: vz }, true);
       }
 
-      // Roof deck forward launch strictly within reactive launch zone (z: [-10.35, -7.35], clear of tree canopy)
+      // Roof deck forward launch strictly within reactive launch zone
       if (vanLaunchCooldownRef.current <= 0 && vanReactive?.zoneHalfExtents) {
         const [zcx, zcy, zcz] = vanReactive.zoneCenter;
         const [hx, hy, hz] = vanReactive.zoneHalfExtents;
@@ -633,20 +994,24 @@ export function GolfBall({
           rb.setLinvel({ x: vx, y: vy, z: vz }, true);
           soundEngine.playGutterBoost({
             impactSpeed: entrySpeed,
-            surfaceKey: 'delivery-van-east',
+            surfaceKey: vanProp?.id ?? 'delivery-van-east',
           });
-          store.recordPropHit('delivery-van-east', 'Van Roof Launch!');
+          store.recordPropHit(
+            vanProp?.id ?? 'delivery-van-east',
+            'Van Roof Launch!',
+          );
         }
       }
     }
 
-    // 6. SE Hydrant-fed Storm Gutter stream boost & channel guide (strictly narrow gutter band, forward-only)
+    // 6. Hydrant-fed Storm Gutter stream boost & channel guide across classic & Stage 2 Belvedere Turn
     const gutterEval = evaluateMasterPlanGutterAtPoint(
       pos.x,
       pos.y,
       pos.z,
       vx,
       vz,
+      activePlan,
     );
     if (gutterEval.inGutter) {
       const steerBlend = gutterEval.isCurvedCorner
@@ -661,28 +1026,54 @@ export function GolfBall({
       ) {
         gutterEntryShotSeqRef.current = currentShotSeq;
         gutterBoostCooldownRef.current = 1.1;
+        if (
+          activePlan.courseId !== 'classic' &&
+          gutterEval.boostVelocity
+        ) {
+          const bv = gutterEval.boostVelocity;
+          if (gutterEval.gutterId === 'gutter-z2-belvedere-turn-boost') {
+            vx = Math.max(vx, bv[0]);
+            vy = Math.max(vy, bv[1]);
+            vz = vz * 0.12 + bv[2];
+          } else {
+            vx = bv[0] !== 0 ? bv[0] : vx * 0.72;
+            vy = Math.max(vy, bv[1]);
+            vz = bv[2] !== 0 ? Math.min(vz, bv[2]) : vz * 0.72;
+          }
+        }
         soundEngine.playGutterBoost({
           impactSpeed: Math.hypot(vx, vy, vz),
-          surfaceKey: 'hydrant-corner-se',
+          surfaceKey: gutterEval.gutterId ?? 'hydrant-corner-se',
         });
-        store.recordPropHit('hydrant-corner-se', 'Storm Gutter Boost!');
+        store.recordPropHit(
+          gutterEval.gutterId ?? 'hydrant-corner-se',
+          gutterEval.gutterId === 'gutter-z2-belvedere-turn-boost'
+            ? 'Water-Main Turn Boost!'
+            : 'Storm Gutter Boost!',
+        );
       }
       rb.setLinvel({ x: vx, y: vy, z: vz }, true);
     }
 
     // 7. Bistro Umbrella canopy trampolines & Plaza Pigeon scatter (matched by prop.type)
     if (umbrellaCooldownRef.current <= 0 && vy < 0) {
-      for (const umbrella of BISTRO_UMBRELLA_PROPS) {
+      for (const umbrella of activePlan.props) {
+        if (umbrella.type !== 'bistro_umbrella_set') continue;
         const ux = pos.x - umbrella.position[0];
         const uz = pos.z - umbrella.position[2];
         const uDistXZ = Math.hypot(ux, uz);
-        if (uDistXZ <= 1.25 && pos.y >= 1.9 && pos.y <= 3.3) {
+        const canopyY = umbrella.position[1] + 2.25;
+        if (
+          uDistXZ <= 1.35 &&
+          pos.y >= umbrella.position[1] + 1.85 &&
+          pos.y <= canopyY + 1.05
+        ) {
           const entrySpeed = Math.hypot(vx, vy, vz);
           umbrellaCooldownRef.current = 0.5;
           const bounced = computeDeterministicUmbrellaBounce(
             [pos.x, pos.y, pos.z],
             [vx, vy, vz],
-            [umbrella.position[0], umbrella.position[1] + 2.25, umbrella.position[2]],
+            [umbrella.position[0], canopyY, umbrella.position[2]],
             1.25,
             0.58,
           );
@@ -700,29 +1091,37 @@ export function GolfBall({
       }
     }
 
-    if (PIGEON_FLOCK_PROP && pigeonCooldownRef.current <= 0) {
-      const dPigeon = Math.hypot(
-        pos.x - PIGEON_FLOCK_PROP.position[0],
-        pos.z - PIGEON_FLOCK_PROP.position[2],
-      );
-      if (dPigeon <= 2.3 && pos.y <= PIGEON_FLOCK_PROP.position[1] + 1.4 && horizSpeed > 1.0) {
-        pigeonCooldownRef.current = 3.5;
-        soundEngine.playPigeonScatter({
-          impactSpeed: horizSpeed,
-          surfaceKey: PIGEON_FLOCK_PROP.id,
-        });
-        store.recordPropHit(PIGEON_FLOCK_PROP.id);
+    if (pigeonCooldownRef.current <= 0) {
+      for (const flock of activePlan.props) {
+        if (flock.type !== 'pigeon_flock') continue;
+        const dPigeon = Math.hypot(
+          pos.x - flock.position[0],
+          pos.z - flock.position[2],
+        );
+        if (
+          dPigeon <= 2.4 &&
+          Math.abs(pos.y - flock.position[1]) <= 1.5 &&
+          horizSpeed > 1.0
+        ) {
+          pigeonCooldownRef.current = 3.5;
+          soundEngine.playPigeonScatter({
+            impactSpeed: horizSpeed,
+            surfaceKey: flock.id,
+          });
+          store.recordPropHit(flock.id);
+          break;
+        }
       }
     }
 
     // 8. Shared Aerodynamics (lift + air drag + surface-aware roll damping)
-    const groundY = getMasterPlanGroundElevationAt(pos.x, pos.z);
-    const vanSupportY = getVanRampOrRoofElevationAt(pos.x, pos.z);
+    const groundY = getMasterPlanGroundElevationAt(pos.x, pos.z, activePlan);
+    const vanSupportY = getVanSupportElevationForPlan(pos.x, pos.z, activePlan);
     const expectedSupportY =
       vanSupportY !== null && Math.abs(pos.y - BALL_RADIUS - vanSupportY) < 0.35
         ? Math.max(groundY, vanSupportY)
         : groundY;
-    const surfaceTag = getMasterPlanSurfaceTagAt(pos.x, pos.z);
+    const surfaceTag = getMasterPlanSurfaceTagAt(pos.x, pos.z, activePlan);
     const airborne =
       pos.y > expectedSupportY + BALL_RADIUS + 0.05 || vy > 0.45;
     const clubId = store.lastShot?.clubId ?? selectedClub;
@@ -873,8 +1272,9 @@ export function GolfBall({
     }
 
     if (shadowRef.current) {
-      const cupPos = HOLE_1_CUP.position;
-      const cupRadius = COURSE_MASTER_PLAN.cup.cupRadius;
+      const activePlan = store.activePlan;
+      const cupPos = activePlan.cup.position;
+      const cupRadius = activePlan.cup.cupRadius;
       const distToCupXZ = Math.hypot(
         worldVec.x - cupPos[0],
         worldVec.z - cupPos[2],
@@ -890,8 +1290,8 @@ export function GolfBall({
         shadowRef.current.visible = true;
         const ballBottomY = worldVec.y - BALL_RADIUS;
         const sampleSurf = (sx: number, sz: number): number => {
-          const sg = getMasterPlanGroundElevationAt(sx, sz);
-          const sv = getVanRampOrRoofElevationAt(sx, sz);
+          const sg = getMasterPlanGroundElevationAt(sx, sz, activePlan);
+          const sv = getVanSupportElevationForPlan(sx, sz, activePlan);
           return sv !== null && ballBottomY >= sv - 0.12 ? Math.max(sg, sv) : sg;
         };
         const gY = sampleSurf(worldVec.x, worldVec.z);
@@ -971,7 +1371,7 @@ export function GolfBall({
       {/* Soft contact ground shadow beneath ball for instant elevation readability */}
       <mesh
         ref={shadowRef}
-        position={[initialPos[0], COURSE_MASTER_PLAN.teePosition[1] + 0.022, initialPos[2]]}
+        position={[initialPos[0], initialPos[1] - BALL_RADIUS + 0.022, initialPos[2]]}
         rotation={[-Math.PI / 2, 0, 0]}
       >
         <circleGeometry args={[BALL_RADIUS * 1.15, 24]} />

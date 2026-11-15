@@ -28,6 +28,7 @@ import {
   type RenderablePropSpec,
 } from '@/components/world/props';
 import { PERIMETER_BUILDINGS } from '@/config/courseMasterPlan';
+import { ESCAPADE_PERIMETER_BUILDINGS } from '@/config/grandEscapadeMasterPlan';
 import { isQaFreezeActive } from '@/components/world/qaFreeze';
 import type { PerimeterBuildingSpec } from '@/types/course';
 
@@ -82,9 +83,12 @@ function buildUnifiedAssets(): UnifiedQaAsset[] {
   }));
 
   const featuredFacadeIds = new Set(QA_FACADE_SAMPLES.map((s) => s.id));
-  const extraBuildings: QaFacadeSample[] = PERIMETER_BUILDINGS.filter(
-    (b) => !featuredFacadeIds.has(b.id)
-  ).map((b: PerimeterBuildingSpec) => {
+  const extraBuildings: QaFacadeSample[] = [
+    ...PERIMETER_BUILDINGS,
+    ...ESCAPADE_PERIMETER_BUILDINGS,
+  ]
+    .filter((b) => !featuredFacadeIds.has(b.id))
+    .map((b: PerimeterBuildingSpec) => {
     const w = b.boundsXZ.maxX - b.boundsXZ.minX;
     const d = b.boundsXZ.maxZ - b.boundsXZ.minZ;
     return {
@@ -338,6 +342,7 @@ function TurntableAssetStage({
     return {
       id: asset.id,
       type: asset.propEntry?.propType ?? 'brass_bollard',
+      escapadePropType: asset.propEntry?.escapadePropType,
       position: [0, 0, 0],
       rotationY: 0,
       localSize: [
@@ -399,7 +404,8 @@ function TurntableAssetStage({
             lastFountainSplashAt={lastActionAt}
             lastVanRoofHitAt={lastActionAt}
             forceAction={
-              asset.propEntry?.propType === 'subway_steam_grate'
+              asset.propEntry?.propType === 'subway_steam_grate' ||
+              asset.propEntry?.escapadePropType === 'hvac_updraft_fan'
                 ? forceSteam
                 : asset.propEntry?.propType === 'pigeon_flock'
                   ? forceScatter

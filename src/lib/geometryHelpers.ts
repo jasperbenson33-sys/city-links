@@ -1,4 +1,10 @@
-import type { AABB3D, OBB2D, Vec2Tuple, Vec3Tuple } from '../types/course';
+import type {
+  AABB3D,
+  CopperChuteSegmentSpec,
+  OBB2D,
+  Vec2Tuple,
+  Vec3Tuple,
+} from '../types/course';
 
 /**
  * Canonical Local Coordinate Standard enforced across every prop, building, and coaxial builder:
@@ -1694,5 +1700,421 @@ export function buildArchedFrameSpec(
       size: [openingWidth, jambHeight + archInnerRadius, 0.04],
     },
     shutters,
+  };
+}
+
+// ============================================================================
+// STAGE 2 ("THE GRAND CROSSTOWN ESCAPADE") SPLINE & COAXIAL CAD BUILDERS
+// ============================================================================
+
+/**
+ * Evaluates a C1-continuous 3D Catmull-Rom spline across `points` for `t` in `[0, 1]`.
+ * Clamps out-of-range `t` cleanly and preserves exact start (`t = 0`) and end (`t = 1`) endpoints.
+ */
+export function evaluateCatmullRomSpline3D(
+  points: readonly Vec3Tuple[],
+  t: number,
+): Vec3Tuple {
+  const n = points.length;
+  if (n === 0) return [0, 0, 0];
+  if (n === 1) return [points[0][0], points[0][1], points[0][2]];
+
+  const clampedT = Math.max(0, Math.min(1, t));
+  if (clampedT === 0) return [points[0][0], points[0][1], points[0][2]];
+  if (clampedT === 1) return [points[n - 1][0], points[n - 1][1], points[n - 1][2]];
+  if (n === 2) {
+    return [
+      points[0][0] + (points[1][0] - points[0][0]) * clampedT,
+      points[0][1] + (points[1][1] - points[0][1]) * clampedT,
+      points[0][2] + (points[1][2] - points[0][2]) * clampedT,
+    ];
+  }
+
+  const scaled = clampedT * (n - 1);
+  const segIdx = Math.min(n - 2, Math.floor(scaled));
+  const u = scaled - segIdx;
+  const u2 = u * u;
+  const u3 = u2 * u;
+
+  const p0 = points[Math.max(0, segIdx - 1)];
+  const p1 = points[segIdx];
+  const p2 = points[segIdx + 1];
+  const p3 = points[Math.min(n - 1, segIdx + 2)];
+
+  const interp = (a0: number, a1: number, a2: number, a3: number): number =>
+    0.5 *
+    (2 * a1 +
+      (-a0 + a2) * u +
+      (2 * a0 - 5 * a1 + 4 * a2 - a3) * u2 +
+      (-a0 + 3 * a1 - 3 * a2 + a3) * u3);
+
+  return [
+    interp(p0[0], p1[0], p2[0], p3[0]),
+    interp(p0[1], p1[1], p2[1], p3[1]),
+    interp(p0[2], p1[2], p2[2], p3[2]),
+  ];
+}
+
+/**
+ * Evaluates the unit tangent direction along a 3D Catmull-Rom spline at `t` in `[0, 1]`.
+ */
+export function evaluateCatmullRomTangent3D(
+  points: readonly Vec3Tuple[],
+  t: number,
+): Vec3Tuple {
+  const eps = 1e-3;
+  const t0 = Math.max(0, Math.min(1, t - eps));
+  const t1 = Math.max(0, Math.min(1, t + eps));
+  if (Math.abs(t1 - t0) < 1e-9) return [0, 0, -1];
+  const a = evaluateCatmullRomSpline3D(points, t0);
+  const b = evaluateCatmullRomSpline3D(points, t1);
+  return normalizeVec3([b[0] - a[0], b[1] - a[1], b[2] - a[2]]);
+}
+
+export interface HelicalChuteBuilderOptions {
+  helixPivotXZ?: Vec2Tuple;
+  helixRadiusMeters?: number;
+  entryY?: number;
+  exitY?: number;
+  startAngleRad?: number;
+  turns?: number;
+  clockwise?: boolean;
+  sampleCount?: number;
+  maxBankRollDeg?: number;
+}
+
+export interface HelicalChuteSplineResult {
+  waypoints: Vec3Tuple[];
+  segments: CopperChuteSegmentSpec[];
+  totalArcLengthMeters: number;
+}
+
+/**
+ * Builds a strictly monotone-descending 3D helical chute spline (`+14.0m -> +2.0m`)
+ * with coaxial segment transforms (`center`, `tangent`, `yawRad`, `pitchRad`, `bankRollRad`)
+ * for Zone 5's Spiraling Copper Roof-Gutter Downspout Chute.
+ */
+export function buildHelicalChuteSplineSpec(
+  options: HelicalChuteBuilderOptions = {},
+): HelicalChuteSplineResult {
+  const pivotXZ = options.helixPivotXZ ?? [52.0, 10.5];
+  const radius = options.helixRadiusMeters ?? 2.8;
+  const entryY = options.entryY ?? 14.0;
+  const exitY = options.exitY ?? 2.0;
+  const startAngle = options.startAngleRad ?? -Math.PI * 0.5;
+  const turns = options.turns ?? 1.25;
+  const dirSign = options.clockwise === false ? -1 : 1;
+  const sampleCount = Math.max(8, Math.round(options.sampleCount ?? 25));
+  const maxBankRad = degToRad(options.maxBankRollDeg ?? 18);
+
+  const totalSweep = dirSign * turns * Math.PI * 2;
+  const waypoints: Vec3Tuple[] = [];
+
+  for (let i = 0; i < sampleCount; i++) {
+    const s = i / (sampleCount - 1);
+    const angle = startAngle + totalSweep * s;
+    // Ease radial flare gently on final 12% so exit spout aims cleanly into Zone 6 arrival terrace without exceeding ±3.9m QA box
+    const spoutFlare = s > 0.88 ? ((s - 0.88) / 0.12) * 0.5 : 0;
+    const r = radius + spoutFlare;
+    const x = Number((pivotXZ[0] + Math.cos(angle) * r).toFixed(4));
+    const y = Number((entryY + (exitY - entryY) * s).toFixed(4));
+    const z = Number((pivotXZ[1] + Math.sin(angle) * r).toFixed(4));
+    waypoints.push([x, y, z]);
+  }
+
+  const segments: CopperChuteSegmentSpec[] = [];
+  let totalArcLength = 0;
+
+  for (let i = 0; i < waypoints.length - 1; i++) {
+    const start = waypoints[i];
+    const end = waypoints[i + 1];
+    const dx = end[0] - start[0];
+    const dy = end[1] - start[1];
+    const dz = end[2] - start[2];
+    const length = Math.hypot(dx, dy, dz);
+    totalArcLength += length;
+
+    const tangent = normalizeVec3([dx, dy, dz]);
+    const center: Vec3Tuple = [
+      Number(((start[0] + end[0]) * 0.5).toFixed(4)),
+      Number(((start[1] + end[1]) * 0.5).toFixed(4)),
+      Number(((start[2] + end[2]) * 0.5).toFixed(4)),
+    ];
+    const yawRad = Math.atan2(dx, dz);
+    const pitchRad = -Math.asin(Math.max(-1, Math.min(1, dy / Math.max(1e-6, length))));
+    const midFrac = (i + 0.5) / (waypoints.length - 1);
+    const envelope = Math.sin(Math.PI * midFrac);
+    const bankRollRad = dirSign * maxBankRad * envelope;
+
+    segments.push({
+      index: i,
+      start,
+      end,
+      center,
+      tangent,
+      length: Number(length.toFixed(4)),
+      yawRad: Number(yawRad.toFixed(5)),
+      pitchRad: Number(pitchRad.toFixed(5)),
+      bankRollRad: Number(bankRollRad.toFixed(5)),
+    });
+  }
+
+  return {
+    waypoints,
+    segments,
+    totalArcLengthMeters: Number(totalArcLength.toFixed(3)),
+  };
+}
+
+export interface CoaxialWaterTowerOptions {
+  trestleHeight?: number;
+  trestleFootprintHalfSpan?: number;
+  legWidth?: number;
+  deckRadius?: number;
+  deckThickness?: number;
+  barrelRadius?: number;
+  barrelHeight?: number;
+  hoopCount?: number;
+  roofConeHeight?: number;
+  finialHeight?: number;
+}
+
+export interface CoaxialWaterTowerSpec {
+  groundContactY: 0;
+  totalHeight: number;
+  trestleLegs: Array<{
+    index: number;
+    bottomY: 0;
+    position: Vec3Tuple;
+    size: Vec3Tuple;
+  }>;
+  crossGirtY: number;
+  deck: {
+    center: Vec3Tuple;
+    radius: number;
+    thickness: number;
+  };
+  barrel: {
+    center: Vec3Tuple;
+    radius: number;
+    height: number;
+  };
+  steelHoops: Array<{
+    index: number;
+    center: Vec3Tuple;
+    radius: number;
+    tubeRadius: number;
+  }>;
+  conicalRoof: {
+    center: Vec3Tuple;
+    radius: number;
+    height: number;
+  };
+  finial: {
+    center: Vec3Tuple;
+    radius: number;
+    height: number;
+  };
+}
+
+/**
+ * Coaxial NYC cedar rooftop water tower builder grounded at local `y = 0`.
+ * All cylindrical tank staves, galvanized steel hoops, conical cedar cap, and brass finial
+ * share the exact `[0, *, 0]` vertical axis above 4 grounded trestle legs.
+ */
+export function buildCoaxialWaterTowerSpec(
+  options: CoaxialWaterTowerOptions = {},
+): CoaxialWaterTowerSpec {
+  const trestleHeight = options.trestleHeight ?? 1.86;
+  const halfSpan = options.trestleFootprintHalfSpan ?? 0.98;
+  const legWidth = options.legWidth ?? 0.16;
+  const deckThickness = options.deckThickness ?? 0.12;
+  const barrelRadius = options.barrelRadius ?? 1.18;
+  const deckRadius = options.deckRadius ?? barrelRadius * 1.12;
+  const barrelHeight = options.barrelHeight ?? 2.3;
+  const hoopCount = Math.max(2, Math.round(options.hoopCount ?? 4));
+  const roofConeHeight = options.roofConeHeight ?? 0.9;
+  const finialHeight = options.finialHeight ?? 0.38;
+
+  const legOffsets: Vec2Tuple[] = [
+    [-halfSpan, -halfSpan],
+    [halfSpan, -halfSpan],
+    [halfSpan, halfSpan],
+    [-halfSpan, halfSpan],
+  ];
+
+  const trestleLegs = legOffsets.map(([lx, lz], index) => ({
+    index,
+    bottomY: 0 as const,
+    position: [lx, trestleHeight * 0.5, lz] as Vec3Tuple,
+    size: [legWidth, trestleHeight, legWidth] as Vec3Tuple,
+  }));
+
+  const deckCenterY = trestleHeight + deckThickness * 0.5;
+  const barrelBaseY = trestleHeight + deckThickness;
+  const barrelCenterY = barrelBaseY + barrelHeight * 0.5;
+
+  const steelHoops = Array.from({ length: hoopCount }, (_, index) => {
+    const frac = (index + 0.7) / (hoopCount + 0.4);
+    return {
+      index,
+      center: [0, Number((barrelBaseY + barrelHeight * frac).toFixed(4)), 0] as Vec3Tuple,
+      radius: Number((barrelRadius + 0.022).toFixed(4)),
+      tubeRadius: 0.022,
+    };
+  });
+
+  const roofBaseY = barrelBaseY + barrelHeight;
+  const roofCenterY = roofBaseY + roofConeHeight * 0.5;
+  const finialBaseY = roofBaseY + roofConeHeight;
+  const finialCenterY = finialBaseY + finialHeight * 0.5;
+  const totalHeight = Number((finialBaseY + finialHeight).toFixed(4));
+
+  return {
+    groundContactY: 0,
+    totalHeight,
+    trestleLegs,
+    crossGirtY: Number((trestleHeight * 0.52).toFixed(4)),
+    deck: {
+      center: [0, Number(deckCenterY.toFixed(4)), 0],
+      radius: Number(deckRadius.toFixed(4)),
+      thickness: deckThickness,
+    },
+    barrel: {
+      center: [0, Number(barrelCenterY.toFixed(4)), 0],
+      radius: barrelRadius,
+      height: barrelHeight,
+    },
+    steelHoops,
+    conicalRoof: {
+      center: [0, Number(roofCenterY.toFixed(4)), 0],
+      radius: Number((barrelRadius * 1.14).toFixed(4)),
+      height: roofConeHeight,
+    },
+    finial: {
+      center: [0, Number(finialCenterY.toFixed(4)), 0],
+      radius: 0.04,
+      height: finialHeight,
+    },
+  };
+}
+
+export interface VaultedSubwayArchOptions {
+  clearSpanWidth?: number;
+  springlineHeight?: number;
+  archRiseHeight?: number;
+  ribThickness?: number;
+  ribDepthZ?: number;
+  pilasterWidth?: number;
+  segmentCount?: number;
+}
+
+export interface VaultedSubwayArchSegmentSpec {
+  index: number;
+  angleRad: number;
+  isCrownKeystone: boolean;
+  position: Vec3Tuple;
+  rotation: Vec3Tuple;
+  size: Vec3Tuple;
+}
+
+export interface VaultedSubwayArchSpec {
+  groundContactY: 0;
+  clearSpanWidth: number;
+  springlineHeight: number;
+  crownClearHeight: number;
+  totalHeight: number;
+  leftPilaster: {
+    bottomY: 0;
+    position: Vec3Tuple;
+    size: Vec3Tuple;
+  };
+  rightPilaster: {
+    bottomY: 0;
+    position: Vec3Tuple;
+    size: Vec3Tuple;
+  };
+  archSegments: VaultedSubwayArchSegmentSpec[];
+}
+
+/**
+ * Coaxial Guastavino / NYC IRT ceramic-tile barrel-vault rib & pilaster builder
+ * grounded at local `y = 0` (station concourse floor datum) for Zone 7's Subway Station Finale.
+ */
+export function buildVaultedSubwayArchSpec(
+  options: VaultedSubwayArchOptions = {},
+): VaultedSubwayArchSpec {
+  const clearSpanWidth = options.clearSpanWidth ?? 22.0;
+  const halfSpanX = clearSpanWidth * 0.5;
+  const springlineHeight = options.springlineHeight ?? 3.6;
+  const archRiseHeight = options.archRiseHeight ?? 3.3;
+  const ribThickness = options.ribThickness ?? 0.36;
+  const ribDepthZ = options.ribDepthZ ?? 0.52;
+  const pilasterWidth = options.pilasterWidth ?? 0.24;
+  const segCount = Math.max(9, Math.round(options.segmentCount ?? 15));
+
+  // Inset pilasters & springline extrados 5cm INWARD into the concourse (proud +29cm from main wall,
+  // +25cm proud of ±4cm wall pilasters) so NO face is ever coplanar with x = ±halfSpanX vault walls!
+  const pilasterWallClearance = 0.05;
+  const pilasterCenterX = halfSpanX - (pilasterWallClearance + pilasterWidth * 0.5);
+  const archRadiusX = halfSpanX - (pilasterWallClearance + ribThickness * 0.5);
+  const archRadiusY = archRiseHeight + ribThickness * 0.35;
+  const dTheta = Math.PI / segCount;
+  const midIdx = Math.floor(segCount / 2);
+  const archSegments: VaultedSubwayArchSegmentSpec[] = [];
+
+  for (let i = 0; i < segCount; i++) {
+    const theta0 = i * dTheta;
+    const theta1 = (i + 1) * dTheta;
+    const thetaMid = (i + 0.5) * dTheta;
+    const isCrownKeystone = i === midIdx;
+
+    const x0 = Math.cos(theta0) * archRadiusX;
+    const y0 = springlineHeight + Math.sin(theta0) * archRadiusY;
+    const x1 = Math.cos(theta1) * archRadiusX;
+    const y1 = springlineHeight + Math.sin(theta1) * archRadiusY;
+
+    const cx = Math.cos(thetaMid) * archRadiusX;
+    const cy = springlineHeight + Math.sin(thetaMid) * archRadiusY;
+    const chord = Math.hypot(x1 - x0, y1 - y0) * 1.08;
+    // Tangent along arch from right (+X) toward left (-X); outward normal tilts by atan2
+    const tangentAngle = Math.atan2(y1 - y0, x1 - x0);
+    const rotZ = tangentAngle - Math.PI;
+    const thicknessScale = isCrownKeystone ? 1.18 : 1.0;
+
+    archSegments.push({
+      index: i,
+      angleRad: Number(thetaMid.toFixed(5)),
+      isCrownKeystone,
+      position: [Number(cx.toFixed(4)), Number(cy.toFixed(4)), 0],
+      rotation: [0, 0, Number(rotZ.toFixed(5))],
+      size: [
+        Number(chord.toFixed(4)),
+        Number((ribThickness * thicknessScale).toFixed(4)),
+        Number((ribDepthZ * (isCrownKeystone ? 1.12 : 1.0)).toFixed(4)),
+      ],
+    });
+  }
+
+  const crownClearHeight = Number((springlineHeight + archRiseHeight).toFixed(4));
+  const totalHeight = Number((crownClearHeight + ribThickness * 1.1).toFixed(4));
+
+  return {
+    groundContactY: 0,
+    clearSpanWidth,
+    springlineHeight,
+    crownClearHeight,
+    totalHeight,
+    leftPilaster: {
+      bottomY: 0,
+      position: [Number((-pilasterCenterX).toFixed(4)), springlineHeight * 0.5, 0],
+      size: [pilasterWidth, springlineHeight, ribDepthZ * 1.15],
+    },
+    rightPilaster: {
+      bottomY: 0,
+      position: [Number(pilasterCenterX.toFixed(4)), springlineHeight * 0.5, 0],
+      size: [pilasterWidth, springlineHeight, ribDepthZ * 1.15],
+    },
+    archSegments,
   };
 }

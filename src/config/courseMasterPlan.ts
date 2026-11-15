@@ -2435,6 +2435,7 @@ export const STREET_SCOUT_CAMERA_PRESET: StreetScoutCameraSpec = {
 };
 
 export const COURSE_MASTER_PLAN: CourseMasterPlan = {
+  courseId: 'classic',
   holeNumber: 1,
   holeId: 'hole-1-5th-and-mercer',
   holeName: 'Hole 1: 5th & Mercer',
@@ -2590,26 +2591,33 @@ export function getVanRampOrRoofElevationAt(
   z: number,
   plan: CourseMasterPlan = COURSE_MASTER_PLAN,
 ): number | null {
-  const van = plan.props.find((p) => p.id === 'delivery-van-east');
-  const meta = van?.vanRampMeta;
-  if (!meta) return null;
+  for (const van of plan.props) {
+    if (van.type !== 'delivery_box_van' || !van.vanRampMeta) continue;
+    const meta = van.vanRampMeta;
 
-  for (const ramp of [meta.slopedRampSpec, meta.roofAccessKickerSpec]) {
-    if (!ramp) continue;
-    const b = ramp.boundsXZ;
-    if (x >= b.minX && x <= b.maxX && z >= b.minZ && z <= b.maxZ) {
-      const t =
-        ramp.climbDirection === 'north'
-          ? (b.maxZ - z) / Math.max(1e-6, b.maxZ - b.minZ)
-          : (z - b.minZ) / Math.max(1e-6, b.maxZ - b.minZ);
-      const clamped = Math.max(0, Math.min(1, t));
-      return ramp.bottomY + (ramp.topY - ramp.bottomY) * clamped;
+    for (const ramp of [meta.slopedRampSpec, meta.roofAccessKickerSpec]) {
+      if (!ramp) continue;
+      const b = ramp.boundsXZ;
+      if (x >= b.minX && x <= b.maxX && z >= b.minZ && z <= b.maxZ) {
+        const t =
+          ramp.climbDirection === 'north'
+            ? (b.maxZ - z) / Math.max(1e-6, b.maxZ - b.minZ)
+            : (z - b.minZ) / Math.max(1e-6, b.maxZ - b.minZ);
+        const clamped = Math.max(0, Math.min(1, t));
+        return ramp.bottomY + (ramp.topY - ramp.bottomY) * clamped;
+      }
     }
-  }
 
-  const deck = meta.roofLaunchDeckBoundsXZ;
-  if (deck && x >= deck.minX && x <= deck.maxX && z >= deck.minZ && z <= deck.maxZ) {
-    return meta.roofDeckTopY;
+    const deck = meta.roofLaunchDeckBoundsXZ;
+    if (
+      deck &&
+      x >= deck.minX &&
+      x <= deck.maxX &&
+      z >= deck.minZ &&
+      z <= deck.maxZ
+    ) {
+      return meta.roofDeckTopY;
+    }
   }
 
   return null;
@@ -2741,7 +2749,15 @@ export function auditStation360PerimeterClosure(
 ): StationRaycastAuditResult {
   const azimuthStepDeg = options.azimuthStepDeg ?? 1;
   const pitchAnglesDeg = options.pitchAnglesDeg ?? [0];
-  const verticalEnclosures = [...plan.perimeterBuildings, ...plan.skylineBackdrops];
+  const verticalEnclosures: Array<{ aabb: AABB3D }> = [
+    ...plan.perimeterBuildings,
+    ...plan.skylineBackdrops,
+    ...plan.architecturalWalls.filter(
+      (w) =>
+        w.kind === 'subway_ceramic_vault_wall' ||
+        w.kind === 'subway_vault_ceiling_slab',
+    ),
+  ];
   const downwardSlabs: AABB3D[] = [
     ...plan.groundZones.map((z) => z.aabb),
     ...plan.ramps.map((r) => r.aabb),
@@ -2862,19 +2878,26 @@ export function isWorldPointInWaterHazard(
   z: number,
 ): boolean {
   const plan = resolveMasterPlan(courseOrPlan);
-  const fountain = plan.props.find(
-    (p) => p.id === 'fountain-courtyard-front',
-  );
-  if (!fountain || !fountain.reactive?.zoneRadius) return false;
-  const dist = Math.hypot(
-    x - fountain.reactive.zoneCenter[0],
-    z - fountain.reactive.zoneCenter[2],
-  );
-  return (
-    dist <= fountain.reactive.zoneRadius &&
-    y >= fountain.groundY &&
-    y <= fountain.groundY + 0.55
-  );
+  for (const fountain of plan.props) {
+    if (
+      (fountain.id === 'fountain-courtyard-front' ||
+        fountain.type === 'fountain_water_hazard') &&
+      fountain.reactive?.zoneRadius
+    ) {
+      const dist = Math.hypot(
+        x - fountain.reactive.zoneCenter[0],
+        z - fountain.reactive.zoneCenter[2],
+      );
+      if (
+        dist <= fountain.reactive.zoneRadius &&
+        y >= fountain.groundY &&
+        y <= fountain.groundY + 0.55
+      ) {
+        return true;
+      }
+    }
+  }
+  return false;
 }
 
 /**

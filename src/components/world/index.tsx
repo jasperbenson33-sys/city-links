@@ -31,3 +31,10 @@ export {
   type CupFlagAssemblyProps,
 } from './tiles';
 export * from './props';
+export {
+  ZoneSpatialChunk,
+  Zone7SubwayFinale,
+  GrandEscapadeZonesLayer,
+  ZONE_MICRO_PROP_CULL_DISTANCE_METERS,
+  type GrandEscapadeZonesLayerProps,
+} from './zones';

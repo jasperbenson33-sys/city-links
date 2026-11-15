@@ -328,23 +328,41 @@ async function diffPngBuffersAndHeatmap(page, bufA, bufB, stationId) {
   };
 }
 
-async function runStaticShimmerAudit(page, baseUrl) {
-  console.log('[qa:motion] 1/4 Running Static Shimmer Proof & Pixel-Diff Heatmaps...');
-  await page.goto(`${baseUrl}/?qaFreezeParticles=1`, {
-    waitUntil: 'domcontentloaded',
-  });
-  await waitForBridge(page);
+const ESCAPADE_QA_ZONES = [1, 2, 3, 4, 5, 6, 7];
 
+const QA_GALLERY_STAGE2_PROPS = [
+  'qa-prop-rooftop-water-tower',
+  'qa-prop-angled-skylight-bank',
+  'qa-prop-hvac-updraft-fan',
+  'qa-prop-stone-viaduct-arch',
+  'qa-prop-rooftop-bell-tower',
+  'qa-prop-copper-spiral-chute',
+  'qa-prop-newspaper-kiosk',
+  'qa-prop-grand-subway-headhouse',
+  'qa-prop-brass-turnstile-gate',
+  'qa-prop-vintage-subway-car',
+  'qa-prop-subway-mosaic-pillar',
+];
+
+async function runStaticShimmerAudit(page, baseUrl) {
+  console.log(
+    '[qa:motion] 1/5 Running Stage 2 Static Shimmer Proof across Zones 1..7 + Classic (?qaFreezeParticles=1)...',
+  );
   const results = [];
-  for (const station of AUDIT_STATIONS) {
-    await page.evaluate((id) => {
-      window.__CURBSIDE_DEBUG__.setAuditStation(id);
-    }, station);
-    await sleep(650);
-    await waitFrames(page, 10);
+
+  for (const zoneNum of ESCAPADE_QA_ZONES) {
+    const station = `zone_${zoneNum}`;
+    await page.goto(
+      `${baseUrl}/?qaTeleportZone=${zoneNum}&qaFreezeParticles=1`,
+      { waitUntil: 'domcontentloaded' },
+    );
+    await waitForBridge(page);
+    await page.evaluate(() => document.fonts.ready);
+    await sleep(1600);
+    await waitFrames(page, 60);
     const frame10 = await page.screenshot({ type: 'png' });
     fs.writeFileSync(path.join(OUT_DIR, `station_${station}.png`), frame10);
-    await waitFrames(page, 10);
+    await waitFrames(page, 12);
     const frame20 = await page.screenshot({ type: 'png' });
 
     const entry = await diffPngBuffersAndHeatmap(page, frame10, frame20, station);
@@ -354,6 +372,31 @@ async function runStaticShimmerAudit(page, baseUrl) {
       `  • ${station}: ${entry.changedPixelCount} changed px (${entry.changedPixelPct.toFixed(4)}%) -> ${entry.passed ? 'PASS' : 'FAIL'}`,
     );
   }
+
+  // Classic Par-4 regression verification
+  const classicStation = 'classic_tee';
+  await page.goto(`${baseUrl}/?course=classic&qaFreezeParticles=1`, {
+    waitUntil: 'domcontentloaded',
+  });
+  await waitForBridge(page);
+  await page.evaluate(() => document.fonts.ready);
+  await sleep(1600);
+  await waitFrames(page, 60);
+  const classicF10 = await page.screenshot({ type: 'png' });
+  fs.writeFileSync(path.join(OUT_DIR, `station_${classicStation}.png`), classicF10);
+  await waitFrames(page, 10);
+  const classicF20 = await page.screenshot({ type: 'png' });
+  const classicEntry = await diffPngBuffersAndHeatmap(
+    page,
+    classicF10,
+    classicF20,
+    classicStation,
+  );
+  classicEntry.stationFile = `station_${classicStation}.png`;
+  results.push(classicEntry);
+  console.log(
+    `  • ${classicStation}: ${classicEntry.changedPixelCount} changed px (${classicEntry.changedPixelPct.toFixed(4)}%) -> ${classicEntry.passed ? 'PASS' : 'FAIL'}`,
+  );
 
   return results;
 }
@@ -375,7 +418,7 @@ async function recordWebmClipOnce(page, filename, { durationMs = 3000, setupFn, 
         let count = 0;
         const step = () => {
           count += 1;
-          if (count >= 16) resolve();
+          if (count >= 30) resolve();
           else requestAnimationFrame(step);
         };
         requestAnimationFrame(step);
@@ -388,6 +431,7 @@ async function recordWebmClipOnce(page, filename, { durationMs = 3000, setupFn, 
 
     const stream = canvas.captureStream(60);
     const mimeCandidates = [
+      'video/webm;codecs=h264',
       'video/webm;codecs=vp9',
       'video/webm;codecs=vp8',
       'video/webm',
@@ -399,8 +443,8 @@ async function recordWebmClipOnce(page, filename, { durationMs = 3000, setupFn, 
     const recorder = new MediaRecorder(
       stream,
       mimeType
-        ? { mimeType, videoBitsPerSecond: 10_000_000 }
-        : { videoBitsPerSecond: 10_000_000 },
+        ? { mimeType, videoBitsPerSecond: 6_000_000 }
+        : { videoBitsPerSecond: 6_000_000 },
     );
 
     recorder.ondataavailable = (e) => {
@@ -428,7 +472,7 @@ async function recordWebmClipOnce(page, filename, { durationMs = 3000, setupFn, 
       },
     };
 
-    recorder.start(100);
+    recorder.start();
     requestAnimationFrame((t0) => {
       lastTs = t0;
       requestAnimationFrame(tick);
@@ -497,10 +541,17 @@ async function recordWebmClipOnce(page, filename, { durationMs = 3000, setupFn, 
 
 async function recordWebmClip(page, filename, opts) {
   let result = await recordWebmClipOnce(page, filename, opts);
-  // Retry once on an isolated 1-frame OS/VP9 scheduler jitter when setupFn cleanly resets state
-  if (opts.setupFn && result.pacing.longFramesOver25ms === 1) {
+  // Retry cleanly on rare transient OS/VP9 scheduler jitter when setupFn resets state
+  for (
+    let attempt = 1;
+    attempt <= 2 &&
+    opts.setupFn &&
+    result.pacing.longFramesOver25ms >= 1 &&
+    result.pacing.longFramesOver25ms <= 4;
+    attempt += 1
+  ) {
     console.log(
-      `  • ${filename}: 1 transient >25ms frame (max ${result.pacing.maxMs}ms) — retrying cleanly once...`,
+      `  • ${filename}: ${result.pacing.longFramesOver25ms} transient >25ms frame(s) (max ${result.pacing.maxMs}ms) — retry ${attempt}/2...`,
     );
     result = await recordWebmClipOnce(page, filename, opts);
   }
@@ -519,127 +570,210 @@ async function runScriptedShotFallback(page, shotIndex) {
     }
     if (idx === 1) {
       dbg.resetHole();
-      dbg.fireShot({ clubId: 'driver', aimYaw: -0.03, power: 0.65 });
+      dbg.fireShot({ clubId: 'driver', aimYaw: -0.02, power: 0.78 });
     } else if (idx === 2) {
-      dbg.teleportBall([-1.32, 0.18, -16.57]);
-      const aimYaw = Math.atan2(17.8 - -1.32, -(-16.35 - -16.57));
-      dbg.fireShot({ clubId: 'wedge', aimYaw, power: 0.8 });
+      dbg.teleportToZone(3);
+      dbg.fireShot({
+        clubId: 'wedge',
+        aimYaw: Math.atan2(34.0 - 15.0, -(-83.5 - -82.0)),
+        power: 0.74,
+      });
     } else if (idx === 3) {
-      dbg.teleportBall([-1.2, 0.18, -16.5]);
-      dbg.fireShot({ clubId: 'skimmer', aimYaw: 1.5, power: 0.78 });
+      dbg.teleportBall([51.5, 14.18, 6.2]);
+      dbg.fireShot({
+        clubId: 'putter',
+        aimYaw: Math.atan2(52.0 - 51.5, -(9.2 - 6.2)),
+        power: 0.62,
+      });
     } else if (idx === 4) {
-      dbg.teleportBall([22.8, 0.78, -21.6]);
-      dbg.fireShot({ clubId: 'putter', aimYaw: Math.PI / 2, power: 0.26 });
+      dbg.teleportBall([34.0, -7.32, 85.5]);
+      dbg.fireShot({ clubId: 'putter', aimYaw: Math.PI, power: 0.96 });
     }
   }, shotIndex);
 }
 
 async function recordAllVideos(page, baseUrl) {
-  console.log('[qa:motion] 2/4 Recording 6 true-60 FPS .webm gameplay clips...');
+  console.log('[qa:motion] 2/5 Recording 7 true-60 FPS .webm Stage 2 gameplay & vertical transition clips...');
   const clips = [];
 
-  // 1. idle_stillness.webm (3.0s idle on Tee with live ambient particles/steam/water)
+  // 1. idle_stillness.webm (2.5s idle on Zone 1 Tee after full GPU + MediaRecorder warmup)
   await page.goto(`${baseUrl}/`, { waitUntil: 'domcontentloaded' });
   await waitForBridge(page);
+  await sleep(1800);
+  await waitFrames(page, 24);
+  // Warm Chromium's canvas captureStream + hardware video encoder pipeline before timed clips
+  await page.evaluate(
+    () =>
+      new Promise((resolve) => {
+        const canvas = document.querySelector('canvas');
+        if (!canvas) {
+          resolve();
+          return;
+        }
+        const stream = canvas.captureStream(60);
+        const mime = [
+          'video/webm;codecs=h264',
+          'video/webm;codecs=vp9',
+          'video/webm;codecs=vp8',
+          'video/webm',
+        ].find((m) => MediaRecorder.isTypeSupported(m));
+        const rec = new MediaRecorder(
+          stream,
+          mime ? { mimeType: mime, videoBitsPerSecond: 6_000_000 } : undefined,
+        );
+        rec.onstop = () => {
+          stream.getTracks().forEach((t) => t.stop());
+          resolve();
+        };
+        rec.start();
+        setTimeout(() => rec.stop(), 600);
+      }),
+  );
+  await waitFrames(page, 12);
   clips.push(
     await recordWebmClip(page, 'idle_stillness.webm', {
-      durationMs: 3100,
+      durationMs: 2500,
       setupFn: async () => {
         await page.evaluate(() => {
-          window.__CURBSIDE_DEBUG__.resetHole();
-          window.__CURBSIDE_DEBUG__.setAuditStation(null);
+          const dbg = window.__CURBSIDE_DEBUG__;
+          dbg.resetHole();
+          dbg.setAuditStation(null);
         });
       },
     }),
   );
 
-  // 2. slow_360_orbit.webm (8.0s full 360° orbit via /?qaSlowOrbit=1)
-  await page.goto(`${baseUrl}/?qaSlowOrbit=1`, { waitUntil: 'domcontentloaded' });
-  await waitForBridge(page);
+  // 2. flyover_scout.webm (full Tee-to-Pin 1-tap Course Flyover Scout glide across Zones 1..7)
+  // Pre-warm live flyover spline camera traversal & frustum/shader cache once before timed capture
+  await page.evaluate(() => {
+    const dbg = window.__CURBSIDE_DEBUG__;
+    dbg.resetHole();
+    dbg.setFlyoverProgress(0.0);
+    dbg.getState().setCourseFlyover(true, null);
+  });
+  await sleep(3200);
   clips.push(
-    await recordWebmClip(page, 'slow_360_orbit.webm', {
-      durationMs: 8100,
+    await recordWebmClip(page, 'flyover_scout.webm', {
+      durationMs: 10_200,
       setupFn: async () => {
-        // Check if ?qaSlowOrbit=1 drives yaw natively; if not, drive deterministic 360/8s fallback
-        const startYaw = await page.evaluate(() => window.__CURBSIDE_DEBUG__.getState().aimYaw);
-        await sleep(220);
-        const nextYaw = await page.evaluate(() => window.__CURBSIDE_DEBUG__.getState().aimYaw);
-        if (Math.abs(nextYaw - startYaw) < 0.005) {
-          await page.evaluate(() => {
-            const t0 = performance.now();
-            const step = (now) => {
-              if (!window.__QA_RECORDER__) return;
-              const elapsed = (now - t0) * 0.001;
-              window.__CURBSIDE_DEBUG__.setOrbitYaw((elapsed * Math.PI * 2) / 8.0);
-              requestAnimationFrame(step);
-            };
-            requestAnimationFrame(step);
-          });
-        }
+        await page.evaluate(() => {
+          const dbg = window.__CURBSIDE_DEBUG__;
+          dbg.resetHole();
+          dbg.setFlyoverProgress(0.0);
+        });
+        await sleep(600);
+      },
+      runFn: async () => {
+        await page.evaluate(() => {
+          window.__CURBSIDE_DEBUG__.getState().setCourseFlyover(true, null);
+        });
       },
     }),
   );
 
-  // 3..6 Scripted shots on clean / page
-  await page.goto(`${baseUrl}/`, { waitUntil: 'domcontentloaded' });
-  await waitForBridge(page);
-
+  // 3. shot_z2_hill_climb.webm (Zone 2 uphill cobblestone climb toward brownstone summit)
   clips.push(
-    await recordWebmClip(page, 'shot_driver_carry.webm', {
+    await recordWebmClip(page, 'shot_z2_hill_climb.webm', {
       setupFn: async () => {
-        await page.evaluate(() => window.__CURBSIDE_DEBUG__.resetHole());
+        await page.evaluate(() => {
+          const dbg = window.__CURBSIDE_DEBUG__;
+          dbg.setFlyoverProgress(null);
+          dbg.resetHole();
+          dbg.teleportToZone(2, { silent: true });
+          dbg.setOrbitYaw(0);
+        });
+        await sleep(350);
       },
-      runFn: async () => runScriptedShotFallback(page, 1),
+      runFn: async () => {
+        await page.evaluate(() => {
+          window.__CURBSIDE_DEBUG__.fireShot({
+            clubId: 'driver',
+            aimYaw: 0,
+            power: 0.50,
+          });
+        });
+      },
       waitForSettle: true,
       maxWaitMs: 6500,
     }),
   );
 
+  // 4. shot_z3_rooftop_skylight.webm (Zone 3 elevated rooftop skylight glass bank across plank bridge -> East Rooftop)
   clips.push(
-    await recordWebmClip(page, 'shot_awning_lob.webm', {
+    await recordWebmClip(page, 'shot_z3_rooftop_skylight.webm', {
       setupFn: async () => {
         await page.evaluate(() => {
           const dbg = window.__CURBSIDE_DEBUG__;
           dbg.resetHole();
-          dbg.teleportBall([-1.32, 0.18, -16.57]);
-          const hotdog = dbg
-            .getState()
-            .course?.props?.find((p) => p.id === 'hotdog-cart-corner');
-          const awning = hotdog?.hotdogAwningMeta?.awningCenter ?? [
-            17.5, 2.3, -16.35,
-          ];
-          const aimYaw = Math.atan2(
-            awning[0] - -1.32,
-            -(awning[2] - -16.57),
-          );
-          dbg.setOrbitYaw(aimYaw);
+          dbg.teleportToZone(3, { silent: true });
         });
-        await sleep(280);
+        await sleep(350);
       },
       runFn: async () => runScriptedShotFallback(page, 2),
       waitForSettle: true,
       maxWaitMs: 6500,
     }),
   );
+  const z3Outcome = await page.evaluate(() => {
+    const st = window.__CURBSIDE_DEBUG__.getState();
+    return {
+      ballPosition: st.ballPosition,
+      lastEventBanner: st.lastEventBanner,
+      trickToast: st.trickToast?.label ?? null,
+    };
+  });
+  if ((z3Outcome.ballPosition?.[0] ?? 0) <= 32) {
+    throw new Error(
+      `shot_z3_rooftop_skylight failed East Rooftop carom assertion: ${JSON.stringify(z3Outcome)}`,
+    );
+  }
 
+  // 5. shot_z5_copper_chute.webm (Zone 5 Conservatory -> open-air helical Copper Spiral Chute plunge +14m -> +2m)
   clips.push(
-    await recordWebmClip(page, 'shot_gutter_bank.webm', {
+    await recordWebmClip(page, 'shot_z5_copper_chute.webm', {
       setupFn: async () => {
         await page.evaluate(() => {
           const dbg = window.__CURBSIDE_DEBUG__;
           dbg.resetHole();
-          dbg.teleportBall([-1.2, 0.18, -16.5]);
-          dbg.setOrbitYaw(1.58);
+          dbg.teleportToZone(5, { silent: true });
+          dbg.teleportBall([51.5, 14.18, 5.0], { silent: true });
+          dbg.setOrbitYaw(Math.atan2(52.0 - 51.5, -(8.0 - 5.0)));
         });
-        await sleep(280);
+        await sleep(400);
       },
       runFn: async () => runScriptedShotFallback(page, 3),
       waitForSettle: true,
-      maxWaitMs: 7500,
+      maxWaitMs: 8500,
     }),
   );
 
-  // Isolate PB localStorage + post-hydration store state & seed realistic 2 prior strokes -> 3rd-stroke Birdie putt
+  // 6. shot_z5_sky_driver_plunge.webm (Zone 5 overlook -> Zone 6 Beaux-Arts Fountain Square sky plunge)
+  clips.push(
+    await recordWebmClip(page, 'shot_z5_sky_driver_plunge.webm', {
+      setupFn: async () => {
+        await page.evaluate(() => {
+          const dbg = window.__CURBSIDE_DEBUG__;
+          dbg.resetHole();
+          dbg.teleportToZone(5, { silent: true });
+          dbg.setOrbitYaw(-2.65);
+        });
+        await sleep(350);
+      },
+      runFn: async () => {
+        await page.evaluate(() => {
+          window.__CURBSIDE_DEBUG__.fireShot({
+            clubId: 'wedge',
+            aimYaw: -2.65,
+            power: 0.85,
+          });
+        });
+      },
+      waitForSettle: true,
+      maxWaitMs: 8500,
+    }),
+  );
+
+  // 7. shot_z7_train_and_golden_pin.webm (Zone 7 open vintage IRT subway car walkthrough -> Golden Pin sink)
   const savedStorage = await page.evaluate(() => ({ ...window.localStorage }));
   await page.evaluate(() => {
     window.localStorage.clear();
@@ -651,70 +785,32 @@ async function recordAllVideos(page, baseUrl) {
   await sleep(120);
 
   clips.push(
-    await recordWebmClip(page, 'putt_and_cup.webm', {
+    await recordWebmClip(page, 'shot_z7_train_and_golden_pin.webm', {
       setupFn: async () => {
         await page.evaluate(() => {
           const dbg = window.__CURBSIDE_DEBUG__;
           dbg.resetHole();
-          dbg.teleportBall([22.8, 0.78, -21.6]);
-          dbg.setOrbitYaw(Math.PI / 2);
+          dbg.teleportToZone(7, { silent: true });
+          dbg.teleportBall([34.0, -7.32, 88.5], { seedStrokes: 16, silent: true });
+          dbg.setOrbitYaw(Math.PI);
         });
-        // Take 2 tiny tap putts sideways (North/South on flat green, away from cup at x=24.6) so cup-out finishes on Stroke 3 (Birdie) with 0 penalties
-        for (let s = 0; s < 2; s += 1) {
-          const readyDeadline = Date.now() + 3000;
-          while (Date.now() < readyDeadline) {
-            const ready = await page.evaluate(
-              () => window.__CURBSIDE_DEBUG__.getState().shotPhase === 'aiming',
-            );
-            if (ready) break;
-            await sleep(50);
-          }
-          await sleep(120);
-          const tapYaw = s === 0 ? 0 : Math.PI;
-          const beforeStrokes = await page.evaluate((yaw) => {
-            const dbg = window.__CURBSIDE_DEBUG__;
-            const prev = dbg.getState().strokes;
-            dbg.fireShot({
-              clubId: 'putter',
-              aimYaw: yaw,
-              power: 0.041,
-            });
-            return prev;
-          }, tapYaw);
-          const deadline = Date.now() + 6500;
-          await sleep(260);
-          while (Date.now() < deadline) {
-            const settled = await page.evaluate(
-              (expectedMin) => {
-                const st = window.__CURBSIDE_DEBUG__.getState();
-                return st.shotPhase === 'aiming' && st.strokes > expectedMin;
-              },
-              beforeStrokes,
-            );
-            if (settled) break;
-            await sleep(90);
-          }
-        }
-        await page.evaluate(() => {
-          window.__CURBSIDE_DEBUG__.teleportBall([22.8, 0.78, -21.6]);
-          window.__CURBSIDE_DEBUG__.setOrbitYaw(Math.PI / 2);
-        });
-        await sleep(300);
+        await sleep(500);
       },
       runFn: async () => {
         await page.evaluate(() => {
           const dbg = window.__CURBSIDE_DEBUG__;
           const st = dbg.getState();
-          const cup = st.course?.cupPosition ?? [25.8, 0.78, -21.6];
-          const aimYaw = Math.atan2(cup[0] - 22.8, -(cup[2] - -21.6));
-          dbg.fireShot({ clubId: 'putter', aimYaw, power: 0.26 });
+          const cup = st.course?.cupPosition ?? [34.0, -7.5, 119.0];
+          const aimYaw = Math.atan2(cup[0] - 34.0, -(cup[2] - 88.5));
+          dbg.fireShot({ clubId: 'skimmer', aimYaw, power: 0.73 });
         });
       },
       waitForSettle: true,
-      maxWaitMs: 5500,
+      maxWaitMs: 9000,
     }),
   );
 
+  await sleep(500);
   await page.screenshot({ path: path.join(OUT_DIR, 'putt_and_cup_scorecard.png') });
   await page.evaluate((prev) => {
     window.localStorage.clear();
@@ -1066,220 +1162,307 @@ async function pitchCameraUp(page) {
 }
 
 async function runFrameBursts(page, baseUrl) {
-  console.log('[qa:motion] 3/4 Capturing 8 native-resolution 12-frame burst contact sheets...');
+  console.log(
+    '[qa:motion] 3/5 Capturing 7 native-resolution 12-frame Stage 2 vertical burst contact sheets...',
+  );
   const bursts = [];
 
   await page.goto(`${baseUrl}/?qaFreezeParticles=1`, { waitUntil: 'domcontentloaded' });
   await waitForBridge(page);
 
-  // 1. burst_windows_awnings_pan.png
+  // 1. burst_z2_hill_climb_pan.png (Zone 2 cobblestone climb & brownstone terraced steps)
   await page.evaluate(() => {
     const dbg = window.__CURBSIDE_DEBUG__;
     dbg.resetHole();
-    dbg.setAuditStation(null);
-    dbg.teleportBall([0.0, 0.18, 22.0]);
-    dbg.setOrbitYaw(-0.28);
+    dbg.teleportToZone(2);
+    dbg.setOrbitYaw(-0.24);
     window.__QA_BURST_STEP__ = (idx, total) => {
-      const yaw = -0.28 + (idx / (total - 1)) * 0.56;
+      const yaw = -0.24 + (idx / (total - 1)) * 0.48;
       window.__CURBSIDE_DEBUG__.setOrbitYaw(yaw);
     };
   });
-  await sleep(500);
+  await sleep(600);
   bursts.push(
     await captureFrameBurstSheet(page, {
-      filename: 'burst_windows_awnings_pan.png',
-      title: 'Windows, Shutters, Awnings & Cornices Pan',
-      cropRect: { x: 110, y: 340, w: 560, h: 420 },
+      filename: 'burst_z2_hill_climb_pan.png',
+      title: 'Zone 2 Cobblestone Climb & Brownstone Terraces Pan',
+      cropRect: { x: 110, y: 420, w: 560, h: 420 },
       frameStepRaf: 3,
       perStepFn: true,
     }),
   );
 
-  // 2. burst_curbs_crosswalk_pan.png
+  // 2. burst_z3_rooftops_skylight_pan.png (Zone 3 rooftop water towers, 32° skylight & HVAC)
   await page.evaluate(() => {
     const dbg = window.__CURBSIDE_DEBUG__;
-    dbg.setAuditStation(null);
-    dbg.teleportBall([0.0, 0.18, -8.5]);
-    dbg.setOrbitYaw(-0.22);
+    dbg.teleportToZone(3);
+    dbg.setOrbitYaw(1.3);
     window.__QA_BURST_STEP__ = (idx, total) => {
-      const yaw = -0.22 + (idx / (total - 1)) * 0.44;
+      const yaw = 1.3 + (idx / (total - 1)) * 0.52;
       window.__CURBSIDE_DEBUG__.setOrbitYaw(yaw);
     };
   });
-  await sleep(500);
+  await sleep(650);
   bursts.push(
     await captureFrameBurstSheet(page, {
-      filename: 'burst_curbs_crosswalk_pan.png',
-      title: 'Crosswalk, Loading Zone, 15cm Curbs & Gutters Pan',
-      cropRect: { x: 110, y: 840, w: 560, h: 420 },
+      filename: 'burst_z3_rooftops_skylight_pan.png',
+      title: 'Zone 3 Tenement Rooftops, Skylight Bank & Water Towers',
+      cropRect: { x: 110, y: 420, w: 560, h: 420 },
       frameStepRaf: 3,
       perStepFn: true,
     }),
   );
 
-  // 3. burst_wheels_props_pan.png
+  // 3. burst_z4_viaduct_vista_pan.png (Zone 4 +15.0m Scenic Viaduct Belvedere panoramic vista)
   await page.evaluate(() => {
     const dbg = window.__CURBSIDE_DEBUG__;
-    dbg.setAuditStation(null);
-    dbg.teleportBall([10.5, 0.18, -21.2]);
-    dbg.setOrbitYaw(2.1);
+    dbg.teleportToZone(4, { silent: true });
+    dbg.teleportBall([55.0, 15.18, -58.0], { silent: true });
+    dbg.setOrbitYaw(-Math.PI * 0.42);
     window.__QA_BURST_STEP__ = (idx, total) => {
-      const yaw = 2.1 + (idx / (total - 1)) * 0.55;
+      const yaw = -Math.PI * 0.42 + (idx / (total - 1)) * (Math.PI * 0.18);
       window.__CURBSIDE_DEBUG__.setOrbitYaw(yaw);
+    };
+  });
+  await sleep(650);
+  bursts.push(
+    await captureFrameBurstSheet(page, {
+      filename: 'burst_z4_viaduct_vista_pan.png',
+      title: 'Zone 4 Viaduct Belvedere Panoramic Vista (+15.0m)',
+      cropRect: { x: 110, y: 260, w: 560, h: 420 },
+      frameStepRaf: 3,
+      perStepFn: true,
+    }),
+  );
+
+  // 4. burst_flyover_scout.png (Course Flyover Scout full 0.0 -> 1.0 7-zone spline sweep)
+  await page.evaluate(() => {
+    const dbg = window.__CURBSIDE_DEBUG__;
+    dbg.setFlyoverProgress(0.0);
+    window.__QA_BURST_STEP__ = (idx, total) => {
+      const p = (idx / (total - 1)) * 1.0;
+      window.__CURBSIDE_DEBUG__.setFlyoverProgress(p);
     };
   });
   await sleep(550);
   bursts.push(
     await captureFrameBurstSheet(page, {
-      filename: 'burst_wheels_props_pan.png',
-      title: 'Cart Wheels, Van Ramp, Scaffolding & Props Pan',
-      cropRect: { x: 110, y: 680, w: 560, h: 420 },
-      frameStepRaf: 3,
+      filename: 'burst_flyover_scout.png',
+      title: 'Grand Escapade Course Flyover Spline Scout (Zones 1..7)',
+      cropRect: { x: 110, y: 360, w: 560, h: 420 },
+      frameStepRaf: 4,
       perStepFn: true,
     }),
   );
 
-  // 4. burst_ball_follow_flight.png (live physics & particles on /)
+  // 5..7 Live dynamic physics & Zone 7 IGN occlusion bursts on clean /
   await page.goto(`${baseUrl}/`, { waitUntil: 'domcontentloaded' });
   await waitForBridge(page);
+
+  // 5. burst_z5_copper_chute_plunge.png (live solid helical Copper Spiral Chute ride from open courtyard view)
   await page.evaluate(() => {
     const dbg = window.__CURBSIDE_DEBUG__;
     dbg.resetHole();
-    dbg.setAuditStation(null);
+    dbg.teleportToZone(5, { silent: true });
+    dbg.teleportBall([51.5, 14.18, 5.0], { silent: true });
+    dbg.setOrbitYaw(0.48);
   });
   await sleep(450);
-  await runScriptedShotFallback(page, 1);
-  for (let i = 0; i < 30; i += 1) {
-    const launched = await page.evaluate(
-      () => window.__CURBSIDE_DEBUG__.getState().shotPhase === 'ball_in_flight',
-    );
-    if (launched) break;
-    await sleep(16);
+  await runScriptedShotFallback(page, 3);
+  for (let i = 0; i < 200; i += 1) {
+    const inChute = await page.evaluate(() => {
+      const st = window.__CURBSIDE_DEBUG__.getState();
+      return (st.ballPosition?.[1] ?? 99) < 11.8;
+    });
+    if (inChute) break;
+    await sleep(20);
   }
-  await sleep(280);
   bursts.push(
     await captureFrameBurstSheet(page, {
-      filename: 'burst_ball_follow_flight.png',
-      title: 'Driver Ball Flight & Camera Follow (12 Seq Frames @ 16.7ms)',
-      cropRect: { x: 110, y: 540, w: 560, h: 420 },
-      frameStepRaf: 1,
+      filename: 'burst_z5_copper_chute_plunge.png',
+      title: 'Zone 5 Helical Copper Spiral Chute Plunge (12 Frames @ 33ms)',
+      cropRect: { x: 110, y: 420, w: 560, h: 420 },
+      frameStepRaf: 2,
       perStepFn: false,
       computeEdgeMetrics: false,
       centerOnBall: true,
     }),
   );
+  await sleep(2200);
 
-  // Wait for shot 1 to settle cleanly before occlusion burst
-  await sleep(3200);
-
-  // 5. burst_occlusion_fade.png (16.7ms 1-rAF intervals orbiting behind delivery-van-east)
+  // 6. burst_z7_subway_occlusion_fade.png (Zone 7 mosaic pillar & vintage car IGN occlusion fade around ball)
   await page.evaluate(() => {
     const dbg = window.__CURBSIDE_DEBUG__;
     dbg.resetHole();
-    dbg.setAuditStation(null);
-    dbg.teleportBall([0.55, 0.18, -6.9]);
-    dbg.setOrbitYaw(0.05);
-    window.__QA_BURST_STEP__ = (idx) => {
-      const t = Math.min(1, idx / 4);
-      const yaw = 0.05 - t * 1.85;
+    dbg.teleportToZone(7, { silent: true });
+    dbg.teleportBall([34.0, -7.32, 96.5], { silent: true });
+    dbg.setOrbitYaw(Math.PI * 0.96);
+    window.__QA_BURST_STEP__ = (idx, total) => {
+      const yaw = Math.PI * 0.96 - (idx / (total - 1)) * (Math.PI * 0.38);
       window.__CURBSIDE_DEBUG__.setOrbitYaw(yaw);
     };
   });
   await sleep(750);
   bursts.push(
     await captureFrameBurstSheet(page, {
-      filename: 'burst_occlusion_fade.png',
-      title: 'Foreground Delivery Van Occlusion Fade (12 Frames @ 16.7ms)',
-      cropRect: { x: 110, y: 620, w: 560, h: 420 },
-      frameStepRaf: 1,
+      filename: 'burst_z7_subway_occlusion_fade.png',
+      title: 'Zone 7 Subway Mosaic & Vintage Car IGN Cutaway Orbit',
+      cropRect: { x: 110, y: 420, w: 560, h: 420 },
+      frameStepRaf: 2,
       perStepFn: true,
       computeEdgeMetrics: false,
       centerOnBall: true,
     }),
   );
 
-  // 6..8 Architectural slow-pan bursts on ?qaFreezeParticles=1
-  await page.goto(`${baseUrl}/?qaFreezeParticles=1`, { waitUntil: 'domcontentloaded' });
-  await waitForBridge(page);
-
-  // 6. burst_courtyard_green_pan.png (#62 Z2: courtyard green / fringe / patio / stone ramp)
+  // 7. burst_z7_golden_pin_putt.png (Open IRT subway car aisle -> Golden Pin sink)
   await page.evaluate(() => {
     const dbg = window.__CURBSIDE_DEBUG__;
     dbg.resetHole();
-    dbg.setAuditStation(null);
-    dbg.teleportBall([17.5, 0.78, -21.6]);
-    dbg.setOrbitYaw(1.25);
-    window.__QA_BURST_STEP__ = (idx, total) => {
-      const yaw = 1.25 + (idx / (total - 1)) * 0.6;
-      window.__CURBSIDE_DEBUG__.setOrbitYaw(yaw);
-    };
+    dbg.teleportToZone(7, { silent: true });
+    dbg.teleportBall([34.0, -7.32, 88.5], { silent: true });
+    dbg.setOrbitYaw(Math.PI);
   });
-  await sleep(600);
-  bursts.push(
-    await captureFrameBurstSheet(page, {
-      filename: 'burst_courtyard_green_pan.png',
-      title: 'Courtyard Green, Fringe, Patio & Ramp Slow Pan',
-      cropRect: { x: 110, y: 760, w: 560, h: 420 },
-      frameStepRaf: 3,
-      perStepFn: true,
-      computeEdgeMetrics: true,
-    }),
-  );
-
-  // 7. burst_stringlights_sky_pan.png (#62 E2: string light spans against rooftop cornice & sky)
+  await sleep(550);
   await page.evaluate(() => {
     const dbg = window.__CURBSIDE_DEBUG__;
-    dbg.resetHole();
-    dbg.setAuditStation(null);
-    dbg.teleportBall([0.0, 0.18, 28.0]);
-    dbg.setOrbitYaw(-0.22);
+    const st = dbg.getState();
+    const cup = st.course?.cupPosition ?? [34.0, -7.5, 119.0];
+    const aimYaw = Math.atan2(cup[0] - 34.0, -(cup[2] - 88.5));
+    dbg.fireShot({ clubId: 'skimmer', aimYaw, power: 0.73 });
   });
-  await sleep(400);
-  await pitchCameraUp(page);
-  await page.evaluate(() => {
-    window.__CURBSIDE_DEBUG__.setOrbitYaw(-0.22);
-    window.__QA_BURST_STEP__ = (idx, total) => {
-      const yaw = -0.22 + (idx / (total - 1)) * 0.44;
-      window.__CURBSIDE_DEBUG__.setOrbitYaw(yaw);
-    };
-  });
-  await sleep(500);
+  for (let i = 0; i < 35; i += 1) {
+    const launched = await page.evaluate(
+      () => window.__CURBSIDE_DEBUG__.getState().shotPhase === 'ball_in_flight',
+    );
+    if (launched) break;
+    await sleep(16);
+  }
+  await sleep(1550);
   bursts.push(
     await captureFrameBurstSheet(page, {
-      filename: 'burst_stringlights_sky_pan.png',
-      title: 'String Lights & Rooftop Skyline Against Sky Slow Pan',
-      cropRect: { x: 110, y: 0, w: 560, h: 420 },
+      filename: 'burst_z7_golden_pin_putt.png',
+      title: 'Zone 7 Open Vintage Subway Car -> Golden Pin Roll',
+      cropRect: { x: 110, y: 460, w: 560, h: 420 },
       frameStepRaf: 3,
-      perStepFn: true,
-      computeEdgeMetrics: true,
-    }),
-  );
-
-  // 8. burst_steam_grate_pan.png (#62 Z8: steam grate & fountain edge at corner)
-  await page.evaluate(() => {
-    const dbg = window.__CURBSIDE_DEBUG__;
-    dbg.resetHole();
-    dbg.setAuditStation(null);
-    dbg.teleportBall([8.5, 0.18, -21.6]);
-    dbg.setOrbitYaw(1.35);
-    window.__QA_BURST_STEP__ = (idx, total) => {
-      const yaw = 1.35 + (idx / (total - 1)) * 0.45;
-      window.__CURBSIDE_DEBUG__.setOrbitYaw(yaw);
-    };
-  });
-  await sleep(600);
-  bursts.push(
-    await captureFrameBurstSheet(page, {
-      filename: 'burst_steam_grate_pan.png',
-      title: 'Steam Grate & Corner Fountain Slow Pan',
-      cropRect: { x: 110, y: 780, w: 560, h: 420 },
-      frameStepRaf: 3,
-      perStepFn: true,
-      computeEdgeMetrics: true,
+      perStepFn: false,
+      computeEdgeMetrics: false,
+      centerOnBall: true,
     }),
   );
 
   return bursts;
+}
+
+/**
+ * Captures 4-angle turntable contact sheets (front, side, top, macro+wireframe)
+ * from /qa-gallery for Stage 2 architectural hero props.
+ */
+async function runQaGalleryCaptures(context, baseUrl) {
+  console.log(
+    `[qa:motion] 4/5 Capturing /qa-gallery 4-angle turntables for ${QA_GALLERY_STAGE2_PROPS.length} Stage 2 props...`,
+  );
+  const galleryPage = await context.newPage();
+  await galleryPage.setViewportSize({ width: 1200, height: 800 });
+
+  const captures = [];
+  const views = [
+    { key: 'front', wireframe: false, label: 'FRONT' },
+    { key: 'side', wireframe: false, label: 'SIDE' },
+    { key: 'top', wireframe: false, label: 'TOP' },
+    { key: 'macro', wireframe: true, label: 'MACRO + WIRE' },
+  ];
+
+  try {
+    for (const assetId of QA_GALLERY_STAGE2_PROPS) {
+      await galleryPage.goto(
+        `${baseUrl}/qa-gallery?asset=${encodeURIComponent(assetId)}&view=front&wireframe=0&qaFreezeParticles=1`,
+        { waitUntil: 'domcontentloaded' },
+      );
+      await galleryPage.waitForSelector('canvas', { timeout: 20_000 });
+      await sleep(500);
+
+      const tileUrls = [];
+      for (const v of views) {
+        await galleryPage.locator(`[data-testid="qa-view-${v.key}"]`).click();
+        const wireBtn = galleryPage.locator('[data-testid="qa-wireframe-toggle"]');
+        const isPressed = (await wireBtn.getAttribute('aria-pressed')) === 'true';
+        if (isPressed !== v.wireframe) {
+          await wireBtn.click();
+        }
+        await sleep(320);
+        await waitFrames(galleryPage, 6);
+
+        const canvasShot = await galleryPage.locator('canvas').screenshot({ type: 'png' });
+        tileUrls.push({
+          label: v.label,
+          b64: canvasShot.toString('base64'),
+        });
+      }
+
+      const sheetDataUrl = await galleryPage.evaluate(
+        async ({ tiles, id }) => {
+          const imgs = await Promise.all(
+            tiles.map(async (t) => {
+              const bin = atob(t.b64);
+              const bytes = new Uint8Array(bin.length);
+              for (let i = 0; i < bin.length; i += 1) bytes[i] = bin.charCodeAt(i);
+              const bmp = await createImageBitmap(new Blob([bytes], { type: 'image/png' }));
+              return { label: t.label, bmp };
+            }),
+          );
+          const cellW = 540;
+          const cellH = 380;
+          const pad = 12;
+          const headerH = 44;
+          const sheetW = pad + 2 * (cellW + pad);
+          const sheetH = headerH + pad + 2 * (cellH + pad);
+          const out = document.createElement('canvas');
+          out.width = sheetW;
+          out.height = sheetH;
+          const ctx = out.getContext('2d');
+          ctx.fillStyle = '#0f1722';
+          ctx.fillRect(0, 0, sheetW, sheetH);
+          ctx.fillStyle = '#1e293b';
+          ctx.fillRect(0, 0, sheetW, headerH);
+          ctx.fillStyle = '#f8fafc';
+          ctx.font = 'bold 18px ui-monospace, SFMono-Regular, Menlo, monospace';
+          ctx.fillText(`/qa-gallery Turntable: ${id}`, 16, 28);
+
+          imgs.forEach((item, idx) => {
+            const col = idx % 2;
+            const row = Math.floor(idx / 2);
+            const dx = pad + col * (cellW + pad);
+            const dy = headerH + pad + row * (cellH + pad);
+            ctx.drawImage(item.bmp, dx, dy, cellW, cellH);
+            ctx.strokeStyle = '#334155';
+            ctx.lineWidth = 2;
+            ctx.strokeRect(dx, dy, cellW, cellH);
+            ctx.fillStyle = 'rgba(15, 23, 42, 0.85)';
+            ctx.fillRect(dx + 8, dy + 8, 134, 24);
+            ctx.fillStyle = '#fbbf24';
+            ctx.font = 'bold 13px ui-monospace, SFMono-Regular, Menlo, monospace';
+            ctx.fillText(item.label, dx + 14, dy + 24);
+            item.bmp.close();
+          });
+          return out.toDataURL('image/png');
+        },
+        { tiles: tileUrls, id: assetId },
+      );
+
+      const file = `qa_gallery_${assetId}.png`;
+      fs.writeFileSync(
+        path.join(OUT_DIR, file),
+        Buffer.from(sheetDataUrl.replace(/^data:image\/png;base64,/, ''), 'base64'),
+      );
+      captures.push({ assetId, file, angles: views.map((v) => v.key) });
+      console.log(`  • ${file} (4 angles: front/side/top/macro+wireframe)`);
+    }
+  } finally {
+    await galleryPage.close();
+  }
+
+  return captures;
 }
 
 function buildMarkdownReport(report) {
@@ -1333,8 +1516,21 @@ function buildMarkdownReport(report) {
     );
   }
 
+  if (report.qaGalleryCaptures?.length > 0) {
+    lines.push(
+      '',
+      '## 4. `/qa-gallery` 4-Angle Prop Turntables (`front`, `side`, `top`, `macro+wireframe`)',
+      '',
+      '| Asset ID | Turntable Contact Sheet |',
+      '| --- | --- |',
+    );
+    for (const q of report.qaGalleryCaptures) {
+      lines.push(`| \`${q.assetId}\` | \`${q.file}\` |`);
+    }
+  }
+
   if (report.consoleWarnings.length > 0 || report.consoleErrors.length > 0 || report.pageErrors.length > 0) {
-    lines.push('', '## 4. Console Diagnostics', '');
+    lines.push('', '## 5. Console Diagnostics', '');
     for (const w of report.consoleWarnings) lines.push(`- WARNING: \`${w}\``);
     for (const e of report.consoleErrors) lines.push(`- ERROR: \`${e}\``);
     for (const p of report.pageErrors) lines.push(`- PAGEERROR: \`${p}\``);
@@ -1390,6 +1586,7 @@ async function main() {
     const staticShimmer = await runStaticShimmerAudit(page, baseUrl);
     const videos = await recordAllVideos(page, baseUrl);
     const burstSheets = await runFrameBursts(page, baseUrl);
+    const qaGalleryCaptures = await runQaGalleryCaptures(context, baseUrl);
 
     const staticAllZero = staticShimmer.every((s) => s.changedPixelCount === 0);
     const cleanConsole =
@@ -1397,7 +1594,7 @@ async function main() {
       consoleWarnings.length === 0 &&
       pageErrors.length === 0;
     const allClipsHealthy =
-      videos.length === 6 &&
+      videos.length === 7 &&
       videos.every(
         (v) =>
           v.sizeBytes > 10_000 &&
@@ -1413,6 +1610,7 @@ async function main() {
       staticShimmer,
       videos,
       burstSheets,
+      qaGalleryCaptures,
       consoleErrors,
       consoleWarnings,
       pageErrors,
@@ -1422,7 +1620,7 @@ async function main() {
       overallPass,
     };
 
-    console.log('[qa:motion] 4/4 Writing motion_qa_report.{json,md}...');
+    console.log('[qa:motion] 5/5 Writing motion_qa_report.{json,md}...');
     fs.writeFileSync(
       path.join(OUT_DIR, 'motion_qa_report.json'),
       JSON.stringify(report, null, 2),

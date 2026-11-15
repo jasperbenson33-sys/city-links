@@ -4,6 +4,29 @@ import React, { useEffect, useMemo, useRef } from 'react';
 import { useFrame, useThree } from '@react-three/fiber';
 import * as THREE from 'three';
 import { TOYBOX_MATERIALS } from '@/materials';
+import { useCurbsideStore } from '@/store/useCurbsideStore';
+import type {
+  CourseId,
+  CourseMasterPlan,
+  SubwayVaultEnclosureSpec,
+  Vec3Tuple,
+} from '@/types';
+import {
+  ESCAPADE_FLYOVER_SHADOW_HALF_SPAN,
+  ESCAPADE_FLYOVER_SHADOW_TEXEL_METERS,
+  ESCAPADE_FLYOVER_STATIC_ANCHOR,
+  ESCAPADE_SHADOW_FAR,
+  ESCAPADE_SHADOW_HALF_SPAN,
+  ESCAPADE_SHADOW_HYSTERESIS_METERS,
+  ESCAPADE_SHADOW_MAP_SIZE,
+  ESCAPADE_SHADOW_NEAR,
+  ESCAPADE_SUN_OFFSET,
+  SubterraneanLightingRig,
+  computeSubterraneanBlend,
+  computeSunLightBasis,
+  snapWorldAnchorToShadowTexelGrid,
+  type SubterraneanLightingHandle,
+} from './lighting';
 import { resolveAnimTime } from './qaFreeze';
 
 interface CloudSpec {
@@ -16,8 +39,8 @@ interface CloudSpec {
 }
 
 /**
- * The game camera far plane is 185m (tight depth range = zero z-fight), so the cloud bank is pulled in
- * by `CLOUD_RANGE_SCALE` (positions AND sizes scale together, preserving the exact same sky silhouette).
+ * Cloud bank range scale so drifting clouds ride inside the camera far plane
+ * while preserving their Walkabout-style silhouette proportions.
  */
 const CLOUD_RANGE_SCALE = 0.62;
 
@@ -36,15 +59,17 @@ const CLOUD_SPECS: CloudSpec[] = [
   scale: c.scale * CLOUD_RANGE_SCALE,
 }));
 
-/** Sky dome radius (< camera far 185) — the dome follows the camera so it can never be clipped. */
+/** Sky dome radius (< camera far) — rides on cameraPosition in vertex shader so it can never be clipped. */
 const SKY_DOME_RADIUS = 150;
 
 /** Shared horizon/fog hex so sky dome horizon, WebGL clear color, and distance fog match to 0 LSBs. */
 const HORIZON_MIST_HEX = '#F5DEC2';
+const SUBWAY_BG_HEX = '#3A2B1F';
+const SUBWAY_FOG_HEX = '#4A3626';
 
 /**
- * Static, tightly fitted sun-shadow volume for Hole 1 (5th & Mercer corridor + courtyard + perimeter
- * rooftops `x: -15.5..41.5, z: -38.5..45.0, y: 0..18.2`), eliminating dead margin for ~2.5cm shadow texels.
+ * Static, tightly fitted sun-shadow volume for Classic Hole 1 (5th & Mercer corridor + courtyard +
+ * perimeter rooftops `x: -15.5..41.5, z: -38.5..45.0, y: 0..18.2`), ~2.5cm shadow texels.
  */
 const SHADOW_FIT_BOX = {
   minX: -16.5,
@@ -55,49 +80,143 @@ const SHADOW_FIT_BOX = {
   maxY: 18.5,
 };
 
+const COLOR_SURF_BG = new THREE.Color(HORIZON_MIST_HEX);
+const COLOR_SUB_BG = new THREE.Color(SUBWAY_BG_HEX);
+const COLOR_SURF_FOG = new THREE.Color(HORIZON_MIST_HEX);
+const COLOR_SUB_FOG = new THREE.Color(SUBWAY_FOG_HEX);
+
+const COLOR_SURF_SUN = new THREE.Color('#FFE5BA');
+const COLOR_SUB_SUN = new THREE.Color('#FFD18B');
+
+const COLOR_SURF_HEMI_SKY = new THREE.Color('#C8E4FF');
+const COLOR_SUB_HEMI_SKY = new THREE.Color('#FFE0B2');
+const COLOR_SURF_HEMI_GND = new THREE.Color('#EFAF7B');
+const COLOR_SUB_HEMI_GND = new THREE.Color('#9E6B43');
+
+const COLOR_SURF_AMB = new THREE.Color('#FFF6E6');
+const COLOR_SUB_AMB = new THREE.Color('#FFE6C2');
+
+const COLOR_SURF_RIM = new THREE.Color('#C9DFFF');
+const COLOR_SUB_RIM = new THREE.Color('#FFD79A');
+
+const COLOR_SKY_TOP = new THREE.Color('#53A6E5');
+const COLOR_SKY_MID = new THREE.Color('#9FD5F5');
+const COLOR_SKY_WARM_MIST = new THREE.Color('#F2CCA0');
+const COLOR_SKY_BOTTOM = new THREE.Color('#E5BA8C');
+
 export interface LightingAndSkyProps {
   /** Show golden-hour sky dome, atmospheric perspective, and drifting clouds. False for isolated QA studio. */
   showHorizon?: boolean;
   /**
    * Sun shadow frustum half-extent override (isolated QA turntable uses 12). When omitted on the
-   * full street, a static frustum is fitted tightly around the playable corridor + courtyard.
+   * full course, `'classic'` uses its static 4096² fit and `'grand-escapade'` uses its 2048²
+   * texel-snapped following shadow frustum (`±48m`, `0.046875m` exact texel step).
    */
   shadowSpan?: number;
-  /** World-space focus point for the directional sun shadow frustum. */
+  /** World-space focus point for the directional sun shadow frustum (used in isolated QA / classic). */
   shadowTarget?: [number, number, number];
+  /** Explicit course selector override; auto-resolves from `plan` or `useCurbsideStore` when omitted. */
+  courseId?: CourseId;
+  /** Optional master plan reference for automatic `'classic'` vs `'grand-escapade'` detection. */
+  plan?: CourseMasterPlan;
+  /** Optional live ball position tuple override. */
+  ballPosition?: Vec3Tuple;
+  /** Optional live ball Vector3 ref for zero-allocation tracking. */
+  ballPositionRef?: React.RefObject<THREE.Vector3 | null>;
+  /** Optional subterranean subway station vault spec override for light shafts & sconces. */
+  subwayVault?: SubwayVaultEnclosureSpec;
+  /** Render Zone 7 volumetric sidewalk-grate light shafts & sconce halos (default true). */
+  includeLightShafts?: boolean;
 }
 
 export const LightingAndSky = React.memo(function LightingAndSky({
   showHorizon = true,
   shadowSpan,
   shadowTarget,
+  courseId,
+  plan,
+  ballPosition,
+  ballPositionRef,
+  subwayVault,
+  includeLightShafts = true,
 }: LightingAndSkyProps) {
+  const storeCourseId = useCurbsideStore((s) => s.courseId);
+  const effectiveCourseId: CourseId =
+    courseId ??
+    plan?.courseId ??
+    (plan?.holeId === 'hole-1-5th-and-mercer' ? 'classic' : storeCourseId);
+
+  const isFullCourse = showHorizon && shadowSpan === undefined;
+  const isClassicCourse = isFullCourse && effectiveCourseId === 'classic';
+  const isEscapadeCourse =
+    isFullCourse && effectiveCourseId === 'grand-escapade';
+
+  const bgColorRef = useRef<THREE.Color>(null);
+  const fogRef = useRef<THREE.Fog>(null);
+  const sunLightRef = useRef<THREE.DirectionalLight>(null);
+  const hemiLightRef = useRef<THREE.HemisphereLight>(null);
+  const ambientLightRef = useRef<THREE.AmbientLight>(null);
+  const rimLightRef = useRef<THREE.DirectionalLight>(null);
+  const skyDomeMeshRef = useRef<THREE.Mesh>(null);
   const cloudsGroupRef = useRef<THREE.Group>(null);
+  const subterraneanRigRef = useRef<SubterraneanLightingHandle>(null);
+
   const elapsedRef = useRef(0);
   const shadowBakeRemainingRef = useRef(5);
+  const hasSnappedOnceRef = useRef(false);
+  const wasFlyoverModeRef = useRef(false);
+  const lastCommittedRawAnchorRef = useRef<Vec3Tuple>([0, 0, 31]);
+  const lastTexelKeyRef = useRef('');
+  const lastAppliedSubBlendRef = useRef(-1);
+
   const gl = useThree((s) => s.gl);
 
   const resolvedSpan = shadowSpan ?? 12;
   const resolvedTarget: [number, number, number] =
     shadowTarget ?? (showHorizon ? [9, 0, 2] : [0, 0, 0]);
 
-  const sunOffset: [number, number, number] = showHorizon
+  const classicOrStudioSunOffset: [number, number, number] = showHorizon
     ? [-16, 46, 14]
     : [-10, 22, 12];
 
-  const sunPos: [number, number, number] = [
-    resolvedTarget[0] + sunOffset[0],
-    resolvedTarget[1] + sunOffset[1],
-    resolvedTarget[2] + sunOffset[2],
-  ];
+  const escapadeSunBasis = useMemo(
+    () => computeSunLightBasis(ESCAPADE_SUN_OFFSET),
+    [],
+  );
 
-  const useFittedFrustum = showHorizon && shadowSpan === undefined;
-  const shadowMapSize: [number, number] = useFittedFrustum ? [4096, 4096] : [2048, 2048];
+  const initialEscapadeSnap = useMemo(() => {
+    const startBall = useCurbsideStore.getState().ballPosition ?? [0, 0, 31];
+    return snapWorldAnchorToShadowTexelGrid(startBall, escapadeSunBasis);
+  }, [escapadeSunBasis]);
 
-  /** Static light-space extents (never changes frame-to-frame, so shadow texels cannot swim). */
-  const fitted = useMemo(() => {
-    const eye = new THREE.Vector3(sunPos[0], sunPos[1], sunPos[2]);
-    const tgt = new THREE.Vector3(resolvedTarget[0], resolvedTarget[1], resolvedTarget[2]);
+  const initialSunPos: [number, number, number] = isEscapadeCourse
+    ? initialEscapadeSnap.sunPosition
+    : [
+        resolvedTarget[0] + classicOrStudioSunOffset[0],
+        resolvedTarget[1] + classicOrStudioSunOffset[1],
+        resolvedTarget[2] + classicOrStudioSunOffset[2],
+      ];
+
+  const initialTargetPos: [number, number, number] = isEscapadeCourse
+    ? initialEscapadeSnap.target
+    : resolvedTarget;
+
+  const shadowMapSize: [number, number] = isClassicCourse
+    ? [4096, 4096]
+    : [ESCAPADE_SHADOW_MAP_SIZE, ESCAPADE_SHADOW_MAP_SIZE];
+
+  /** Static light-space extents for Classic Hole 1 (`SHADOW_FIT_BOX`). */
+  const fittedClassic = useMemo(() => {
+    const eye = new THREE.Vector3(
+      resolvedTarget[0] + classicOrStudioSunOffset[0],
+      resolvedTarget[1] + classicOrStudioSunOffset[1],
+      resolvedTarget[2] + classicOrStudioSunOffset[2],
+    );
+    const tgt = new THREE.Vector3(
+      resolvedTarget[0],
+      resolvedTarget[1],
+      resolvedTarget[2],
+    );
     const zAxis = eye.clone().sub(tgt).normalize();
     const xAxis = new THREE.Vector3(0, 1, 0).cross(zAxis).normalize();
     const yAxis = zAxis.clone().cross(xAxis).normalize();
@@ -134,42 +253,91 @@ export const LightingAndSky = React.memo(function LightingAndSky({
       far: Math.ceil(maxDepth + 5),
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [sunPos[0], sunPos[1], sunPos[2], resolvedTarget[0], resolvedTarget[1], resolvedTarget[2]]);
+  }, [
+    classicOrStudioSunOffset[0],
+    classicOrStudioSunOffset[1],
+    classicOrStudioSunOffset[2],
+    resolvedTarget[0],
+    resolvedTarget[1],
+    resolvedTarget[2],
+  ]);
 
-  const shadowLeft = useFittedFrustum ? fitted.left : -resolvedSpan;
-  const shadowRight = useFittedFrustum ? fitted.right : resolvedSpan;
-  const shadowTop = useFittedFrustum ? fitted.top : resolvedSpan;
-  const shadowBottom = useFittedFrustum ? fitted.bottom : -resolvedSpan;
-  const shadowNear = useFittedFrustum ? fitted.near : 2;
-  const shadowFar = useFittedFrustum ? fitted.far : 90;
+  const shadowLeft = isEscapadeCourse
+    ? -ESCAPADE_SHADOW_HALF_SPAN
+    : isClassicCourse
+      ? fittedClassic.left
+      : -resolvedSpan;
+  const shadowRight = isEscapadeCourse
+    ? ESCAPADE_SHADOW_HALF_SPAN
+    : isClassicCourse
+      ? fittedClassic.right
+      : resolvedSpan;
+  const shadowTop = isEscapadeCourse
+    ? ESCAPADE_SHADOW_HALF_SPAN
+    : isClassicCourse
+      ? fittedClassic.top
+      : resolvedSpan;
+  const shadowBottom = isEscapadeCourse
+    ? -ESCAPADE_SHADOW_HALF_SPAN
+    : isClassicCourse
+      ? fittedClassic.bottom
+      : -resolvedSpan;
+  const shadowNear = isEscapadeCourse
+    ? ESCAPADE_SHADOW_NEAR
+    : isClassicCourse
+      ? fittedClassic.near
+      : 2;
+  const shadowFar = isEscapadeCourse
+    ? ESCAPADE_SHADOW_FAR
+    : isClassicCourse
+      ? fittedClassic.far
+      : 90;
 
   const lightTargetObj = useMemo(() => new THREE.Object3D(), []);
   useEffect(() => {
     lightTargetObj.position.set(
-      resolvedTarget[0],
-      resolvedTarget[1],
-      resolvedTarget[2],
+      initialTargetPos[0],
+      initialTargetPos[1],
+      initialTargetPos[2],
     );
     lightTargetObj.updateMatrixWorld();
-  }, [lightTargetObj, resolvedTarget[0], resolvedTarget[1], resolvedTarget[2]]);
+    if (isEscapadeCourse) {
+      hasSnappedOnceRef.current = false;
+      lastTexelKeyRef.current = '';
+      lastAppliedSubBlendRef.current = -1;
+    }
+  }, [
+    isEscapadeCourse,
+    lightTargetObj,
+    initialTargetPos[0],
+    initialTargetPos[1],
+    initialTargetPos[2],
+  ]);
 
-  // Bake static 4096x4096 sun shadow map for 5 initial frames after mount, then permanently lock
-  // autoUpdate = false for the session (never watching scene.children.length, so dynamic HUD/arc
-  // state transitions never trigger mid-gameplay shadow rebake hitches).
+  // Bake sun shadow map for 5 initial frames after mount/course-switch, then lock `autoUpdate = false`
+  // so steady-state frames pay 0.0ms shadow pass cost until a hysteresis step requests a 1-frame bake.
   useEffect(() => {
-    if (!useFittedFrustum) {
+    if (!isFullCourse) {
       gl.shadowMap.autoUpdate = true;
       gl.shadowMap.needsUpdate = true;
       return;
     }
     shadowBakeRemainingRef.current = 5;
-    gl.shadowMap.autoUpdate = true;
+    gl.shadowMap.autoUpdate = false;
     gl.shadowMap.needsUpdate = true;
     return () => {
       gl.shadowMap.autoUpdate = true;
       gl.shadowMap.needsUpdate = true;
     };
-  }, [gl, useFittedFrustum, shadowLeft, shadowRight, shadowTop, shadowBottom]);
+  }, [
+    gl,
+    isFullCourse,
+    effectiveCourseId,
+    shadowLeft,
+    shadowRight,
+    shadowTop,
+    shadowBottom,
+  ]);
 
   const skyDomeMaterial = useMemo(() => {
     return new THREE.ShaderMaterial({
@@ -178,19 +346,19 @@ export const LightingAndSky = React.memo(function LightingAndSky({
       fog: false,
       toneMapped: false,
       uniforms: {
-        uTopColor: { value: new THREE.Color('#53A6E5') },
-        uMidColor: { value: new THREE.Color('#9FD5F5') },
-        uHorizonColor: { value: new THREE.Color(HORIZON_MIST_HEX) },
-        uWarmMistColor: { value: new THREE.Color('#F2CCA0') },
-        uBottomColor: { value: new THREE.Color('#E5BA8C') },
+        uTopColor: { value: COLOR_SKY_TOP.clone() },
+        uMidColor: { value: COLOR_SKY_MID.clone() },
+        uHorizonColor: { value: COLOR_SURF_BG.clone() },
+        uWarmMistColor: { value: COLOR_SKY_WARM_MIST.clone() },
+        uBottomColor: { value: COLOR_SKY_BOTTOM.clone() },
         uSunDir: { value: new THREE.Vector3(-0.48, 0.42, 0.42).normalize() },
         uSunGlowColor: { value: new THREE.Color('#FFE9B8') },
+        uSunGlowScale: { value: 1.0 },
       },
       vertexShader: /* glsl */ `
         varying vec3 vWorldDir;
         void main() {
-          // Dome rides on the camera inside the shader (cameraPosition is current at draw time:
-          // zero frame lag, never clipped by the 185m far plane).
+          // Dome rides on cameraPosition inside the shader (zero frame lag, never clipped by far plane).
           vWorldDir = normalize(position);
           vec4 worldPos = vec4(position + cameraPosition, 1.0);
           gl_Position = projectionMatrix * viewMatrix * worldPos;
@@ -204,6 +372,7 @@ export const LightingAndSky = React.memo(function LightingAndSky({
         uniform vec3 uBottomColor;
         uniform vec3 uSunDir;
         uniform vec3 uSunGlowColor;
+        uniform float uSunGlowScale;
         varying vec3 vWorldDir;
 
         void main() {
@@ -221,7 +390,7 @@ export const LightingAndSky = React.memo(function LightingAndSky({
           }
 
           float sunAmt = max(dot(dir, uSunDir), 0.0);
-          vec3 sunHalo = uSunGlowColor * (pow(sunAmt, 10.0) * 0.18 + pow(sunAmt, 72.0) * 0.28);
+          vec3 sunHalo = uSunGlowColor * uSunGlowScale * (pow(sunAmt, 10.0) * 0.18 + pow(sunAmt, 72.0) * 0.28);
           col = col + sunHalo * (1.0 - col * 0.35);
 
           gl_FragColor = vec4(clamp(col, 0.0, 1.0), 1.0);
@@ -238,22 +407,266 @@ export const LightingAndSky = React.memo(function LightingAndSky({
   }, [skyDomeMaterial]);
 
   useFrame(({ camera, gl: frameGl, scene }, delta) => {
-    if (useFittedFrustum) {
-      if (shadowBakeRemainingRef.current > 0) {
-        if (scene.children.length > 0) {
-          frameGl.shadowMap.autoUpdate = true;
-          frameGl.shadowMap.needsUpdate = true;
-          shadowBakeRemainingRef.current -= 1;
+    if (isEscapadeCourse) {
+      const storeState = useCurbsideStore.getState();
+      const refVec = ballPositionRef?.current;
+      const liveBall: Vec3Tuple = refVec
+        ? [refVec.x, refVec.y, refVec.z]
+        : (ballPosition ?? storeState.ballPosition);
+
+      const camTuple: Vec3Tuple = [
+        camera.position.x,
+        camera.position.y,
+        camera.position.z,
+      ];
+      const dxCamBall = camTuple[0] - liveBall[0];
+      const dyCamBall = camTuple[1] - liveBall[1];
+      const dzCamBall = camTuple[2] - liveBall[2];
+      const camBallDist = Math.hypot(dxCamBall, dyCamBall, dzCamBall);
+
+      // Subterranean crossfade: combines camera position (so 1-Tap Flyover crossfades smoothly even
+      // while the golf ball rests on Zone 1 Tee) with local ball position when camera is following.
+      const camSubBlend = computeSubterraneanBlend(camTuple);
+      const ballSubBlend =
+        camBallDist < 20.0 ? computeSubterraneanBlend(liveBall) : 0;
+      const subBlend = Math.max(camSubBlend, ballSubBlend);
+
+      if (Math.abs(subBlend - lastAppliedSubBlendRef.current) > 1e-4) {
+        lastAppliedSubBlendRef.current = subBlend;
+
+        if (bgColorRef.current) {
+          bgColorRef.current.lerpColors(COLOR_SURF_BG, COLOR_SUB_BG, subBlend);
         }
-      } else if (frameGl.shadowMap.autoUpdate) {
+        if (fogRef.current) {
+          fogRef.current.color.lerpColors(
+            COLOR_SURF_FOG,
+            COLOR_SUB_FOG,
+            subBlend,
+          );
+          fogRef.current.near = 135 + (48 - 135) * subBlend;
+          fogRef.current.far = 328 + (128 - 328) * subBlend;
+        }
+        if (sunLightRef.current) {
+          sunLightRef.current.color.lerpColors(
+            COLOR_SURF_SUN,
+            COLOR_SUB_SUN,
+            subBlend,
+          );
+          sunLightRef.current.intensity = 2.35 + (0.42 - 2.35) * subBlend;
+        }
+        if (hemiLightRef.current) {
+          hemiLightRef.current.color.lerpColors(
+            COLOR_SURF_HEMI_SKY,
+            COLOR_SUB_HEMI_SKY,
+            subBlend,
+          );
+          hemiLightRef.current.groundColor.lerpColors(
+            COLOR_SURF_HEMI_GND,
+            COLOR_SUB_HEMI_GND,
+            subBlend,
+          );
+          hemiLightRef.current.intensity = 0.98 + (0.94 - 0.98) * subBlend;
+        }
+        if (ambientLightRef.current) {
+          ambientLightRef.current.color.lerpColors(
+            COLOR_SURF_AMB,
+            COLOR_SUB_AMB,
+            subBlend,
+          );
+          ambientLightRef.current.intensity = 0.35 + (0.48 - 0.35) * subBlend;
+        }
+        if (rimLightRef.current) {
+          rimLightRef.current.color.lerpColors(
+            COLOR_SURF_RIM,
+            COLOR_SUB_RIM,
+            subBlend,
+          );
+          rimLightRef.current.intensity = 0.48 + (0.58 - 0.48) * subBlend;
+        }
+
+        // Sync sky dome horizon uniforms with fog color so stairwell descent has 0 LSB horizon seam
+        skyDomeMaterial.uniforms.uTopColor.value.lerpColors(
+          COLOR_SKY_TOP,
+          COLOR_SUB_BG,
+          subBlend,
+        );
+        skyDomeMaterial.uniforms.uMidColor.value.lerpColors(
+          COLOR_SKY_MID,
+          COLOR_SUB_BG,
+          subBlend,
+        );
+        skyDomeMaterial.uniforms.uHorizonColor.value.lerpColors(
+          COLOR_SURF_BG,
+          COLOR_SUB_BG,
+          subBlend,
+        );
+        skyDomeMaterial.uniforms.uWarmMistColor.value.lerpColors(
+          COLOR_SKY_WARM_MIST,
+          COLOR_SUB_BG,
+          subBlend,
+        );
+        skyDomeMaterial.uniforms.uBottomColor.value.lerpColors(
+          COLOR_SKY_BOTTOM,
+          COLOR_SUB_BG,
+          subBlend,
+        );
+        skyDomeMaterial.uniforms.uSunGlowScale.value = 1 - subBlend;
+
+        if (skyDomeMeshRef.current) {
+          skyDomeMeshRef.current.visible = subBlend < 0.97;
+        }
+
+        subterraneanRigRef.current?.applyBlend(subBlend);
+      }
+
+      subterraneanRigRef.current?.tickWarmup();
+
+      const isFlyoverMode = Boolean(
+        storeState.isCourseFlyoverActive || storeState.flyoverProgress !== null,
+      );
+
+      // During 1-Tap Course Flyover Scout, lock a single static aerial shadow frustum (±92m)
+      // covering all surface Zones 1..6 so 0 shadow rebakes occur mid-flight (0 >25ms frame spikes).
+      if (isFlyoverMode && sunLightRef.current) {
+        if (!wasFlyoverModeRef.current) {
+          wasFlyoverModeRef.current = true;
+          const sun = sunLightRef.current;
+          const cam = sun.shadow.camera;
+          cam.left = -ESCAPADE_FLYOVER_SHADOW_HALF_SPAN;
+          cam.right = ESCAPADE_FLYOVER_SHADOW_HALF_SPAN;
+          cam.top = ESCAPADE_FLYOVER_SHADOW_HALF_SPAN;
+          cam.bottom = -ESCAPADE_FLYOVER_SHADOW_HALF_SPAN;
+          cam.updateProjectionMatrix();
+
+          const snappedAerial = snapWorldAnchorToShadowTexelGrid(
+            ESCAPADE_FLYOVER_STATIC_ANCHOR,
+            escapadeSunBasis,
+            ESCAPADE_FLYOVER_SHADOW_TEXEL_METERS,
+          );
+          lastTexelKeyRef.current = `flyover:${snappedAerial.texelKey}`;
+          lightTargetObj.position.set(
+            snappedAerial.target[0],
+            snappedAerial.target[1],
+            snappedAerial.target[2],
+          );
+          lightTargetObj.updateMatrixWorld(true);
+          sun.position.set(
+            snappedAerial.sunPosition[0],
+            snappedAerial.sunPosition[1],
+            snappedAerial.sunPosition[2],
+          );
+          sun.updateMatrixWorld(true);
+          cam.updateMatrixWorld(true);
+
+          shadowBakeRemainingRef.current = Math.max(
+            shadowBakeRemainingRef.current,
+            1,
+          );
+        }
+      } else if (sunLightRef.current) {
+        const exitingFlyover = wasFlyoverModeRef.current;
+        if (exitingFlyover) {
+          wasFlyoverModeRef.current = false;
+          const cam = sunLightRef.current.shadow.camera;
+          cam.left = -ESCAPADE_SHADOW_HALF_SPAN;
+          cam.right = ESCAPADE_SHADOW_HALF_SPAN;
+          cam.top = ESCAPADE_SHADOW_HALF_SPAN;
+          cam.bottom = -ESCAPADE_SHADOW_HALF_SPAN;
+          cam.updateProjectionMatrix();
+        }
+
+        // Texel-snapped following shadow frustum (±48m, 4.68cm texels, 12.0m hysteresis deadband)
+        if (subBlend < 0.98 || exitingFlyover) {
+          const focusAnchor: Vec3Tuple =
+            camBallDist > 26.0
+              ? [camTuple[0], camTuple[1] - 3.0, camTuple[2]]
+              : liveBall;
+
+          const prevAnchor = lastCommittedRawAnchorRef.current;
+          const jumpDist = Math.hypot(
+            focusAnchor[0] - prevAnchor[0],
+            focusAnchor[1] - prevAnchor[1],
+            focusAnchor[2] - prevAnchor[2],
+          );
+
+          if (
+            !hasSnappedOnceRef.current ||
+            exitingFlyover ||
+            jumpDist >= ESCAPADE_SHADOW_HYSTERESIS_METERS
+          ) {
+            const snapped = snapWorldAnchorToShadowTexelGrid(
+              focusAnchor,
+              escapadeSunBasis,
+            );
+            const wasInitial = !hasSnappedOnceRef.current;
+            hasSnappedOnceRef.current = true;
+            lastCommittedRawAnchorRef.current = [
+              focusAnchor[0],
+              focusAnchor[1],
+              focusAnchor[2],
+            ];
+
+            if (snapped.texelKey !== lastTexelKeyRef.current) {
+              lastTexelKeyRef.current = snapped.texelKey;
+              lightTargetObj.position.set(
+                snapped.target[0],
+                snapped.target[1],
+                snapped.target[2],
+              );
+              lightTargetObj.updateMatrixWorld(true);
+
+              const sun = sunLightRef.current;
+              sun.position.set(
+                snapped.sunPosition[0],
+                snapped.sunPosition[1],
+                snapped.sunPosition[2],
+              );
+              sun.updateMatrixWorld(true);
+              sun.shadow.camera.updateMatrixWorld(true);
+
+              if (rimLightRef.current) {
+                rimLightRef.current.position.set(
+                  snapped.target[0] + 34,
+                  snapped.target[1] + 24,
+                  snapped.target[2] - 28,
+                );
+                rimLightRef.current.updateMatrixWorld(true);
+              }
+
+              shadowBakeRemainingRef.current = Math.max(
+                shadowBakeRemainingRef.current,
+                wasInitial ? 2 : 1,
+              );
+            }
+          }
+        }
+      }
+    }
+
+    if (isFullCourse) {
+      if (frameGl.shadowMap.autoUpdate) {
         frameGl.shadowMap.autoUpdate = false;
+      }
+      if (shadowBakeRemainingRef.current > 0 && scene.children.length > 0) {
+        frameGl.shadowMap.needsUpdate = true;
+        shadowBakeRemainingRef.current -= 1;
       }
     }
 
     const group = cloudsGroupRef.current;
     if (!group || !showHorizon) return;
-    // Cloud bank rides with the camera (XZ) so every cloud stays <= ~115m away: never clipped by far=185.
-    group.position.set(camera.position.x, 0, camera.position.z);
+
+    if (isEscapadeCourse) {
+      group.visible = lastAppliedSubBlendRef.current < 0.9;
+      if (!group.visible) return;
+      // Elevate cloud bank by +26.5m on Grand Escapade (`y = 43.9..50.1m`) so clouds float
+      // visibly in the open golden-hour sky above the +31..+35m stepped perimeter skyline.
+      group.position.set(camera.position.x, 26.5, camera.position.z);
+    } else {
+      group.visible = true;
+      group.position.set(camera.position.x, 0, camera.position.z);
+    }
+
     elapsedRef.current += Math.min(delta, 0.1);
     // `?qaFreezeParticles=1` pins the cloud clock to t = 4.0 for 0.00% stationary pixel delta.
     const t = resolveAnimTime(elapsedRef.current);
@@ -268,48 +681,79 @@ export const LightingAndSky = React.memo(function LightingAndSky({
     }
   });
 
+  const initialFogNear = isEscapadeCourse ? 135 : 95;
+  const initialFogFar = isEscapadeCourse ? 328 : 176;
+
   return (
     <group name="curbside-lighting-and-sky">
-      <color attach="background" args={[showHorizon ? HORIZON_MIST_HEX : '#F4EFE6']} />
-      {showHorizon && <fog attach="fog" args={[HORIZON_MIST_HEX, 95, 176]} />}
+      <color
+        ref={bgColorRef}
+        attach="background"
+        args={[showHorizon ? HORIZON_MIST_HEX : '#F4EFE6']}
+      />
+      {showHorizon && (
+        <fog
+          ref={fogRef}
+          attach="fog"
+          args={[HORIZON_MIST_HEX, initialFogNear, initialFogFar]}
+        />
+      )}
 
       <primitive object={lightTargetObj} />
 
       {/* Late-Afternoon Walkabout: Venice Golden-Hour Directional Sun */}
       <directionalLight
+        ref={sunLightRef}
         castShadow
-        position={sunPos}
+        position={initialSunPos}
         target={lightTargetObj}
         intensity={2.35}
         color="#FFE5BA"
         shadow-mapSize={shadowMapSize}
-        shadow-radius={1.65}
+        shadow-radius={isEscapadeCourse ? 1.55 : 1.65}
         shadow-camera-left={shadowLeft}
         shadow-camera-right={shadowRight}
         shadow-camera-top={shadowTop}
         shadow-camera-bottom={shadowBottom}
         shadow-camera-near={shadowNear}
         shadow-camera-far={shadowFar}
-        shadow-bias={-0.00018}
-        shadow-normalBias={0.022}
+        shadow-bias={isEscapadeCourse ? -0.0002 : -0.00018}
+        shadow-normalBias={isEscapadeCourse ? 0.024 : 0.022}
       />
 
-      {/* Crisp Azure Sky / Warm Venetian Terracotta Ground Bounce */}
-      <hemisphereLight args={['#C8E4FF', '#EFAF7B', 0.98]} />
+      {/* Crisp Azure Sky / Warm Venetian Terracotta Ground Bounce (crossfades underground) */}
+      <hemisphereLight
+        ref={hemiLightRef}
+        args={['#C8E4FF', '#EFAF7B', 0.98]}
+      />
 
       {/* Soft Warm Ambient Fill for Legible Interior Shadows */}
-      <ambientLight intensity={0.35} color="#FFF6E6" />
+      <ambientLight ref={ambientLightRef} intensity={0.35} color="#FFF6E6" />
 
-      {/* Cool North-East Sky Rim Fill for Faceted Architectural Edge Separation */}
+      {/* Cool North-East Sky Rim Fill / Subterranean Concourse Modeling Fill */}
       <directionalLight
-        position={[resolvedTarget[0] + 34, 24, resolvedTarget[2] - 28]}
+        ref={rimLightRef}
+        position={[
+          initialTargetPos[0] + 34,
+          initialTargetPos[1] + 24,
+          initialTargetPos[2] - 28,
+        ]}
         intensity={0.48}
         color="#C9DFFF"
       />
 
+      {isEscapadeCourse && (
+        <SubterraneanLightingRig
+          ref={subterraneanRigRef}
+          vaultSpec={subwayVault}
+          includeLightShafts={includeLightShafts}
+        />
+      )}
+
       {showHorizon && (
         <>
           <mesh
+            ref={skyDomeMeshRef}
             material={skyDomeMaterial}
             renderOrder={-1000}
             frustumCulled={false}

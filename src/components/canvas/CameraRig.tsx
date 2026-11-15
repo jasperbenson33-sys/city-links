@@ -10,17 +10,27 @@ import {
 import * as THREE from 'three';
 import { useFrame, useThree } from '@react-three/fiber';
 import {
-  ARCHITECTURAL_WALLS,
-  AUDIT_CAMERA_STATIONS,
-  COURSE_PROPS,
-  HOLE_1_CUP,
-  PERIMETER_BUILDINGS,
-  STREET_SCOUT_CAMERA_PRESET,
   getMasterPlanGroundElevationAt,
   getVanRampOrRoofElevationAt,
 } from '@/config/courseMasterPlan';
-import { intersectRayAABB3D } from '@/lib/geometryHelpers';
-import { AUTO_PUTTER_DISTANCE, BALL_RADIUS, type Vec3Tuple } from '@/types';
+import {
+  GRAND_ESCAPADE_MASTER_PLAN,
+  SUBWAY_STATION_VAULT_SPEC,
+  computeForwardCourseYaw,
+  computeRemainingCourseDistance,
+  isSubterraneanSubwayPosition,
+} from '@/config/grandEscapadeMasterPlan';
+import {
+  evaluateCatmullRomSpline3D,
+  intersectRayAABB3D,
+} from '@/lib/geometryHelpers';
+import {
+  AUTO_PUTTER_DISTANCE,
+  BALL_RADIUS,
+  type CoursePropSpec,
+  type GrandEscapadeMasterPlan,
+  type Vec3Tuple,
+} from '@/types';
 import { useCurbsideStore } from '@/store';
 
 export interface CameraRigControl {
@@ -62,6 +72,8 @@ interface OccludableEntry {
   isProp: boolean;
   isLowProp: boolean;
   tightBallRayOnly: boolean;
+  perBoxNearLensOnly: boolean;
+  fullFadeDist: number;
   enterMarginXZ: number;
   exitMarginXZ: number;
   nearLensEnterMargin: number;
@@ -82,6 +94,7 @@ const OCCLUDE_PROP_EXIT_MARGIN_XZ = 0.28;
 const OCCLUDE_FOUNTAIN_ENTER_MARGIN_XZ = 0.12;
 const OCCLUDE_FOUNTAIN_EXIT_MARGIN_XZ = 0.20;
 const OCCLUDE_PROP_FULL_FADE_DIST = 4.4;
+const OCCLUDE_SUBWAY_FULL_FADE_DIST = 5.4;
 const OCCLUDE_HOLD_SECONDS = 0.25;
 const OCCLUDE_OPACITY_SNAP_EPS = 0.002;
 const OCCLUDE_NEAR_LENS_ENTER_MARGIN = 0.65;
@@ -91,12 +104,16 @@ const OCCLUDE_PROP_NEAR_LENS_EXIT = 0.42;
 const LOW_PROP_HEIGHT_THRESHOLD = 1.55;
 const CAMERA_SNAP_EPS = 1e-4;
 const QA_SLOW_ORBIT_OMEGA = (Math.PI * 2) / 8.0;
+const FLYOVER_FORWARD_SEC = 9.5;
+const FLYOVER_HOLD_SEC = 0.85;
+const FLYOVER_RETURN_SEC = 3.4;
 
 // Interior dogleg corner buildings must fade via occlusion instead of pushing/clamping the camera
 const INTERIOR_CORNER_BUILDING_IDS = new Set([
   'bld-se-corner-bodega',
   'bld-south-courtyard-1',
   'bld-sw-corner-bakery',
+  'esc-bld-z6-south-headhouse-overbuild',
 ]);
 
 let cachedSlowOrbitFlag: boolean | null = null;
@@ -123,6 +140,7 @@ function shortestAngleDelta(fromRad: number, toRad: number): number {
 
 function resolveObjectAabb(
   obj: THREE.Object3D,
+  planProps: CoursePropSpec[],
 ): { min: Vec3Tuple; max: Vec3Tuple } | null {
   obj.updateMatrixWorld(true);
   const userAabb = obj.userData?.aabb as
@@ -134,7 +152,7 @@ function resolveObjectAabb(
   if (!declaredAabb) {
     const propId = obj.userData?.propId as string | undefined;
     if (propId) {
-      const found = COURSE_PROPS.find((p) => p.id === propId);
+      const found = planProps.find((p) => p.id === propId);
       if (found?.aabb) {
         declaredAabb = found.aabb;
       }
@@ -168,9 +186,20 @@ function resolveObjectAabb(
 }
 
 function isFountainObject(obj: THREE.Object3D): boolean {
+  const propId = obj.userData?.propId as string | undefined;
   return (
     obj.name === 'fountain-hazard-prop' ||
-    obj.userData?.propId === 'fountain-courtyard-front'
+    propId === 'fountain-courtyard-front' ||
+    propId === 'esc-z6-midtown-fountain'
+  );
+}
+
+function isSubwayVehicleOrPillar(obj: THREE.Object3D): boolean {
+  const propId = obj.userData?.propId as string | undefined;
+  return (
+    obj.name === 'vintage-subway-car' ||
+    obj.name === 'subway-mosaic-pillar' ||
+    Boolean(propId && propId.startsWith('esc-z7-'))
   );
 }
 
@@ -180,10 +209,15 @@ function resolveOccludableBoxes(
   isProp: boolean,
   isLowProp: boolean,
   tightBallRayOnly: boolean,
+  planProps: CoursePropSpec[],
 ): OccludableBox[] {
+  const propId = obj.userData?.propId as string | undefined;
   if (isFountainObject(obj)) {
-    const fountainSpec = COURSE_PROPS.find(
-      (p) => p.id === 'fountain-courtyard-front',
+    const fountainSpec = planProps.find(
+      (p) =>
+        p.id === propId ||
+        p.id === 'fountain-courtyard-front' ||
+        p.id === 'esc-z6-midtown-fountain',
     );
     const basinBox = fountainSpec?.solidColliders?.[0];
     const spireBox = fountainSpec?.solidColliders?.[1];
@@ -208,6 +242,22 @@ function resolveOccludableBoxes(
           padTop: 0,
         },
       ];
+    }
+  }
+
+  // Open-aisle Vintage Subway Car fades strictly by its side walls and roof canopy
+  // so looking straight down the open vestibule aisle keeps the train exterior rich & solid.
+  if (obj.name === 'vintage-subway-car' || propId === 'esc-z7-vintage-subway-car') {
+    const carSpec = planProps.find(
+      (p) => p.id === propId || p.id === 'esc-z7-vintage-subway-car',
+    );
+    if (carSpec?.solidColliders && carSpec.solidColliders.length > 0) {
+      return carSpec.solidColliders.map((c) => ({
+        min: c.min,
+        max: c.max,
+        padBottom: 0,
+        padTop: 0.05,
+      }));
     }
   }
 
@@ -343,9 +393,22 @@ export function CameraRig({
   controlRef,
 }: CameraRigProps) {
   const { camera, gl, scene } = useThree();
+  const activePlan = useCurbsideStore((s) => s.activePlan);
 
-  const currentLookAtRef = useRef(new THREE.Vector3(0, 1.0, 20));
-  const currentPosRef = useRef(new THREE.Vector3(0, 2.25, 32.22));
+  const currentLookAtRef = useRef(
+    new THREE.Vector3(
+      activePlan.teePosition[0],
+      activePlan.teePosition[1] + 1.0,
+      activePlan.teePosition[2] - 10.0,
+    ),
+  );
+  const currentPosRef = useRef(
+    new THREE.Vector3(
+      activePlan.teePosition[0],
+      activePlan.teePosition[1] + 2.25,
+      activePlan.teePosition[2] + 4.7,
+    ),
+  );
   const initializedRef = useRef(false);
   const lastAuditStationRef = useRef<string | null>(null);
   const pitchOffsetRef = useRef(0);
@@ -361,14 +424,19 @@ export function CameraRig({
   const smoothedLookHeightRef = useRef(0.72);
   const smoothedFlightRiseRef = useRef(0);
   const smoothedWallDistRef = useRef<number | null>(null);
+  const smoothedSlopePitchRef = useRef(0);
   const shotLaunchYRef = useRef<number | null>(null);
   const pullHoldYawRef = useRef<number | null>(null);
   const scoutBlendRef = useRef(0);
+  const flyoverBlendRef = useRef(0);
+  const flyoverElapsedRef = useRef(0);
+  const wasFlyoverActiveRef = useRef(false);
   const slowOrbitElapsedRef = useRef(0);
   const flightTimerRef = useRef(0);
   const prevBallPosRef = useRef(new THREE.Vector3(NaN, NaN, NaN));
   const estimatedBallSpeedRef = useRef(0);
   const rollBlendAlphaRef = useRef(0);
+  const chuteTravelYawRef = useRef<number | null>(null);
 
   const occludablesRef = useRef<OccludableEntry[]>([]);
   const knownObjectsRef = useRef<Set<THREE.Object3D>>(new Set());
@@ -381,6 +449,8 @@ export function CameraRig({
   const followPosRef = useRef(new THREE.Vector3());
   const followLookAtRef = useRef(new THREE.Vector3());
   const scoutLookAtScratchRef = useRef(new THREE.Vector3());
+  const flyoverPosScratchRef = useRef(new THREE.Vector3());
+  const flyoverLookAtScratchRef = useRef(new THREE.Vector3());
   const appliedLookAtRef = useRef(new THREE.Vector3(NaN, NaN, NaN));
   const desiredPosRef = useRef(new THREE.Vector3());
   const desiredLookAtRef = useRef(new THREE.Vector3());
@@ -390,19 +460,21 @@ export function CameraRig({
   const wasFountainDropRef = useRef(false);
 
   // Static outer perimeter wall/facade AABBs expanded for soft camera lens avoidance.
-  // Interior dogleg corner buildings are intentionally excluded so occlusion fade handles them cleanly.
+  // Interior dogleg corner buildings & subway vault ceilings are intentionally excluded so
+  // occlusion fade & subterranean ceiling clamping handle them cleanly.
   const solidWallAabbs = useMemo(() => {
     const pad = 0.55;
     const boxes: Array<{ min: Vec3Tuple; max: Vec3Tuple }> = [];
-    for (const b of PERIMETER_BUILDINGS) {
+    for (const b of activePlan.perimeterBuildings) {
       if (INTERIOR_CORNER_BUILDING_IDS.has(b.id)) continue;
       boxes.push({
         min: [b.aabb.min[0] - pad, b.aabb.min[1] - 0.5, b.aabb.min[2] - pad],
         max: [b.aabb.max[0] + pad, b.aabb.max[1] + 0.5, b.aabb.max[2] + pad],
       });
     }
-    for (const w of ARCHITECTURAL_WALLS) {
+    for (const w of activePlan.architecturalWalls) {
       if (w.size[1] < 1.8) continue;
+      if (w.kind === 'subway_vault_ceiling_slab') continue;
       boxes.push({
         min: [
           w.center[0] - w.size[0] * 0.5 - pad,
@@ -417,7 +489,35 @@ export function CameraRig({
       });
     }
     return boxes;
-  }, []);
+  }, [activePlan]);
+
+  // Reset occlusion material cache & camera follow state cleanly when switching courses
+  useEffect(() => {
+    for (const entry of occludablesRef.current) {
+      for (const snap of entry.snapshots) {
+        snap.mesh.material = snap.origMaterial;
+        snap.mesh.castShadow = snap.origCastShadow;
+        if (Array.isArray(snap.fadeMaterial)) {
+          for (const m of snap.fadeMaterial) m.dispose();
+        } else {
+          snap.fadeMaterial.dispose();
+        }
+      }
+    }
+    occludablesRef.current = [];
+    knownObjectsRef.current.clear();
+    hasIndexedOccludablesRef.current = false;
+    hasWarmedShadersRef.current = false;
+    initializedRef.current = false;
+    smoothedWallDistRef.current = null;
+    smoothedSlopePitchRef.current = 0;
+    chuteTravelYawRef.current = null;
+    flyoverBlendRef.current = 0;
+    flyoverElapsedRef.current = 0;
+    wasFlyoverActiveRef.current = false;
+    smoothedYawRef.current = useCurbsideStore.getState().aimYaw;
+    yawVelRef.current = 0;
+  }, [activePlan.courseId]);
 
   useEffect(() => {
     if (!controlRef) return;
@@ -512,7 +612,10 @@ export function CameraRig({
       wasFountainDropRef.current = false;
       fountainHoldPosRef.current = null;
       fountainHoldLookAtRef.current = null;
-      const station = AUDIT_CAMERA_STATIONS.find(
+      flyoverBlendRef.current = 0;
+      flyoverElapsedRef.current = 0;
+      wasFlyoverActiveRef.current = false;
+      const station = activePlan.auditStations.find(
         (s) => s.id === store.cameraAuditStationId,
       );
       if (station) {
@@ -528,11 +631,23 @@ export function CameraRig({
             station.position[1],
             station.lookAt[2] + dx * sa + dz * ca,
           );
-          desiredLookAtRef.current.set(...station.lookAt);
+          desiredLookAtRef.current.set(
+            station.lookAt[0],
+            station.lookAt[1],
+            station.lookAt[2],
+          );
           instantSnap = true;
         } else {
-          desiredPosRef.current.set(...station.position);
-          desiredLookAtRef.current.set(...station.lookAt);
+          desiredPosRef.current.set(
+            station.position[0],
+            station.position[1],
+            station.position[2],
+          );
+          desiredLookAtRef.current.set(
+            station.lookAt[0],
+            station.lookAt[1],
+            station.lookAt[2],
+          );
         }
         desiredFov = station.fovDeg;
         if (lastAuditStationRef.current !== station.id) {
@@ -552,6 +667,21 @@ export function CameraRig({
           ? targetScout
           : THREE.MathUtils.lerp(scoutBlendRef.current, targetScout, scoutAlpha);
 
+      // Update 1-Tap 7-Zone Course Flyover Scout state
+      const escapadePlan =
+        activePlan.courseId === 'grand-escapade'
+          ? (activePlan as GrandEscapadeMasterPlan)
+          : null;
+      const hasFlyover = Boolean(
+        escapadePlan?.flyoverSplinePoints?.length &&
+          escapadePlan?.flyoverLookAtPoints?.length,
+      );
+      const flyoverWanted = Boolean(store.isCourseFlyoverActive && hasFlyover);
+      if (flyoverWanted && !wasFlyoverActiveRef.current) {
+        flyoverElapsedRef.current = 0;
+      }
+      wasFlyoverActiveRef.current = flyoverWanted;
+
       // Lock follow yaw steady during active slingshot pullback so thumb tremor never shakes the camera
       if (!slowOrbit && store.shotPhase === 'pulling') {
         if (pullHoldYawRef.current === null) {
@@ -561,15 +691,31 @@ export function CameraRig({
         pullHoldYawRef.current = null;
       }
 
-      // Compute smooth ground roll-settle yaw anticipation so camera glides toward the pin
-      // while the ball slows below 1.5 m/s rather than staring at a wall until full stop.
-      const cupPos = HOLE_1_CUP.position;
+      // Compute smooth ground roll-settle yaw anticipation along the course centerline
+      // so camera glides cleanly into upcoming corners without staring into far walls or whipping backwards.
+      const cupPos = activePlan.cup.position;
       const distToPin = Math.hypot(cupPos[0] - bx, cupPos[2] - bz);
+      const remainingCourseDist = computeRemainingCourseDistance(activePlan, [
+        bx,
+        by,
+        bz,
+      ]);
       const stepDist = Number.isNaN(prevBallPosRef.current.x)
         ? 0
         : ballVec.distanceTo(prevBallPosRef.current);
       prevBallPosRef.current.set(bx, by, bz);
       const instSpeed = dt > 1e-4 ? stepDist / dt : 0;
+
+      const isCopperChute =
+        inFlight &&
+        activePlan.courseId === 'grand-escapade' &&
+        store.currentSurfaceTag === 'storm_gutter' &&
+        by >= 1.8 &&
+        by <= 15.2 &&
+        bx >= 47.0 &&
+        bx <= 56.5 &&
+        bz >= 5.0 &&
+        bz <= 16.5;
 
       if (inFlight && !slowOrbit) {
         flightTimerRef.current += dt;
@@ -581,8 +727,29 @@ export function CameraRig({
                 instSpeed,
                 1 - Math.exp(-12.0 * dt),
               );
-        const groundY = getMasterPlanGroundElevationAt(bx, bz);
-        const vanY = getVanRampOrRoofElevationAt(bx, bz);
+
+        if (isCopperChute) {
+          // Sweep from the open West/South-Southwest courtyard side (+0.48 rad) so the bronze
+          // helical chute stays unobstructed instead of rotating behind East Zone 5/6 walls.
+          const openCourtyardYaw = 0.48;
+          if (chuteTravelYawRef.current === null) {
+            let startYaw = smoothedYawRef.current;
+            while (startYaw > Math.PI) startYaw -= Math.PI * 2;
+            while (startYaw < -Math.PI) startYaw += Math.PI * 2;
+            if (startYaw < -2.1) startYaw += Math.PI * 2;
+            chuteTravelYawRef.current = startYaw;
+          }
+          const delta = openCourtyardYaw - chuteTravelYawRef.current;
+          chuteTravelYawRef.current += delta * (1 - Math.exp(-3.4 * dt));
+        } else {
+          chuteTravelYawRef.current = null;
+        }
+
+        const groundY = getMasterPlanGroundElevationAt(bx, bz, activePlan);
+        const vanY =
+          activePlan.courseId === 'classic'
+            ? getVanRampOrRoofElevationAt(bx, bz)
+            : null;
         const supportY =
           vanY !== null && by - BALL_RADIUS >= vanY - 0.12
             ? Math.max(groundY, vanY)
@@ -593,11 +760,14 @@ export function CameraRig({
             bx - store.lastSafeBallPosition[0],
             bz - store.lastSafeBallPosition[2],
           ) >= 0.65 || distToPin < AUTO_PUTTER_DISTANCE;
+        const allowRollAlign =
+          activePlan.courseId === 'grand-escapade'
+            ? remainingCourseDist > 0.5
+            : distToPin < 35 && distToPin > 0.5;
 
         if (
           flightTimerRef.current > 0.85 &&
-          distToPin < 35 &&
-          distToPin > 0.5 &&
+          allowRollAlign &&
           onGroundRoll &&
           movedFromSafe &&
           estimatedBallSpeedRef.current < 1.5
@@ -626,16 +796,18 @@ export function CameraRig({
         flightTimerRef.current = 0;
         estimatedBallSpeedRef.current = 0;
         rollBlendAlphaRef.current = 0;
+        chuteTravelYawRef.current = null;
       }
 
-      const yawToCup =
-        distToPin > 0.5
-          ? Math.atan2(cupPos[0] - bx, -(cupPos[2] - bz))
+      const forwardCourseYaw =
+        remainingCourseDist > 0.5
+          ? computeForwardCourseYaw(activePlan, [bx, by, bz], 18.0)
           : store.aimYaw;
-      const inFlightTargetYaw =
-        inFlight && rollBlendAlphaRef.current > 0.001
+      const inFlightTargetYaw = isCopperChute && chuteTravelYawRef.current !== null
+        ? chuteTravelYawRef.current
+        : inFlight && rollBlendAlphaRef.current > 0.001
           ? store.aimYaw +
-            shortestAngleDelta(store.aimYaw, yawToCup) *
+            shortestAngleDelta(store.aimYaw, forwardCourseYaw) *
               rollBlendAlphaRef.current
           : store.aimYaw;
 
@@ -650,7 +822,7 @@ export function CameraRig({
         : targetFollowYaw;
       if (!slowOrbit) slowOrbitElapsedRef.current = 0;
 
-      // Hold camera position & yaw calm during the brief < 0.6s fountain drop arc,
+      // Hold camera position & yaw calm during the brief < 0.6s hazard drop arc,
       // then snap cleanly to the drop-zone aim pose once landed (eliminates 446°/s whip).
       if (store.shotPhase === 'fountain_drop' && !slowOrbit) {
         if (!wasFountainDropRef.current) {
@@ -683,10 +855,15 @@ export function CameraRig({
 
         const poseAlpha = 1 - Math.exp(-9.5 * dt);
         const riseAlpha = 1 - Math.exp(-5.0 * dt);
+        const shouldSnapPose = !initializedRef.current || (!inFlight && stepDist > 6.0);
 
-        if (slowOrbit) {
+        if (slowOrbit || shouldSnapPose) {
           smoothedYawRef.current = baseYaw;
           yawVelRef.current = 0;
+          if (shouldSnapPose && !slowOrbit) {
+            smoothedWallDistRef.current = null;
+            instantSnap = true;
+          }
         } else {
           // Critically damped yaw spring eliminates initial angular-velocity whip on 90°-120° post-shot turns
           // while staying snappy during manual touch/mouse orbiting.
@@ -708,13 +885,24 @@ export function CameraRig({
           }
         }
 
+        const isInSubway =
+          activePlan.courseId === 'grand-escapade' &&
+          (isSubterraneanSubwayPosition([bx, by, bz]) ||
+            (bz >= 59.0 && bx >= 18.0 && bx <= 50.0 && by < -0.35));
+
         const launchY = shotLaunchYRef.current ?? by;
         const apexLift = Math.max(0, by - launchY);
-        const targetFlightRise = inFlight
-          ? 1.2 + THREE.MathUtils.clamp(apexLift * 0.24, 0, 1.2)
+        const dropLift =
+          inFlight && !isInSubway && by < launchY - 1.5
+            ? THREE.MathUtils.clamp((launchY - by) * 0.14, 0, 1.3)
+            : 0;
+        const targetFlightRise = inFlight && !isInSubway
+          ? (isCopperChute ? 1.85 : 1.2) +
+            THREE.MathUtils.clamp(apexLift * 0.24, 0, 1.2) +
+            dropLift
           : 0;
         smoothedFlightRiseRef.current =
-          Math.abs(targetFlightRise - smoothedFlightRiseRef.current) < 1e-4
+          shouldSnapPose || Math.abs(targetFlightRise - smoothedFlightRiseRef.current) < 1e-4
             ? targetFlightRise
             : THREE.MathUtils.lerp(
                 smoothedFlightRiseRef.current,
@@ -722,15 +910,50 @@ export function CameraRig({
                 riseAlpha,
               );
 
-        const targetBehindDist = (inFlight ? 5.6 : 4.7) * zoomScaleRef.current;
-        const targetEyeHeight =
-          (inFlight ? 2.3 : 2.08) +
-          pitchOffsetRef.current * 1.1 +
-          smoothedFlightRiseRef.current;
-        const targetForwardDist = inFlight ? 2.6 : 4.8;
-        const targetLookHeight = inFlight ? 0.35 + apexLift * 0.15 : 0.72;
+        const dirX = Math.sin(smoothedYawRef.current);
+        const dirZ = -Math.cos(smoothedYawRef.current);
+
+        // Uphill terrace framing for Zone 2 incline (+9.5m climb) and ramped plazas
+        const curGroundY = getMasterPlanGroundElevationAt(bx, bz, activePlan);
+        const aheadGroundY = getMasterPlanGroundElevationAt(
+          bx + dirX * 4.0,
+          bz + dirZ * 4.0,
+          activePlan,
+        );
+        const rawSlopeDelta =
+          !inFlight && !isInSubway && Math.abs(by - BALL_RADIUS - curGroundY) < 0.75
+            ? THREE.MathUtils.clamp(aheadGroundY - curGroundY, -1.4, 2.2)
+            : 0;
+        smoothedSlopePitchRef.current =
+          shouldSnapPose ||
+          Math.abs(rawSlopeDelta - smoothedSlopePitchRef.current) < 1e-4
+            ? rawSlopeDelta
+            : THREE.MathUtils.lerp(
+                smoothedSlopePitchRef.current,
+                rawSlopeDelta,
+                1 - Math.exp(-6.0 * dt),
+              );
+
+        const subwayScale = isInSubway ? 0.85 : 1.0;
+        const targetBehindDist =
+          (inFlight ? (isCopperChute ? 6.0 : 5.6) : 4.7) *
+          zoomScaleRef.current *
+          subwayScale;
+        const baseEyeHeight = isInSubway
+          ? 1.62 + pitchOffsetRef.current * 0.65
+          : (inFlight ? 2.3 : 2.08) +
+            pitchOffsetRef.current * 1.1 +
+            THREE.MathUtils.clamp(smoothedSlopePitchRef.current * 0.14, -0.15, 0.35);
+        const targetEyeHeight = baseEyeHeight + smoothedFlightRiseRef.current;
+        const targetForwardDist = isInSubway ? 4.2 : inFlight ? 2.6 : 4.8;
+        const targetLookHeight = isInSubway
+          ? 0.42
+          : inFlight
+            ? 0.35 + apexLift * 0.15
+            : 0.72 + THREE.MathUtils.clamp(smoothedSlopePitchRef.current * 0.34, -0.35, 0.85);
 
         smoothedBehindDistRef.current =
+          shouldSnapPose ||
           Math.abs(targetBehindDist - smoothedBehindDistRef.current) < 1e-4
             ? targetBehindDist
             : THREE.MathUtils.lerp(
@@ -739,6 +962,7 @@ export function CameraRig({
                 poseAlpha,
               );
         smoothedEyeHeightRef.current =
+          shouldSnapPose ||
           Math.abs(targetEyeHeight - smoothedEyeHeightRef.current) < 1e-4
             ? targetEyeHeight
             : THREE.MathUtils.lerp(
@@ -747,6 +971,7 @@ export function CameraRig({
                 poseAlpha,
               );
         smoothedForwardDistRef.current =
+          shouldSnapPose ||
           Math.abs(targetForwardDist - smoothedForwardDistRef.current) < 1e-4
             ? targetForwardDist
             : THREE.MathUtils.lerp(
@@ -755,6 +980,7 @@ export function CameraRig({
                 poseAlpha,
               );
         smoothedLookHeightRef.current =
+          shouldSnapPose ||
           Math.abs(targetLookHeight - smoothedLookHeightRef.current) < 1e-4
             ? targetLookHeight
             : THREE.MathUtils.lerp(
@@ -763,12 +989,16 @@ export function CameraRig({
                 poseAlpha,
               );
 
-        const dirX = Math.sin(smoothedYawRef.current);
-        const dirZ = -Math.cos(smoothedYawRef.current);
-
         let camX = bx - dirX * smoothedBehindDistRef.current;
         let camY = by + smoothedEyeHeightRef.current;
         let camZ = bz - dirZ * smoothedBehindDistRef.current;
+
+        const subwayVaultCeilLimit =
+          (escapadePlan?.subwayStationVault?.vaultCrownY ??
+            SUBWAY_STATION_VAULT_SPEC.vaultCrownY) - 0.55;
+        if (isInSubway) {
+          camY = Math.min(camY, subwayVaultCeilLimit);
+        }
 
         // Soft wall-avoidance clamping along ball->camera ray so lens never clips inside outer perimeter walls
         const rayStart: Vec3Tuple = [bx, by + 0.55, bz];
@@ -808,6 +1038,10 @@ export function CameraRig({
           smoothedWallDistRef.current = vecLen;
         }
 
+        if (isInSubway) {
+          camY = Math.min(camY, subwayVaultCeilLimit);
+        }
+
         followPosRef.current.set(camX, camY, camZ);
         followLookAtRef.current.set(
           bx + dirX * smoothedForwardDistRef.current,
@@ -815,7 +1049,97 @@ export function CameraRig({
           bz + dirZ * smoothedForwardDistRef.current,
         );
 
-        if (scoutBlendRef.current <= 0) {
+        // Blend Street Scout OR 1-Tap 7-Zone Course Flyover Scout over follow pose
+        const targetFlyoverBlend = flyoverWanted ? 1 : 0;
+        if (flyoverWanted && store.flyoverProgress !== null) {
+          flyoverBlendRef.current = 1;
+        } else {
+          const flyAlpha = 1 - Math.exp(-7.5 * dt);
+          flyoverBlendRef.current =
+            Math.abs(targetFlyoverBlend - flyoverBlendRef.current) < 1e-4
+              ? targetFlyoverBlend
+              : THREE.MathUtils.lerp(flyoverBlendRef.current, targetFlyoverBlend, flyAlpha);
+        }
+
+        if (flyoverWanted && escapadePlan) {
+          const flyPts = escapadePlan.flyoverSplinePoints ?? GRAND_ESCAPADE_MASTER_PLAN.flyoverSplinePoints;
+          const flyLookPts = escapadePlan.flyoverLookAtPoints ?? GRAND_ESCAPADE_MASTER_PLAN.flyoverLookAtPoints;
+          let flyU = 0;
+          let exitFadeOut = 1;
+
+          if (store.flyoverProgress !== null) {
+            flyU = THREE.MathUtils.clamp(store.flyoverProgress, 0, 1);
+            flyoverElapsedRef.current = flyU * FLYOVER_FORWARD_SEC;
+          } else {
+            flyoverElapsedRef.current += dt;
+            const tFwdEnd = FLYOVER_FORWARD_SEC;
+            const tHoldEnd = tFwdEnd + FLYOVER_HOLD_SEC;
+            const tBackEnd = tHoldEnd + FLYOVER_RETURN_SEC;
+            const e = flyoverElapsedRef.current;
+            const startedNearTee =
+              Math.hypot(
+                bx - activePlan.teePosition[0],
+                bz - activePlan.teePosition[2],
+              ) < 18.0;
+
+            if (e <= tFwdEnd) {
+              const p = e / tFwdEnd;
+              flyU = p * p * (3 - 2 * p);
+            } else if (e <= tHoldEnd) {
+              flyU = 1.0;
+            } else if (startedNearTee && e <= tBackEnd) {
+              const p = (e - tHoldEnd) / FLYOVER_RETURN_SEC;
+              flyU = 1.0 - p * p * (3 - 2 * p);
+              if (p > 0.72) {
+                const tail = (p - 0.72) / 0.28;
+                exitFadeOut = 1 - tail * tail * (3 - 2 * tail);
+              }
+            } else if (!startedNearTee && e <= tHoldEnd + 1.6) {
+              flyU = 1.0;
+              const tail = (e - tHoldEnd) / 1.6;
+              exitFadeOut = 1 - tail * tail * (3 - 2 * tail);
+            } else {
+              flyU = startedNearTee ? 0 : 1;
+              exitFadeOut = 0;
+              store.setCourseFlyover(false, null);
+            }
+          }
+
+          const splinePos = evaluateCatmullRomSpline3D(flyPts, flyU);
+          const splineLook = evaluateCatmullRomSpline3D(flyLookPts, flyU);
+          const inSubwayFlyover =
+            isSubterraneanSubwayPosition(splinePos) ||
+            (splinePos[2] >= 62.0 &&
+              splinePos[0] >= 20.0 &&
+              splinePos[0] <= 48.0 &&
+              splinePos[1] < -0.35);
+          const safeSplineY = inSubwayFlyover
+            ? Math.min(splinePos[1], subwayVaultCeilLimit)
+            : splinePos[1];
+          flyoverPosScratchRef.current.set(
+            splinePos[0],
+            safeSplineY,
+            splinePos[2],
+          );
+          flyoverLookAtScratchRef.current.set(...splineLook);
+
+          const uFly = THREE.MathUtils.clamp(
+            flyoverBlendRef.current * exitFadeOut,
+            0,
+            1,
+          );
+          const easeFly = uFly * uFly * (3 - 2 * uFly);
+          desiredPosRef.current
+            .copy(followPosRef.current)
+            .lerp(flyoverPosScratchRef.current, easeFly);
+          desiredLookAtRef.current
+            .copy(followLookAtRef.current)
+            .lerp(flyoverLookAtScratchRef.current, easeFly);
+          desiredFov = THREE.MathUtils.lerp(inFlight ? 54 : 52, 54, easeFly);
+          if (store.flyoverProgress !== null) {
+            instantSnap = true;
+          }
+        } else if (scoutBlendRef.current <= 0) {
           desiredPosRef.current.copy(followPosRef.current);
           desiredLookAtRef.current.copy(followLookAtRef.current);
           desiredFov = inFlight ? 54 : 52;
@@ -826,20 +1150,20 @@ export function CameraRig({
           desiredPosRef.current
             .copy(followPosRef.current)
             .lerp(
-              rayDirRef.current.set(...STREET_SCOUT_CAMERA_PRESET.position),
+              rayDirRef.current.set(...activePlan.streetScoutCamera.position),
               ease,
             );
           desiredLookAtRef.current
             .copy(followLookAtRef.current)
             .lerp(
               scoutLookAtScratchRef.current.set(
-                ...STREET_SCOUT_CAMERA_PRESET.lookAt,
+                ...activePlan.streetScoutCamera.lookAt,
               ),
               ease,
             );
           desiredFov = THREE.MathUtils.lerp(
             inFlight ? 54 : 52,
-            STREET_SCOUT_CAMERA_PRESET.fovDeg,
+            activePlan.streetScoutCamera.fovDeg,
             ease,
           );
         }
@@ -870,7 +1194,12 @@ export function CameraRig({
       // Single-stage follow tracks interpolated ball coordinates immediately without double Cartesian lag,
       // while Street Scout transitions ease smoothly.
       const followRate =
-        store.isStreetScoutActive || scoutBlendRef.current > 0.001 ? 9.0 : 48.0;
+        store.isStreetScoutActive ||
+        scoutBlendRef.current > 0.001 ||
+        store.isCourseFlyoverActive ||
+        flyoverBlendRef.current > 0.001
+          ? 9.0
+          : 48.0;
       const alpha = 1 - Math.exp(-followRate * dt);
 
       const posDist = currentPosRef.current.distanceTo(desiredPosRef.current);
@@ -922,15 +1251,22 @@ export function CameraRig({
 
       scene.traverse((obj) => {
         if (known.has(obj)) return;
+        const isCopperChuteProp =
+          obj.name === 'copper-spiral-chute' ||
+          obj.userData?.propId === 'esc-z5-copper-spiral-chute';
         const isBuilding = obj.userData?.occludableBuilding === true;
         const isVehicle = obj.userData?.occludableVehicle === true;
         const isProp = obj.userData?.occludableProp === true;
-        if (isBuilding || isVehicle || isProp) {
+        if ((isBuilding || isVehicle || isProp) && !isCopperChuteProp) {
           known.add(obj);
           const fountainFlag = isFountainObject(obj);
+          const isSubwayObj = isSubwayVehicleOrPillar(obj);
+          const perBoxNearLensOnly =
+            obj.name === 'vintage-subway-car' ||
+            obj.userData?.propId === 'esc-z7-vintage-subway-car';
           const tightBallRayOnly =
             isProp && obj.userData?.tightBallRayOnly === true;
-          const aabb = resolveObjectAabb(obj);
+          const aabb = resolveObjectAabb(obj, activePlan.props);
           if (aabb) {
             const heightY = aabb.max[1] - aabb.min[1];
             const isLowProp =
@@ -944,36 +1280,43 @@ export function CameraRig({
               isProp,
               isLowProp,
               tightBallRayOnly,
+              activePlan.props,
             );
             const enterMarginXZ = tightBallRayOnly
               ? 0
               : fountainFlag
                 ? OCCLUDE_FOUNTAIN_ENTER_MARGIN_XZ
-                : isProp
+                : isProp || perBoxNearLensOnly
                   ? OCCLUDE_PROP_ENTER_MARGIN_XZ
                   : OCCLUDE_ENTER_MARGIN_XZ;
             const exitMarginXZ = tightBallRayOnly
               ? 0.03
               : fountainFlag
                 ? OCCLUDE_FOUNTAIN_EXIT_MARGIN_XZ
-                : isProp
+                : isProp || perBoxNearLensOnly
                   ? OCCLUDE_PROP_EXIT_MARGIN_XZ
                   : OCCLUDE_EXIT_MARGIN_XZ;
             const entry: OccludableEntry = {
               object: obj,
               aabb,
               testBoxes,
-              isProp,
+              isProp: isProp || perBoxNearLensOnly,
               isLowProp,
               tightBallRayOnly,
+              perBoxNearLensOnly,
+              fullFadeDist: isSubwayObj
+                ? OCCLUDE_SUBWAY_FULL_FADE_DIST
+                : OCCLUDE_PROP_FULL_FADE_DIST,
               enterMarginXZ,
               exitMarginXZ,
-              nearLensEnterMargin: isProp
-                ? OCCLUDE_PROP_NEAR_LENS_ENTER
-                : OCCLUDE_NEAR_LENS_ENTER_MARGIN,
-              nearLensExitMargin: isProp
-                ? OCCLUDE_PROP_NEAR_LENS_EXIT
-                : OCCLUDE_NEAR_LENS_EXIT_MARGIN,
+              nearLensEnterMargin:
+                isProp || perBoxNearLensOnly
+                  ? OCCLUDE_PROP_NEAR_LENS_ENTER
+                  : OCCLUDE_NEAR_LENS_ENTER_MARGIN,
+              nearLensExitMargin:
+                isProp || perBoxNearLensOnly
+                  ? OCCLUDE_PROP_NEAR_LENS_EXIT
+                  : OCCLUDE_NEAR_LENS_EXIT_MARGIN,
               snapshots: cloneMaterialsForOcclusion(obj),
               currentOpacity: 1.0,
               lastTargetOpacity: FADE_MIN_OPACITY,
@@ -1057,7 +1400,12 @@ export function CameraRig({
       propRayMaxDist = Math.max(0.2, propCamToBallDist - 0.55);
     }
 
-    const disableFade = Boolean(store.cameraAuditStationId);
+    const disableFade =
+      Boolean(store.cameraAuditStationId) ||
+      Boolean(store.isStreetScoutActive) ||
+      Boolean(store.isCourseFlyoverActive) ||
+      scoutBlendRef.current > 0.05 ||
+      flyoverBlendRef.current > 0.05;
 
     if (wallDirTuple || propDirTuple) {
       for (const entry of occludablesRef.current) {
@@ -1074,15 +1422,26 @@ export function CameraRig({
             : Math.max(marginXZ, entry.nearLensEnterMargin);
           // Skip omnidirectional near-lens trigger on low props & tight-ray tee props so
           // flanking props stay 100% solid unless the camera->ball ray directly pierces them.
+          // Hollow vehicles like the open-aisle IRT subway car check individual wall/roof testBoxes.
           const nearOrInsideLens =
             !entry.isLowProp &&
             !entry.tightBallRayOnly &&
-            camOrigin[0] >= entry.aabb.min[0] - nearLensMargin &&
-            camOrigin[0] <= entry.aabb.max[0] + nearLensMargin &&
-            camOrigin[1] >= entry.aabb.min[1] - 0.2 &&
-            camOrigin[1] <= entry.aabb.max[1] + (entry.isProp ? 0.28 : 0.75) &&
-            camOrigin[2] >= entry.aabb.min[2] - nearLensMargin &&
-            camOrigin[2] <= entry.aabb.max[2] + nearLensMargin;
+            (entry.perBoxNearLensOnly
+              ? entry.testBoxes.some(
+                  (b) =>
+                    camOrigin[0] >= b.min[0] - nearLensMargin &&
+                    camOrigin[0] <= b.max[0] + nearLensMargin &&
+                    camOrigin[1] >= b.min[1] - 0.15 &&
+                    camOrigin[1] <= b.max[1] + 0.25 &&
+                    camOrigin[2] >= b.min[2] - nearLensMargin &&
+                    camOrigin[2] <= b.max[2] + nearLensMargin,
+                )
+              : camOrigin[0] >= entry.aabb.min[0] - nearLensMargin &&
+                camOrigin[0] <= entry.aabb.max[0] + nearLensMargin &&
+                camOrigin[1] >= entry.aabb.min[1] - 0.2 &&
+                camOrigin[1] <= entry.aabb.max[1] + (entry.isProp ? 0.28 : 0.75) &&
+                camOrigin[2] >= entry.aabb.min[2] - nearLensMargin &&
+                camOrigin[2] <= entry.aabb.max[2] + nearLensMargin);
           if (nearOrInsideLens) {
             hitNow = true;
             hitDist = 0;
@@ -1117,11 +1476,11 @@ export function CameraRig({
         if (hitNow) {
           entry.isFaded = true;
           entry.clearHoldSec = 0;
-          // Ramp occluding props all the way to 0.00 inside 4.4m (zero IGN stipple dandruff on the green),
-          // while tall buildings/vehicles retain 0.06 silhouette context beyond 1.9m.
+          // Ramp occluding props & subterranean pillars/subway bulkheads all the way to 0.00
+          // inside fullFadeDist (zero IGN stipple dandruff), while tall street buildings retain 0.06 silhouette context.
           const lensFactor = entry.isProp
             ? THREE.MathUtils.clamp(
-                (hitDist - OCCLUDE_PROP_FULL_FADE_DIST) / 0.8,
+                (hitDist - entry.fullFadeDist) / 0.8,
                 0,
                 1,
               )

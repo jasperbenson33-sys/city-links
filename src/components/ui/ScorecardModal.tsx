@@ -1,6 +1,11 @@
 'use client';
 
 import React, { useEffect, useRef, useState } from 'react';
+import type { CourseId } from '@/types';
+import {
+  DEFAULT_ACTIVE_COURSE_ID,
+  GRAND_ESCAPADE_MASTER_PLAN,
+} from '@/config/grandEscapadeMasterPlan';
 import { useCurbsideStore } from '@/store';
 import { soundEngine } from '@/lib/sound';
 import { useQaFreeze } from './useQaFreeze';
@@ -13,6 +18,8 @@ export interface ScorecardModalProps {
 }
 
 interface StoreCompat {
+  courseId?: CourseId;
+  activeCourseId?: CourseId;
   holeNumber?: number;
   holeName?: string;
   par?: number;
@@ -24,6 +31,7 @@ interface StoreCompat {
   dailyBest?: { bestStrokes?: number } | null;
   isHoleComplete?: boolean;
   isRoundComplete?: boolean;
+  hasUsedQaTeleport?: boolean;
   shotPhase?: string;
   replayHole?: () => void;
   resetHole?: () => void;
@@ -39,12 +47,26 @@ interface ScoreBadgeMeta {
   celebrate: boolean;
 }
 
-function getScoreRelativeToPar(strokes: number, par: number): ScoreBadgeMeta {
+function getScoreRelativeToPar(
+  strokes: number,
+  par: number,
+  isQaTeleported = false,
+): ScoreBadgeMeta {
   const diff = strokes - par;
-  if (strokes === 1) {
+  if (strokes === 1 && !(isQaTeleported && par >= 18)) {
     return {
       headline: 'HOLE-IN-ONE!',
       deltaLabel: `-${par - 1}`,
+      pillBg: '#FEF08A',
+      pillText: '#422006',
+      pillBorder: '#D99B26',
+      celebrate: true,
+    };
+  }
+  if (strokes === 1 && isQaTeleported && par >= 18) {
+    return {
+      headline: 'GOLDEN PIN COMPLETE',
+      deltaLabel: 'QA',
       pillBg: '#FEF08A',
       pillText: '#422006',
       pillBorder: '#D99B26',
@@ -147,16 +169,37 @@ export function ScorecardModal({
     );
   });
 
+  const courseId = useCurbsideStore((s) => {
+    const st = s as unknown as StoreCompat;
+    if (st.courseId) return st.courseId;
+    if (st.activeCourseId) return st.activeCourseId;
+    if (st.par === 18) return 'grand-escapade';
+    if (st.par === 4) return 'classic';
+    return DEFAULT_ACTIVE_COURSE_ID;
+  });
+  const isEscapade = courseId === 'grand-escapade';
+
   const holeNumber = useCurbsideStore(
     (s) => (s as unknown as StoreCompat).holeNumber ?? 1,
   );
-  const holeName = useCurbsideStore(
-    (s) => (s as unknown as StoreCompat).holeName ?? '5th & Mercer',
-  );
-  const par = useCurbsideStore((s) => (s as unknown as StoreCompat).par ?? 4);
-  const holeDistanceMeters = useCurbsideStore(
-    (s) => (s as unknown as StoreCompat).holeDistanceMeters ?? 72,
-  );
+  const holeName = useCurbsideStore((s) => {
+    const st = s as unknown as StoreCompat;
+    return (
+      st.holeName ??
+      (isEscapade ? GRAND_ESCAPADE_MASTER_PLAN.holeName : '5th & Mercer')
+    );
+  });
+  const par = useCurbsideStore((s) => {
+    const st = s as unknown as StoreCompat;
+    return st.par ?? (isEscapade ? GRAND_ESCAPADE_MASTER_PLAN.par : 4);
+  });
+  const holeDistanceMeters = useCurbsideStore((s) => {
+    const st = s as unknown as StoreCompat;
+    return (
+      st.holeDistanceMeters ??
+      (isEscapade ? GRAND_ESCAPADE_MASTER_PLAN.targetCenterlineMeters : 72)
+    );
+  });
   const strokes = useCurbsideStore((s) => {
     const st = s as unknown as StoreCompat;
     return st.strokes ?? st.totalStrokes ?? 0;
@@ -169,6 +212,9 @@ export function ScorecardModal({
     if (st.personalBest !== undefined) return st.personalBest;
     return st.dailyBest?.bestStrokes ?? null;
   });
+  const hasUsedQaTeleport = useCurbsideStore((s) =>
+    Boolean((s as unknown as StoreCompat).hasUsedQaTeleport),
+  );
 
   const cardRef = useRef<HTMLElement | null>(null);
   const [visible, setVisible] = useState(false);
@@ -213,15 +259,24 @@ export function ScorecardModal({
   if (!isHoleComplete || !visible) return null;
 
   const priorBest = previousBest ?? previousDailyBest ?? null;
+  const qaImpossibleAce = hasUsedQaTeleport && par >= 18 && strokes === 1;
   const isNewPersonalBest =
-    strokes > 0 && (priorBest === null || strokes < priorBest);
+    !qaImpossibleAce && strokes > 0 && (priorBest === null || strokes < priorBest);
   const effectiveBest =
     personalBest !== null
       ? Math.min(personalBest, strokes || personalBest)
       : strokes;
 
-  const scoreMeta = getScoreRelativeToPar(Math.max(1, strokes), par);
-  const showConfetti = !qaFreeze && (scoreMeta.celebrate || isNewPersonalBest);
+  const scoreMeta = getScoreRelativeToPar(
+    Math.max(1, strokes),
+    par,
+    hasUsedQaTeleport,
+  );
+  const cleanClassicHoleName = holeName
+    .replace(new RegExp(`^Hole\\s*${holeNumber}\\s*[:•·-]\\s*`, 'i'), '')
+    .trim();
+  const showConfetti =
+    !qaFreeze && (scoreMeta.celebrate || isNewPersonalBest || (isEscapade && strokes <= par));
 
   const handleReplay = () => {
     soundEngine.unlock();
@@ -245,7 +300,7 @@ export function ScorecardModal({
         paddingTop:
           'max(1rem, var(--safe-top, env(safe-area-inset-top, 0px)))',
         paddingBottom:
-          'max(1rem, var(--safe-bottom, env(safe-area-inset-bottom, 0px)))',
+          'max(6.5rem, calc(5.5rem + var(--safe-bottom, env(safe-area-inset-bottom, 0px))))',
         paddingLeft:
           'max(1rem, var(--safe-left, env(safe-area-inset-left, 0px)))',
         paddingRight:
@@ -299,10 +354,12 @@ export function ScorecardModal({
         )}
 
         {/* Hole Header Pill */}
-        <div className="relative inline-flex items-center gap-1.5 rounded-full border border-[#E5C89E] bg-[#FFF8EB] px-3 py-1 text-[11px] font-black tracking-tight text-[#543E32] uppercase">
-          <span aria-hidden="true">⛳</span>
-          <span>
-            Hole {holeNumber}: {holeName} • Par {par} • {holeDistanceMeters}m
+        <div className="relative inline-flex max-w-full items-center gap-1.5 rounded-full border border-[#E5C89E] bg-[#FFF8EB] px-3 py-1 text-[10.5px] font-black tracking-tight text-[#543E32] uppercase">
+          <span aria-hidden="true">{isEscapade ? '🏆' : '⛳'}</span>
+          <span className="truncate">
+            {isEscapade
+              ? `Golden Pin • Par ${par} • ${Math.round(holeDistanceMeters)}m`
+              : `Hole ${holeNumber}: ${cleanClassicHoleName} • Par ${par} • ${holeDistanceMeters}m`}
           </span>
         </div>
 

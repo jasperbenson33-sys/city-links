@@ -413,6 +413,63 @@ export function buildSolidRampGeometry(
 }
 
 /**
+ * Builds an inclined deck slab of uniform vertical thickness `slabThickness` below the top ramp
+ * plane (`bottomY -> topY` along `climbDirection`), used for elevated Zone 3-7 bridges, scaffolds,
+ * and subway stairwells so ramps never punch solid prism wedges into lower architectural zones.
+ */
+export function buildInclinedDeckSlabGeometry(
+  bounds: RectBoundsXZ,
+  bottomY: number,
+  topY: number,
+  climbDirection: 'east' | 'west' | 'north' | 'south',
+  slabThickness = 0.45,
+  uvTileScaleMeters = 2.0,
+): THREE.BufferGeometry {
+  const { minX, maxX, minZ, maxZ } = bounds;
+  const spanX = maxX - minX;
+  const spanZ = maxZ - minZ;
+
+  if (climbDirection === 'east' || climbDirection === 'west') {
+    const startH = climbDirection === 'east' ? bottomY : topY;
+    const endH = climbDirection === 'east' ? topY : bottomY;
+
+    const profile = new THREE.Shape();
+    profile.moveTo(minX, startH - slabThickness);
+    profile.lineTo(maxX, endH - slabThickness);
+    profile.lineTo(maxX, endH);
+    profile.lineTo(minX, startH);
+    profile.closePath();
+
+    const geo = new THREE.ExtrudeGeometry(profile, {
+      depth: spanZ,
+      bevelEnabled: false,
+    });
+    geo.translate(0, 0, minZ);
+    geo.computeVertexNormals();
+    return applyWorldSpaceUVs(geo, uvTileScaleMeters);
+  }
+
+  const startH = climbDirection === 'south' ? bottomY : topY;
+  const endH = climbDirection === 'south' ? topY : bottomY;
+
+  const profile = new THREE.Shape();
+  profile.moveTo(-maxZ, endH - slabThickness);
+  profile.lineTo(-minZ, startH - slabThickness);
+  profile.lineTo(-minZ, startH);
+  profile.lineTo(-maxZ, endH);
+  profile.closePath();
+
+  const geo = new THREE.ExtrudeGeometry(profile, {
+    depth: spanX,
+    bevelEnabled: false,
+  });
+  geo.rotateY(Math.PI / 2);
+  geo.translate(minX, 0, 0);
+  geo.computeVertexNormals();
+  return applyWorldSpaceUVs(geo, uvTileScaleMeters);
+}
+
+/**
  * Builds a single top-face-only (+Y normal) flat ribbon along an arc centerline `(pivotX, pivotZ)`
  * with zero bottom face or internal caps so semi-transparent water never double-blends.
  */

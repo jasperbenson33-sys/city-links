@@ -14,8 +14,13 @@ import type {
   CourtyardPergolaSpec,
   PerimeterBuildingSpec,
   StringLightSpanSpec,
+  SubwayVaultEnclosureSpec,
 } from '@/types/course';
 import { VENICE_MATERIALS } from '@/materials';
+import {
+  buildRectSlabWithPolygonHolesGeometry,
+  type RectBoundsXZ,
+} from '../street/streetGeometry';
 
 // ---------------------------------------------------------------------------
 // Anti-shimmer helpers: local (memoized) material variants. Shared '@/materials'
@@ -72,6 +77,49 @@ const WINDOW_LIT_DECAL_MAT = layeredMaterial(VENICE_MATERIALS.windowWarmLit, 1);
 const WINDOW_DARK_DECAL_MAT = layeredMaterial(VENICE_MATERIALS.windowDarkGlass, 1);
 const SKYLINE_MULLION_MAT = layeredMaterial(VENICE_MATERIALS.storefrontTimber, 2);
 const HORIZON_APRON_MAT = layeredMaterial(VENICE_MATERIALS.horizonEarthApron, -1);
+const SUBWAY_CERAMIC_CREAM_MAT = new THREE.MeshStandardMaterial({
+  color: '#F1ECE0',
+  roughness: 0.34,
+  metalness: 0.05,
+});
+const SUBWAY_CERAMIC_EMERALD_MAT = new THREE.MeshStandardMaterial({
+  color: '#1E6B52',
+  roughness: 0.3,
+  metalness: 0.08,
+  polygonOffset: true,
+  polygonOffsetFactor: -1,
+  polygonOffsetUnits: -1,
+});
+const SUBWAY_COPING_DARK_MAT = new THREE.MeshStandardMaterial({
+  color: '#2A433C',
+  roughness: 0.5,
+  metalness: 0.14,
+});
+const OCULUS_DAYLIGHT_PANE_MAT = new THREE.MeshStandardMaterial({
+  color: '#FFF6DE',
+  emissive: '#FFE8B0',
+  emissiveIntensity: 1.45,
+  roughness: 0.25,
+  metalness: 0.05,
+  side: THREE.DoubleSide,
+});
+const OCULUS_REVEAL_MAT = new THREE.MeshStandardMaterial({
+  color: '#D8CFBC',
+  emissive: '#6E5A38',
+  emissiveIntensity: 0.28,
+  roughness: 0.65,
+  metalness: 0.08,
+});
+const VIADUCT_BALUSTRADE_MAT = new THREE.MeshStandardMaterial({
+  color: '#DFD2BA',
+  roughness: 0.8,
+  metalness: 0.03,
+});
+const PATINATED_CANOPY_MAT = new THREE.MeshStandardMaterial({
+  color: '#3D7868',
+  roughness: 0.42,
+  metalness: 0.34,
+});
 
 interface WallAbut {
   negX: number;
@@ -175,9 +223,11 @@ function getSkylineRoofMaterial(
  */
 export function ArchitecturalWallsGroup({
   walls = ARCHITECTURAL_WALLS,
+  subwayStationVault,
   showWireframe = false,
 }: {
   walls?: ArchitecturalWallSpec[];
+  subwayStationVault?: SubwayVaultEnclosureSpec;
   showWireframe?: boolean;
 }) {
   const abuts = useMemo(() => computeWallAbuts(walls), [walls]);
@@ -188,6 +238,7 @@ export function ArchitecturalWallsGroup({
           key={wall.id}
           wall={wall}
           abut={abuts.get(wall.id)}
+          subwayStationVault={subwayStationVault}
           showWireframe={showWireframe}
         />
       ))}
@@ -198,10 +249,12 @@ export function ArchitecturalWallsGroup({
 function ArchitecturalWallMesh({
   wall,
   abut,
+  subwayStationVault,
   showWireframe,
 }: {
   wall: ArchitecturalWallSpec;
   abut?: WallAbut;
+  subwayStationVault?: SubwayVaultEnclosureSpec;
   showWireframe: boolean;
 }) {
   // Abutting end-caps are tucked 1.5cm into the neighbour (hidden) and the later wall's top is
@@ -358,6 +411,286 @@ function ArchitecturalWallMesh({
   const alongZ = depth > width;
   const spanLen = alongZ ? depth : width;
   const wallThick = alongZ ? width : depth;
+
+  if (wall.kind === 'subway_vault_ceiling_slab') {
+    const isMainSubwayCeiling =
+      wall.id === 'wall-z7-vault-ceiling-slab' && Boolean(subwayStationVault);
+    const slabH = Math.max(0.22, totalHeight);
+    return (
+      <SubwayCeilingSlabMesh
+        wall={wall}
+        width={width}
+        depth={depth}
+        centerX={centerX}
+        centerZ={centerZ}
+        baseY={baseY}
+        topY={topY}
+        slabH={slabH}
+        lightShafts={
+          isMainSubwayCeiling ? subwayStationVault?.lightShafts : undefined
+        }
+        showWireframe={showWireframe}
+      />
+    );
+  }
+
+  if (wall.kind === 'subway_ceramic_vault_wall') {
+    const bodyH = Math.max(0.3, totalHeight - 0.14);
+    const dadoY = Math.min(topY - 0.35, baseY + Math.min(bodyH * 0.42, 1.45));
+    const pilasterCount = Math.max(2, Math.min(8, Math.round(spanLen / 5.5) + 1));
+    return (
+      <group
+        name={`wall-${wall.id}`}
+        position={[centerX, 0, centerZ]}
+        rotation={[0, wall.rotationY, 0]}
+      >
+        <mesh
+          position={[0, baseY + bodyH * 0.5, 0]}
+          material={SUBWAY_CERAMIC_CREAM_MAT}
+          receiveShadow
+        >
+          <boxGeometry args={[width, bodyH, depth]} />
+        </mesh>
+        {/* Emerald ceramic dado wainscoting band (proud 1.8cm + polygonOffset) */}
+        <mesh
+          position={[0, dadoY, 0]}
+          material={SUBWAY_CERAMIC_EMERALD_MAT}
+          receiveShadow
+        >
+          <boxGeometry
+            args={[
+              alongZ ? width + 0.036 : width - 0.02,
+              0.28,
+              alongZ ? depth - 0.02 : depth + 0.036,
+            ]}
+          />
+        </mesh>
+        {/* Molded dark green base plinth + upper cornice band */}
+        <mesh
+          position={[0, baseY + 0.11, 0]}
+          material={SUBWAY_COPING_DARK_MAT}
+          receiveShadow
+        >
+          <boxGeometry args={[width + 0.05, 0.22, depth + 0.05]} />
+        </mesh>
+        <mesh
+          position={[0, topY - 0.07, 0]}
+          material={SUBWAY_COPING_DARK_MAT}
+          receiveShadow
+        >
+          <boxGeometry args={[width + 0.06, 0.14, depth + 0.06]} />
+        </mesh>
+        {Array.from({ length: pilasterCount }, (_, idx) => {
+          const t = pilasterCount === 1 ? 0.5 : idx / (pilasterCount - 1);
+          const off = -spanLen * 0.46 + t * spanLen * 0.92;
+          return (
+            <mesh
+              key={`sub-pil-${idx}`}
+              position={
+                alongZ ? [0, baseY + bodyH * 0.5, off] : [off, baseY + bodyH * 0.5, 0]
+              }
+              material={SUBWAY_CERAMIC_CREAM_MAT}
+              receiveShadow
+            >
+              <boxGeometry
+                args={alongZ ? [wallThick + 0.08, bodyH, 0.42] : [0.42, bodyH, wallThick + 0.08]}
+              />
+            </mesh>
+          );
+        })}
+        {showWireframe && (
+          <mesh position={[0, baseY + totalHeight * 0.5, 0]}>
+            <boxGeometry args={[width, totalHeight, depth]} />
+            <meshBasicMaterial color="#10B981" wireframe />
+          </mesh>
+        )}
+      </group>
+    );
+  }
+
+  if (wall.kind === 'subway_stair_parapet') {
+    const bodyH = Math.max(0.24, totalHeight - 0.08);
+    return (
+      <group
+        name={`wall-${wall.id}`}
+        position={[centerX, 0, centerZ]}
+        rotation={[0, wall.rotationY, 0]}
+      >
+        <mesh
+          position={[0, baseY + bodyH * 0.5, 0]}
+          material={SUBWAY_CERAMIC_CREAM_MAT}
+          castShadow
+          receiveShadow
+        >
+          <boxGeometry args={[width, bodyH, depth]} />
+        </mesh>
+        <mesh
+          position={[0, topY - 0.18, 0]}
+          material={SUBWAY_CERAMIC_EMERALD_MAT}
+          receiveShadow
+        >
+          <boxGeometry args={[width + 0.032, 0.14, depth + 0.032]} />
+        </mesh>
+        <mesh
+          position={[0, topY - 0.04, 0]}
+          material={VENICE_MATERIALS.graniteCurbBevelTop}
+          castShadow
+          receiveShadow
+        >
+          <boxGeometry args={[width + 0.07, 0.08, depth + 0.07]} />
+        </mesh>
+        {showWireframe && (
+          <mesh position={[0, baseY + totalHeight * 0.5, 0]}>
+            <boxGeometry args={[width, totalHeight, depth]} />
+            <meshBasicMaterial color="#10B981" wireframe />
+          </mesh>
+        )}
+      </group>
+    );
+  }
+
+  if (wall.kind === 'viaduct_limestone_balustrade') {
+    const plinthH = Math.min(0.24, totalHeight * 0.25);
+    const copingH = 0.11;
+    const balH = Math.max(0.18, totalHeight - plinthH - copingH);
+    const pierCount = Math.max(2, Math.min(6, Math.round(spanLen / 4.2) + 1));
+    const balusterCount = Math.max(4, Math.min(18, Math.round(spanLen / 0.8)));
+    return (
+      <group
+        name={`wall-${wall.id}`}
+        position={[centerX, 0, centerZ]}
+        rotation={[0, wall.rotationY, 0]}
+      >
+        <mesh
+          position={[0, baseY + plinthH * 0.5, 0]}
+          material={VIADUCT_BALUSTRADE_MAT}
+          castShadow
+          receiveShadow
+        >
+          <boxGeometry args={[width, plinthH, depth]} />
+        </mesh>
+        {Array.from({ length: balusterCount }, (_, idx) => {
+          const off =
+            -spanLen * 0.45 + ((idx + 0.5) / balusterCount) * spanLen * 0.9;
+          return (
+            <mesh
+              key={`baluster-${idx}`}
+              position={
+                alongZ
+                  ? [0, baseY + plinthH + balH * 0.5, off]
+                  : [off, baseY + plinthH + balH * 0.5, 0]
+              }
+              material={VIADUCT_BALUSTRADE_MAT}
+              castShadow
+              receiveShadow
+            >
+              <cylinderGeometry args={[0.07, 0.09, balH, 8]} />
+            </mesh>
+          );
+        })}
+        {Array.from({ length: pierCount }, (_, idx) => {
+          const off =
+            pierCount === 1 ? 0 : (-0.48 + (idx / (pierCount - 1)) * 0.96) * spanLen;
+          return (
+            <mesh
+              key={`vpier-${idx}`}
+              position={
+                alongZ
+                  ? [0, baseY + totalHeight * 0.5, off]
+                  : [off, baseY + totalHeight * 0.5, 0]
+              }
+              material={VENICE_MATERIALS.stuccoCreamLimestone}
+              castShadow
+              receiveShadow
+            >
+              <boxGeometry
+                args={
+                  alongZ
+                    ? [wallThick + 0.08, totalHeight - 0.04, 0.28]
+                    : [0.28, totalHeight - 0.04, wallThick + 0.08]
+                }
+              />
+            </mesh>
+          );
+        })}
+        <mesh
+          position={[0, topY - copingH * 0.5, 0]}
+          material={VENICE_MATERIALS.graniteCurbBevelTop}
+          castShadow
+          receiveShadow
+        >
+          <boxGeometry args={[width + 0.08, copingH, depth + 0.08]} />
+        </mesh>
+        {showWireframe && (
+          <mesh position={[0, baseY + totalHeight * 0.5, 0]}>
+            <boxGeometry args={[width, totalHeight, depth]} />
+            <meshBasicMaterial color="#F59E0B" wireframe />
+          </mesh>
+        )}
+      </group>
+    );
+  }
+
+  if (wall.kind === 'rooftop_brick_parapet') {
+    const bodyH = Math.max(0.18, totalHeight - 0.075);
+    const copingH = 0.075;
+    const pilCount = Math.max(2, Math.min(6, Math.round(spanLen / 3.4) + 1));
+    return (
+      <group
+        name={`wall-${wall.id}`}
+        position={[centerX, 0, centerZ]}
+        rotation={[0, wall.rotationY, 0]}
+      >
+        <mesh
+          position={[0, baseY + bodyH * 0.5, 0]}
+          material={VENICE_MATERIALS.brickBrownstone}
+          castShadow
+          receiveShadow
+        >
+          <boxGeometry args={[width, bodyH, depth]} />
+        </mesh>
+        <mesh
+          position={[0, topY - copingH * 0.5, 0]}
+          material={VENICE_MATERIALS.graniteCurbBevelTop}
+          castShadow
+          receiveShadow
+        >
+          <boxGeometry args={[width + 0.07, copingH, depth + 0.07]} />
+        </mesh>
+        {Array.from({ length: pilCount }, (_, idx) => {
+          const off =
+            pilCount === 1 ? 0 : (-0.46 + (idx / (pilCount - 1)) * 0.92) * spanLen;
+          return (
+            <mesh
+              key={`roof-pil-${idx}`}
+              position={
+                alongZ
+                  ? [0, baseY + bodyH * 0.5, off]
+                  : [off, baseY + bodyH * 0.5, 0]
+              }
+              material={VENICE_MATERIALS.brickBrownstone}
+              castShadow
+            >
+              <boxGeometry
+                args={
+                  alongZ
+                    ? [wallThick + 0.08, bodyH, 0.28]
+                    : [0.28, bodyH, wallThick + 0.08]
+                }
+              />
+            </mesh>
+          );
+        })}
+        {showWireframe && (
+          <mesh position={[0, baseY + totalHeight * 0.5, 0]}>
+            <boxGeometry args={[width, totalHeight, depth]} />
+            <meshBasicMaterial color="#F59E0B" wireframe />
+          </mesh>
+        )}
+      </group>
+    );
+  }
+
   const isRampOrStepWall =
     wall.kind === 'courtyard_boundary_wall' ||
     wall.id.startsWith('wall-ramp-') ||
@@ -479,40 +812,43 @@ function ArchitecturalWallMesh({
         <boxGeometry args={[width, bodyH, depth]} />
       </mesh>
 
-      {/* Recessed Venetian blind-arch limestone bays along both main faces */}
-      {!alongZ &&
-        Array.from({ length: bayCount }, (_, bIdx) => {
-          const bx = -spanLen * 0.5 + (bIdx + 0.5) * baySpan;
-          const archW = Math.max(0.9, baySpan * 0.62);
-          const archH = Math.max(0.35, bodyH - 0.34);
-          return (
-            <group key={`ret-bay-${bIdx}`} position={[bx, baseY + 0.24, 0]}>
-              {/* Terracotta/limestone recessed panel inlay: flat decal layer, >= 1.5cm proud + polygonOffset */}
-              <mesh
-                position={[0, archH * 0.5, 0]}
-                material={BAY_PANEL_DECAL_MAT}
-                castShadow={false}
-                receiveShadow
-              >
-                <boxGeometry args={[archW, archH, depth + 2 * DECAL_LIFT]} />
-              </mesh>
-              {/* Limestone architrave lintel + keystone (faces >= 1.5cm apart from panel / each other) */}
-              <mesh
-                position={[0, archH + 0.05, 0]}
-                material={VENICE_MATERIALS.stuccoCreamLimestone}
-                castShadow
-              >
-                <boxGeometry args={[archW + 0.14, 0.09, depth + 0.07]} />
-              </mesh>
-              <mesh
-                position={[0, archH + 0.055, 0]}
-                material={VENICE_MATERIALS.graniteCurbBevelTop}
-              >
-                <boxGeometry args={[0.16, 0.14, depth + 0.1]} />
-              </mesh>
-            </group>
-          );
-        })}
+      {/* Recessed Venetian blind-arch limestone bays along both main faces (X or Z axis) */}
+      {Array.from({ length: bayCount }, (_, bIdx) => {
+        const offset = -spanLen * 0.5 + (bIdx + 0.5) * baySpan;
+        const archW = Math.max(0.85, baySpan * 0.62);
+        const archH = Math.max(0.32, bodyH - 0.34);
+        return (
+          <group
+            key={`ret-bay-${bIdx}`}
+            position={alongZ ? [0, baseY + 0.24, offset] : [offset, baseY + 0.24, 0]}
+            rotation={[0, alongZ ? Math.PI * 0.5 : 0, 0]}
+          >
+            {/* Terracotta/limestone recessed panel inlay: flat decal layer, >= 1.5cm proud + polygonOffset */}
+            <mesh
+              position={[0, archH * 0.5, 0]}
+              material={BAY_PANEL_DECAL_MAT}
+              castShadow={false}
+              receiveShadow
+            >
+              <boxGeometry args={[archW, archH, wallThick + 2 * DECAL_LIFT]} />
+            </mesh>
+            {/* Limestone architrave lintel + keystone (faces >= 1.5cm apart from panel / each other) */}
+            <mesh
+              position={[0, archH + 0.05, 0]}
+              material={VENICE_MATERIALS.stuccoCreamLimestone}
+              castShadow
+            >
+              <boxGeometry args={[archW + 0.14, 0.09, wallThick + 0.07]} />
+            </mesh>
+            <mesh
+              position={[0, archH + 0.055, 0]}
+              material={VENICE_MATERIALS.graniteCurbBevelTop}
+            >
+              <boxGeometry args={[0.16, 0.14, wallThick + 0.1]} />
+            </mesh>
+          </group>
+        );
+      })}
 
       {/* Chamfered limestone coping cap */}
       <mesh
@@ -538,23 +874,26 @@ function ArchitecturalWallMesh({
           }
         />
       </mesh>
-      {!alongZ &&
-        Array.from({ length: Math.max(8, Math.round(spanLen / 0.45)) }, (_, k) => {
-          const count = Math.max(8, Math.round(spanLen / 0.45));
-          const x = -spanLen * 0.48 + (k / (count - 1)) * spanLen * 0.96;
-          // Balusters end at the rail's centreline (inside the rail) so tops never coincide with rail top.
-          const balH = Math.max(0.04, topY - 0.018 - (baseY + bodyH + copingH));
-          return (
-            <mesh
-              key={`bal-${k}`}
-              position={[x, baseY + bodyH + copingH + balH * 0.5, 0]}
-              material={THIN_IRON_MAT}
-              castShadow={false}
-            >
-              <boxGeometry args={[0.036, balH, 0.036]} />
-            </mesh>
-          );
-        })}
+      {Array.from({ length: Math.max(8, Math.round(spanLen / 0.45)) }, (_, k) => {
+        const count = Math.max(8, Math.round(spanLen / 0.45));
+        const offset = -spanLen * 0.48 + (k / (count - 1)) * spanLen * 0.96;
+        // Balusters end at the rail's centreline (inside the rail) so tops never coincide with rail top.
+        const balH = Math.max(0.04, topY - 0.018 - (baseY + bodyH + copingH));
+        return (
+          <mesh
+            key={`bal-${k}`}
+            position={
+              alongZ
+                ? [0, baseY + bodyH + copingH + balH * 0.5, offset]
+                : [offset, baseY + bodyH + copingH + balH * 0.5, 0]
+            }
+            material={THIN_IRON_MAT}
+            castShadow={false}
+          >
+            <boxGeometry args={[0.036, balH, 0.036]} />
+          </mesh>
+        );
+      })}
 
       {/* Stone pilasters + finials */}
       {Array.from({ length: pilasterCount }, (_, idx) => {
@@ -871,6 +1210,170 @@ function SingleStringLightSpan({ span }: { span: StringLightSpanSpec }) {
   );
 }
 
+function SubwayCeilingSlabMesh({
+  wall,
+  width,
+  depth,
+  centerX,
+  centerZ,
+  baseY,
+  topY,
+  slabH,
+  lightShafts,
+  showWireframe,
+}: {
+  wall: ArchitecturalWallSpec;
+  width: number;
+  depth: number;
+  centerX: number;
+  centerZ: number;
+  baseY: number;
+  topY: number;
+  slabH: number;
+  lightShafts?: SubwayVaultEnclosureSpec['lightShafts'];
+  showWireframe: boolean;
+}) {
+  const carvedGeo = useMemo(() => {
+    if (!lightShafts || lightShafts.length === 0) return null;
+    const minX = centerX - width * 0.5;
+    const maxX = centerX + width * 0.5;
+    const minZ = centerZ - depth * 0.5;
+    const maxZ = centerZ + depth * 0.5;
+    const holes: Array<Array<readonly [number, number]>> = [];
+    for (const s of lightShafts) {
+      const sx = s.ceilingCenter[0];
+      const sz = s.ceilingCenter[2];
+      const hw = s.grateSizeXZ[0] * 0.5;
+      const hd = s.grateSizeXZ[1] * 0.5;
+      if (
+        sx - hw > minX + 0.05 &&
+        sx + hw < maxX - 0.05 &&
+        sz - hd > minZ + 0.05 &&
+        sz + hd < maxZ - 0.05
+      ) {
+        holes.push([
+          [sx - hw, sz - hd],
+          [sx + hw, sz - hd],
+          [sx + hw, sz + hd],
+          [sx - hw, sz + hd],
+        ]);
+      }
+    }
+    if (holes.length === 0) return null;
+    return buildRectSlabWithPolygonHolesGeometry(
+      { minX, maxX, minZ, maxZ },
+      holes,
+      baseY,
+      topY,
+      3.0,
+    );
+  }, [lightShafts, centerX, centerZ, width, depth, baseY, topY]);
+
+  useEffect(() => {
+    return () => {
+      carvedGeo?.dispose();
+    };
+  }, [carvedGeo]);
+
+  if (carvedGeo && lightShafts) {
+    return (
+      <group name={`wall-${wall.id}`}>
+        <mesh
+          geometry={carvedGeo}
+          material={VENICE_MATERIALS.sidewalkLimestone}
+          receiveShadow
+          castShadow
+        />
+        {/* Cast-iron Sidewalk Skylight Grates & Sunlit Frosted Daylight Wells Framing Each Oculus */}
+        {lightShafts.map((shaft) => {
+          const [sx, , sz] = shaft.ceilingCenter;
+          const [gw, gd] = shaft.grateSizeXZ;
+          const gy = (baseY + topY) * 0.5;
+          const rimT = 0.1;
+          return (
+            <group key={shaft.id} name={`oculus-grate-${shaft.id}`} position={[sx, gy, sz]}>
+              {[
+                [0, 0, -(gd - rimT) * 0.5, gw, rimT],
+                [0, 0, (gd - rimT) * 0.5, gw, rimT],
+                [-(gw - rimT) * 0.5, 0, 0, rimT, Math.max(0.1, gd - rimT * 2)],
+                [(gw - rimT) * 0.5, 0, 0, rimT, Math.max(0.1, gd - rimT * 2)],
+              ].map(([fx, fy, fz, fw, fd], fIdx) => (
+                <mesh
+                  key={`frame-${fIdx}`}
+                  position={[fx, fy, fz]}
+                  material={OCULUS_REVEAL_MAT}
+                  castShadow={false}
+                >
+                  <boxGeometry args={[fw, slabH + 0.04, fd]} />
+                </mesh>
+              ))}
+              {/* Glowing backlit sunlit frosted glass-block diffuser sealing the upper skylight well */}
+              <mesh
+                position={[0, topY - gy - 0.015, 0]}
+                material={OCULUS_DAYLIGHT_PANE_MAT}
+                castShadow={false}
+                receiveShadow={false}
+              >
+                <boxGeometry args={[gw - rimT * 1.4, 0.025, gd - rimT * 1.4]} />
+              </mesh>
+              {[-0.28, 0, 0.28].map((t, sIdx) => (
+                <mesh
+                  key={`bar-${sIdx}`}
+                  position={[0, topY - gy - 0.065, t * (gd - 0.28)]}
+                  material={THIN_IRON_MAT}
+                  castShadow={false}
+                >
+                  <boxGeometry args={[gw - 0.16, 0.06, 0.06]} />
+                </mesh>
+              ))}
+            </group>
+          );
+        })}
+        {showWireframe && (
+          <mesh position={[centerX, baseY + slabH * 0.5, centerZ]}>
+            <boxGeometry args={[width, slabH, depth]} />
+            <meshBasicMaterial color="#06B6D4" wireframe />
+          </mesh>
+        )}
+      </group>
+    );
+  }
+
+  // Headhouse canopy / solid slab (e.g. wall-z6-headhouse-canopy-roof)
+  const isCanopy = wall.id.includes('canopy');
+  return (
+    <group
+      name={`wall-${wall.id}`}
+      position={[centerX, 0, centerZ]}
+      rotation={[0, wall.rotationY, 0]}
+    >
+      <mesh
+        position={[0, baseY + slabH * 0.5, 0]}
+        material={isCanopy ? PATINATED_CANOPY_MAT : SUBWAY_CERAMIC_CREAM_MAT}
+        castShadow
+        receiveShadow
+      >
+        <boxGeometry args={[width, slabH, depth]} />
+      </mesh>
+      {isCanopy && (
+        <mesh
+          position={[0, topY + 0.04, 0]}
+          material={SUBWAY_COPING_DARK_MAT}
+          castShadow
+        >
+          <boxGeometry args={[width + 0.18, 0.08, depth + 0.18]} />
+        </mesh>
+      )}
+      {showWireframe && (
+        <mesh position={[0, baseY + slabH * 0.5, 0]}>
+          <boxGeometry args={[width, slabH, depth]} />
+          <meshBasicMaterial color="#06B6D4" wireframe />
+        </mesh>
+      )}
+    </group>
+  );
+}
+
 /**
  * Renders the 7 layered Venetian skyline towers (including the San Mercer Campanile)
  * PLUS outer horizon ground skirt and perimeter city silhouette ring so orbiting 360°
@@ -878,10 +1381,14 @@ function SingleStringLightSpan({ span }: { span: StringLightSpanSpec }) {
  */
 export function SkylineAndHorizonSkirt({
   backdrops = SKYLINE_BACKDROPS,
+  outerGroundSkirt = OUTER_CITY_GROUND_SKIRT,
+  isGrandEscapade = false,
 }: {
   backdrops?: PerimeterBuildingSpec[];
+  outerGroundSkirt?: { boundsXZ: RectBoundsXZ; topY: number };
+  isGrandEscapade?: boolean;
 }) {
-  const { minX, maxX, minZ, maxZ } = OUTER_CITY_GROUND_SKIRT.boundsXZ;
+  const { minX, maxX, minZ, maxZ } = outerGroundSkirt.boundsXZ;
   const skirtW = maxX - minX;
   const skirtD = maxZ - minZ;
   const skirtCX = (minX + maxX) * 0.5;
@@ -889,10 +1396,10 @@ export function SkylineAndHorizonSkirt({
 
   return (
     <group name="skyline-and-horizon-skirt">
-      {/* Continuous OUTER_CITY_GROUND_SKIRT apron beneath all street & gutter elevations */}
+      {/* Continuous ground skirt apron beneath all street, viaduct & subterranean elevations */}
       <mesh
         name="outer-city-ground-skirt"
-        position={[skirtCX, OUTER_CITY_GROUND_SKIRT.topY, skirtCZ]}
+        position={[skirtCX, outerGroundSkirt.topY, skirtCZ]}
         rotation={[-Math.PI / 2, 0, 0]}
         material={HORIZON_APRON_MAT}
         receiveShadow
@@ -900,31 +1407,50 @@ export function SkylineAndHorizonSkirt({
         <planeGeometry args={[skirtW, skirtD]} />
       </mesh>
 
-      {/* All 8 layered CAD skyline towers (zero overlap, 360-degree horizon closure) */}
+      {/* All layered CAD skyline towers (zero overlap, 360-degree horizon closure) */}
       {backdrops.map((b) => (
         <SkylineTowerMesh key={b.id} tower={b} />
       ))}
 
-      {/* Far-horizon distant city rooftop silhouettes sealing N/S/E/W + all 4 diagonal corners */}
-      <group name="outer-horizon-infill-silhouettes">
-        {[
-          { x: 10, z: -64, w: 96, h: 17.5, d: 14, mat: VENICE_MATERIALS.skylineOchre },
-          { x: -34, z: 0, w: 14, h: 19.0, d: 104, mat: VENICE_MATERIALS.skylineTerracotta },
-          { x: 60, z: -4, w: 14, h: 19.5, d: 104, mat: VENICE_MATERIALS.skylineLimestone },
-          { x: 10, z: 64, w: 96, h: 17.0, d: 14, mat: VENICE_MATERIALS.skylineBrick },
-          // NW / NE / SW / SE corner skyline anchors closing diagonal horizon sightlines
-          { x: -34, z: -59, w: 18, h: 18.5, d: 22, mat: VENICE_MATERIALS.skylineBrick },
-          { x: 60, z: -59, w: 18, h: 20.0, d: 22, mat: VENICE_MATERIALS.skylineOchre },
-          { x: -34, z: 59, w: 18, h: 18.0, d: 22, mat: VENICE_MATERIALS.skylineLimestone },
-          { x: 60, z: 57, w: 18, h: 18.5, d: 24, mat: VENICE_MATERIALS.skylineTerracotta },
-        ].map((blk, idx) => (
-          <group key={`outer-blk-${idx}`} position={[blk.x, -0.05, blk.z]}>
-            <mesh position={[0, blk.h * 0.5, 0]} material={blk.mat}>
+      {/* Far-horizon distant city rooftop silhouettes sealing N/S/E/W + diagonal corners */}
+      {!isGrandEscapade ? (
+        <group name="outer-horizon-infill-silhouettes">
+          {[
+            { x: 10, z: -64, w: 96, h: 17.5, d: 14, mat: VENICE_MATERIALS.skylineOchre },
+            { x: -34, z: 0, w: 14, h: 19.0, d: 104, mat: VENICE_MATERIALS.skylineTerracotta },
+            { x: 60, z: -4, w: 14, h: 19.5, d: 104, mat: VENICE_MATERIALS.skylineLimestone },
+            { x: 10, z: 64, w: 96, h: 17.0, d: 14, mat: VENICE_MATERIALS.skylineBrick },
+            // NW / NE / SW / SE corner skyline anchors closing diagonal horizon sightlines
+            { x: -34, z: -59, w: 18, h: 18.5, d: 22, mat: VENICE_MATERIALS.skylineBrick },
+            { x: 60, z: -59, w: 18, h: 20.0, d: 22, mat: VENICE_MATERIALS.skylineOchre },
+            { x: -34, z: 59, w: 18, h: 18.0, d: 22, mat: VENICE_MATERIALS.skylineLimestone },
+            { x: 60, z: 57, w: 18, h: 18.5, d: 24, mat: VENICE_MATERIALS.skylineTerracotta },
+          ].map((blk, idx) => (
+            <group key={`outer-blk-${idx}`} position={[blk.x, -0.05, blk.z]}>
+              <mesh position={[0, blk.h * 0.5, 0]} material={blk.mat}>
+                <boxGeometry args={[blk.w, blk.h, blk.d]} />
+              </mesh>
+            </group>
+          ))}
+        </group>
+      ) : (
+        <group name="escapade-far-horizon-ring">
+          {[
+            { x: 20, z: -185, w: 390, h: 32, d: 18, mat: VENICE_MATERIALS.skylineOchre },
+            { x: 20, z: 225, w: 390, h: 32, d: 18, mat: VENICE_MATERIALS.skylineBrick },
+            { x: -175, z: 20, w: 18, h: 34, d: 410, mat: VENICE_MATERIALS.skylineTerracotta },
+            { x: 215, z: 20, w: 18, h: 34, d: 410, mat: VENICE_MATERIALS.skylineLimestone },
+          ].map((blk, idx) => (
+            <mesh
+              key={`esc-ring-${idx}`}
+              position={[blk.x, outerGroundSkirt.topY + blk.h * 0.5, blk.z]}
+              material={blk.mat}
+            >
               <boxGeometry args={[blk.w, blk.h, blk.d]} />
             </mesh>
-          </group>
-        ))}
-      </group>
+          ))}
+        </group>
+      )}
     </group>
   );
 }
@@ -1023,6 +1549,363 @@ const SKYLINE_SHUTTER_MATS = [
   layeredMaterial(VENICE_MATERIALS.stuccoTerracottaDeep, 1),
 ];
 
+interface MergedBoxSpec {
+  w: number;
+  h: number;
+  d: number;
+  x: number;
+  y: number;
+  z: number;
+  rotY: number;
+}
+
+function mergeSkylineBoxSpecs(specs: MergedBoxSpec[]): THREE.BufferGeometry | null {
+  if (specs.length === 0) return null;
+  const pos: number[] = [];
+  const norm: number[] = [];
+  const uv: number[] = [];
+  const idx: number[] = [];
+  const baseBox = new THREE.BoxGeometry(1, 1, 1);
+  const bPos = baseBox.getAttribute('position');
+  const bNorm = baseBox.getAttribute('normal');
+  const bUv = baseBox.getAttribute('uv');
+  const bIdx = baseBox.getIndex()!;
+  let vertOffset = 0;
+  for (const s of specs) {
+    const cosY = Math.cos(s.rotY);
+    const sinY = Math.sin(s.rotY);
+    for (let i = 0; i < bPos.count; i++) {
+      const lx = bPos.getX(i) * s.w;
+      const ly = bPos.getY(i) * s.h;
+      const lz = bPos.getZ(i) * s.d;
+      pos.push(lx * cosY + lz * sinY + s.x, ly + s.y, -lx * sinY + lz * cosY + s.z);
+      const nx = bNorm.getX(i);
+      const ny = bNorm.getY(i);
+      const nz = bNorm.getZ(i);
+      norm.push(nx * cosY + nz * sinY, ny, -nx * sinY + nz * cosY);
+      uv.push(bUv.getX(i), bUv.getY(i));
+    }
+    for (let i = 0; i < bIdx.count; i++) {
+      idx.push(vertOffset + bIdx.getX(i));
+    }
+    vertOffset += bPos.count;
+  }
+  baseBox.dispose();
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+  geo.setAttribute('normal', new THREE.Float32BufferAttribute(norm, 3));
+  geo.setAttribute('uv', new THREE.Float32BufferAttribute(uv, 2));
+  geo.setIndex(idx);
+  return geo;
+}
+
+function EscapadeSkylineTowerMesh({
+  tower,
+  cx,
+  cz,
+  width,
+  depth,
+  baseY,
+  roofMat,
+}: {
+  tower: PerimeterBuildingSpec;
+  cx: number;
+  cz: number;
+  width: number;
+  depth: number;
+  baseY: number;
+  roofMat: THREE.Material;
+}) {
+  const frontIsNS = tower.frontFace === 'north' || tower.frontFace === 'south';
+  const faceSign = tower.frontFace === 'south' || tower.frontFace === 'east' ? 1 : -1;
+  const faceRotY = frontIsNS
+    ? faceSign > 0
+      ? 0
+      : Math.PI
+    : faceSign > 0
+      ? Math.PI * 0.5
+      : -Math.PI * 0.5;
+  const majorSpan = frontIsNS ? width : depth;
+  const minorDepth = frontIsNS ? depth : width;
+  const bayCount = Math.min(4, Math.max(2, Math.round(majorSpan / 18)));
+  const baySpan = majorSpan / bayCount;
+  const baseWallMat = getSkylineMaterial(tower.palette);
+  const cosFace = Math.cos(faceRotY);
+  const sinFace = Math.sin(faceRotY);
+
+  const baySpecs = useMemo(() => {
+    const centerIdx = Math.floor(bayCount * 0.5);
+    return Array.from({ length: bayCount }, (_, bIdx) => {
+      const bayOffset = -majorSpan * 0.5 + (bIdx + 0.5) * baySpan;
+      const isCampanileCenter =
+        tower.roofStyle === 'campanile_spire' && bIdx === centerIdx;
+      const hasRoofCap =
+        tower.roofStyle === 'mansard_slate' ||
+        tower.roofStyle === 'hipped_terracotta_tile' ||
+        (tower.roofStyle === 'campanile_spire' && !isCampanileCenter) ||
+        (tower.roofStyle === 'cornice_parapet' && bIdx % 2 === 0);
+      const roofAllowance = isCampanileCenter ? 7.8 : hasRoofCap ? 2.4 : 0;
+      const stepDelta = isCampanileCenter ? 0 : ((bIdx % 3) - 1) * 1.4;
+      const bayH =
+        Math.max(20, tower.height - roofAllowance + stepDelta) +
+        towerHeightNudge(tower.id);
+      const bayW = (frontIsNS ? baySpan : minorDepth) - 0.08;
+      const bayD = (frontIsNS ? minorDepth : baySpan) - 0.08;
+      const bayMat =
+        bIdx === 0
+          ? baseWallMat
+          : SKYLINE_BAY_WALL_MATS[
+              (bIdx + tower.id.length) % SKYLINE_BAY_WALL_MATS.length
+            ]!;
+      return {
+        bIdx,
+        bayOffset,
+        bayH,
+        bayW,
+        bayD,
+        bayMat,
+        isCampanileCenter,
+        hasRoofCap,
+      };
+    });
+  }, [bayCount, majorSpan, baySpan, tower.height, tower.roofStyle, tower.id, frontIsNS, minorDepth, baseWallMat]);
+
+  // Batch all repeating architectural trim & Venetian window grids into 6 clean GPU draw calls
+  const mergedGeos = useMemo(() => {
+    const limestoneSpecs: MergedBoxSpec[] = [];
+    const sillGraniteSpecs: MergedBoxSpec[] = [];
+    const litGlassSpecs: MergedBoxSpec[] = [];
+    const darkGlassSpecs: MergedBoxSpec[] = [];
+    const mullionSpecs: MergedBoxSpec[] = [];
+    const shutterBuckets: MergedBoxSpec[][] = [[], [], []];
+
+    const pushLocalToFace = (
+      bucket: MergedBoxSpec[],
+      bayX: number,
+      bayZ: number,
+      wallFrontDist: number,
+      u: number,
+      y: number,
+      localZ: number,
+      w: number,
+      h: number,
+      d: number,
+    ) => {
+      const dist = wallFrontDist + localZ;
+      const worldX = bayX + dist * sinFace + u * cosFace;
+      const worldZ = bayZ + dist * cosFace - u * sinFace;
+      bucket.push({ w, h, d, x: worldX, y, z: worldZ, rotY: faceRotY });
+    };
+
+    for (const bay of baySpecs) {
+      const bayX = frontIsNS ? bay.bayOffset : 0;
+      const bayZ = frontIsNS ? 0 : bay.bayOffset;
+      const topY = baseY + bay.bayH;
+      const wallFrontDist = (frontIsNS ? bay.bayD : bay.bayW) * 0.5;
+
+      // Crown cornice & upper stone belt course framed cleanly between top two window rows
+      limestoneSpecs.push(
+        {
+          w: bay.bayW + 0.34,
+          h: 0.36,
+          d: bay.bayD + 0.34,
+          x: bayX,
+          y: topY + 0.18,
+          z: bayZ,
+          rotY: 0,
+        },
+        {
+          w: bay.bayW + 0.24,
+          h: 0.22,
+          d: bay.bayD + 0.24,
+          x: bayX,
+          y: topY - 3.62,
+          z: bayZ,
+          rotY: 0,
+        },
+      );
+
+      // Eave corbel dentils along front face
+      const dentilCount = Math.max(5, Math.floor(baySpan / 1.65));
+      for (let di = 0; di < dentilCount; di++) {
+        const du =
+          -baySpan * 0.44 +
+          (di / Math.max(1, dentilCount - 1)) * (baySpan * 0.88);
+        pushLocalToFace(limestoneSpecs, bayX, bayZ, wallFrontDist, du, topY - 0.16, 0.08, 0.24, 0.26, 0.22);
+      }
+
+      // Shuttered Venetian Window Grids anchored downward from topY so upper facades never show blank foreheads
+      const winCols = Math.max(3, Math.min(4, Math.floor(baySpan / 3.4)));
+      const bucketIdx = (bay.bIdx + tower.id.length) % shutterBuckets.length;
+      const shutterBucket = shutterBuckets[bucketIdx]!;
+      for (let k = 0; k < 7; k++) {
+        const wy = topY - 1.95 - k * 3.35;
+        if (wy < 7.6) break;
+        for (let cIdx = 0; cIdx < winCols; cIdx++) {
+          const u = (-0.5 + (cIdx + 0.5) / winCols) * (baySpan * 0.74);
+          // Limestone architrave backing + granite sill + shutters + recessed glass + muntins (zero coplanarity)
+          pushLocalToFace(limestoneSpecs, bayX, bayZ, wallFrontDist, u, wy, 0.02, 1.32, 1.94, 0.08);
+          pushLocalToFace(sillGraniteSpecs, bayX, bayZ, wallFrontDist, u, wy - 1.02, 0.08, 1.5, 0.14, 0.2);
+          pushLocalToFace(shutterBucket, bayX, bayZ, wallFrontDist, u - 0.86, wy, 0.03, 0.4, 1.72, 0.06);
+          pushLocalToFace(shutterBucket, bayX, bayZ, wallFrontDist, u + 0.86, wy, 0.03, 0.4, 1.72, 0.06);
+          const glassBucket = (bay.bIdx + k + cIdx) % 3 === 0 ? litGlassSpecs : darkGlassSpecs;
+          pushLocalToFace(glassBucket, bayX, bayZ, wallFrontDist, u, wy, 0.085, 0.96, 1.56, 0.04);
+          pushLocalToFace(mullionSpecs, bayX, bayZ, wallFrontDist, u, wy, 0.115, 0.06, 1.56, 0.02);
+          pushLocalToFace(mullionSpecs, bayX, bayZ, wallFrontDist, u, wy + 0.18, 0.135, 0.96, 0.06, 0.02);
+        }
+      }
+    }
+
+    return {
+      limestone: mergeSkylineBoxSpecs(limestoneSpecs),
+      sillGranite: mergeSkylineBoxSpecs(sillGraniteSpecs),
+      litGlass: mergeSkylineBoxSpecs(litGlassSpecs),
+      darkGlass: mergeSkylineBoxSpecs(darkGlassSpecs),
+      mullion: mergeSkylineBoxSpecs(mullionSpecs),
+      shutters: shutterBuckets.map((b) => mergeSkylineBoxSpecs(b)),
+    };
+  }, [baySpecs, baseY, baySpan, frontIsNS, cosFace, sinFace, faceRotY, tower.id]);
+
+  useEffect(() => {
+    return () => {
+      mergedGeos.limestone?.dispose();
+      mergedGeos.sillGranite?.dispose();
+      mergedGeos.litGlass?.dispose();
+      mergedGeos.darkGlass?.dispose();
+      mergedGeos.mullion?.dispose();
+      mergedGeos.shutters.forEach((g) => g?.dispose());
+    };
+  }, [mergedGeos]);
+
+  const centerBay = baySpecs[Math.floor(baySpecs.length * 0.5)]!;
+  const centerX = frontIsNS ? centerBay.bayOffset : 0;
+  const centerZ = frontIsNS ? 0 : centerBay.bayOffset;
+  const centerTopY = baseY + centerBay.bayH;
+
+  return (
+    <group name={`skyline-${tower.id}`} position={[cx, 0, cz]}>
+      {baySpecs.map((bay) => {
+        const bx = frontIsNS ? bay.bayOffset : 0;
+        const bz = frontIsNS ? 0 : bay.bayOffset;
+        const topY = baseY + bay.bayH;
+        const { hasRoofCap } = bay;
+        const capMat =
+          tower.roofStyle === 'hipped_terracotta_tile'
+            ? roofMat
+            : tower.roofStyle === 'cornice_parapet'
+              ? VENICE_MATERIALS.roofTerracottaTile
+              : VENICE_MATERIALS.roofMansardSlate;
+
+        return (
+          <group key={`esc-bay-${bay.bIdx}`} position={[bx, 0, bz]}>
+            <mesh position={[0, baseY + bay.bayH * 0.5, 0]} material={bay.bayMat}>
+              <boxGeometry args={[bay.bayW, bay.bayH, bay.bayD]} />
+            </mesh>
+            {hasRoofCap ? (
+              <FittedHippedRoof
+                position={[0, topY + 0.36, 0]}
+                widthX={bay.bayW + 0.28}
+                depthZ={bay.bayD + 0.28}
+                rise={tower.roofStyle === 'mansard_slate' ? 3.2 : 2.6}
+                material={capMat}
+              />
+            ) : (
+              <mesh
+                position={[0, topY + 0.54, 0]}
+                material={VENICE_MATERIALS.stuccoCreamDeep}
+              >
+                <boxGeometry args={[bay.bayW - 0.2, 0.38, bay.bayD - 0.2]} />
+              </mesh>
+            )}
+            {bay.bIdx % 2 === 0 && (
+              <group
+                position={[
+                  frontIsNS ? bay.bayW * 0.22 : 0,
+                  topY + (hasRoofCap ? 1.85 : 1.15),
+                  frontIsNS ? 0 : bay.bayD * 0.22,
+                ]}
+              >
+                <mesh material={VENICE_MATERIALS.brickBrownstone}>
+                  <boxGeometry args={[0.78, 1.65, 0.78]} />
+                </mesh>
+                <mesh
+                  position={[0, 0.92, 0]}
+                  material={VENICE_MATERIALS.stuccoCreamLimestone}
+                >
+                  <boxGeometry args={[0.96, 0.2, 0.96]} />
+                </mesh>
+              </group>
+            )}
+          </group>
+        );
+      })}
+
+      {/* Open-Arched Venetian Campanile Turret & Copper Spire crowning Campanile Skyline Blocks */}
+      {tower.roofStyle === 'campanile_spire' && (
+        <group position={[centerX, centerTopY + 0.36, centerZ]}>
+          <mesh position={[0, 1.2, 0]} material={VENICE_MATERIALS.stuccoTerracotta}>
+            <boxGeometry args={[6.6, 2.4, 6.6]} />
+          </mesh>
+          <mesh position={[0, 2.52, 0]} material={VENICE_MATERIALS.stuccoCreamLimestone}>
+            <boxGeometry args={[7.2, 0.28, 7.2]} />
+          </mesh>
+          {[
+            [-2.4, -2.4],
+            [2.4, -2.4],
+            [-2.4, 2.4],
+            [2.4, 2.4],
+          ].map(([px, pz], idx) => (
+            <mesh
+              key={`esc-belfry-pier-${idx}`}
+              position={[px, 3.86, pz]}
+              material={VENICE_MATERIALS.stuccoCreamLimestone}
+            >
+              <boxGeometry args={[0.88, 2.4, 0.88]} />
+            </mesh>
+          ))}
+          <mesh position={[0, 3.8, 0]} material={VENICE_MATERIALS.storefrontWarmInterior}>
+            <boxGeometry args={[3.2, 1.8, 3.2]} />
+          </mesh>
+          <mesh position={[0, 5.2, 0]} material={VENICE_MATERIALS.stuccoCreamLimestone}>
+            <boxGeometry args={[7.0, 0.3, 7.0]} />
+          </mesh>
+          <FittedHippedRoof
+            position={[0, 5.35, 0]}
+            widthX={6.8}
+            depthZ={6.8}
+            rise={3.8}
+            material={VENICE_MATERIALS.campanileSpireCopper}
+          />
+          <mesh position={[0, 9.28, 0]} material={VENICE_MATERIALS.flowerBoxBlossomGold}>
+            <sphereGeometry args={[0.3, 10, 8]} />
+          </mesh>
+        </group>
+      )}
+
+      {/* Merged Batched Window & Trim Geometry */}
+      {mergedGeos.limestone && (
+        <mesh geometry={mergedGeos.limestone} material={VENICE_MATERIALS.stuccoCreamLimestone} />
+      )}
+      {mergedGeos.sillGranite && (
+        <mesh geometry={mergedGeos.sillGranite} material={VENICE_MATERIALS.graniteCurbBevelTop} />
+      )}
+      {mergedGeos.litGlass && (
+        <mesh geometry={mergedGeos.litGlass} material={WINDOW_LIT_DECAL_MAT} />
+      )}
+      {mergedGeos.darkGlass && (
+        <mesh geometry={mergedGeos.darkGlass} material={WINDOW_DARK_DECAL_MAT} />
+      )}
+      {mergedGeos.mullion && (
+        <mesh geometry={mergedGeos.mullion} material={SKYLINE_MULLION_MAT} />
+      )}
+      {mergedGeos.shutters.map(
+        (geo, idx) =>
+          geo && <mesh key={`esc-shutters-${idx}`} geometry={geo} material={SKYLINE_SHUTTER_MATS[idx]!} />,
+      )}
+    </group>
+  );
+}
+
 function SkylineTowerMesh({ tower }: { tower: PerimeterBuildingSpec }) {
   const { minX, maxX, minZ, maxZ } = tower.boundsXZ;
   const width = maxX - minX;
@@ -1030,7 +1913,22 @@ function SkylineTowerMesh({ tower }: { tower: PerimeterBuildingSpec }) {
   const cx = (minX + maxX) * 0.5;
   const cz = (minZ + maxZ) * 0.5;
   const roofMat = getSkylineRoofMaterial(tower.roofStyle);
-  const baseY = -0.05;
+  const baseY = tower.groundY ?? -0.05;
+  const isEscapadeSkyline = tower.id.startsWith('esc-');
+
+  if (isEscapadeSkyline) {
+    return (
+      <EscapadeSkylineTowerMesh
+        tower={tower}
+        cx={cx}
+        cz={cz}
+        width={width}
+        depth={depth}
+        baseY={baseY}
+        roofMat={roofMat}
+      />
+    );
+  }
 
   if (tower.roofStyle === 'campanile_spire') {
     const shaftH = Math.max(12, tower.height - 7.8);

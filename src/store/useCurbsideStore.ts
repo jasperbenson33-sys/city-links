@@ -7,9 +7,13 @@ import {
   type BallPhase,
   type CameraMode,
   type ClubId,
+  type CourseId,
+  type CourseMasterPlan,
   type FlagColor,
   type GeneratedCityCourse,
+  type GrandEscapadeZoneNumber,
   type PhysicsSurfaceTag,
+  type QaTeleportZoneSpec,
   type RoundMode,
   type SoundEventPayload,
   type SoundEventType,
@@ -40,15 +44,26 @@ export interface TrickToastState {
 import {
   COURSE_MASTER_PLAN,
   FOUNTAIN_QUICK_DROP_POSITION,
-  HOLE_1_CUP,
-  TEE_POSITION,
   buildLegacyCourseAdapter,
   getMasterPlanSurfaceTagAt,
 } from '@/config/courseMasterPlan';
+import {
+  DEFAULT_ACTIVE_COURSE_ID,
+  computeForwardCourseYaw,
+  computeRemainingCourseDistance,
+  getEscapadeZoneAtPosition,
+  getMasterPlanByCourseId,
+  isSubterraneanSubwayPosition,
+  resolveCourseIdFromSearchParams,
+  resolveQaTeleportZone,
+} from '@/config/grandEscapadeMasterPlan';
 import { computeClubLaunchVelocity, resolveHorizontalAim } from '@/lib/aerodynamics';
 import { recommendClubForLie } from '@/lib/clubs';
 import { soundEngine } from '@/lib/sound';
-import { FOUNTAIN_DROP_DURATION_SEC } from '@/physics';
+import {
+  FOUNTAIN_DROP_DURATION_SEC,
+  OOB_RECOVERY_DURATION_SEC,
+} from '@/physics';
 
 export type ShotPhase =
   | 'aiming'
@@ -80,12 +95,20 @@ export interface PendingFountainDropPayload {
 }
 
 export interface CurbsideState {
-  // Master hole metadata
+  // Master hole metadata & active Stage 1 / Stage 2 plan
+  courseId: CourseId;
+  activePlan: CourseMasterPlan;
   holeNumber: 1;
   holeName: string;
-  par: 4;
+  par: number;
   holeDistanceMeters: number;
   course: GeneratedCityCourse;
+
+  // Stage 2 Multi-Zone Telemetry
+  activeZoneNumber: GrandEscapadeZoneNumber;
+  activeZoneName: string;
+  activeZoneElevationLabel: string;
+  isSubterranean: boolean;
 
   // Player & hole state
   strokes: number;
@@ -111,6 +134,8 @@ export interface CurbsideState {
 
   // Camera & audit state
   isStreetScoutActive: boolean;
+  isCourseFlyoverActive: boolean;
+  flyoverProgress: number | null;
   cameraMode: CameraMode;
   cameraAuditStationId: string | null;
 
@@ -126,6 +151,7 @@ export interface CurbsideState {
 
   // Shot & sync telemetry
   hasTakenFirstStroke: boolean;
+  hasUsedQaTeleport: boolean;
   lastShot: ShotRecord | null;
   pendingShot: PendingShotPayload | null;
   pendingTeleport: PendingTeleportPayload | null;
@@ -142,6 +168,11 @@ export interface CurbsideState {
   // Actions
   hydratePersonalBest: () => void;
   hydrateDailyBest: () => void;
+  setCourse: (courseId: CourseId) => void;
+  teleportToZone: (
+    zoneNumber: GrandEscapadeZoneNumber | number,
+    opts?: { silent?: boolean },
+  ) => QaTeleportZoneSpec | null;
   selectClub: (club: ClubId, manual?: boolean) => void;
   setSelectedClub: (club: ClubId, manual?: boolean) => void;
 
@@ -153,6 +184,9 @@ export interface CurbsideState {
 
   setStreetScout: (active: boolean) => void;
   toggleStreetScout: () => void;
+  setCourseFlyover: (active: boolean, progress?: number | null) => void;
+  toggleCourseFlyover: () => void;
+  setFlyoverProgress: (progress: number | null) => void;
   toggleCameraMode: () => void;
   setCameraAuditStation: (id: string | null) => void;
 
@@ -177,9 +211,13 @@ export interface CurbsideState {
     forceSteamActive?: boolean | null;
   }) => PendingShotPayload | null;
   markBallResting: (pos: Vec3Tuple, opts?: { autoSelectClub?: boolean }) => void;
-  teleportBall: (pos: Vec3Tuple, opts?: { keepStrokes?: boolean }) => void;
+  teleportBall: (
+    pos: Vec3Tuple,
+    opts?: { keepStrokes?: boolean; seedStrokes?: number },
+  ) => void;
   consumeBallReset: () => void;
   triggerFountainHazard: (dropPos?: Vec3Tuple, splashPos?: Vec3Tuple) => void;
+  triggerOobHazard: (oobPos?: Vec3Tuple) => void;
   completeFountainDrop: (seq?: number) => void;
   triggerWaterHazard: () => void;
   sinkHole: () => void;
@@ -191,27 +229,83 @@ export interface CurbsideState {
   restartRound: () => void;
 }
 
-const BEST_STORAGE_KEY = 'curbside_links_hole1_personal_best_v2';
+const BEST_STORAGE_KEY_BY_COURSE: Record<CourseId, string> = {
+  classic: 'curbside_links_hole1_personal_best_v2',
+  'grand-escapade': 'curbside_links_grand_escapade_personal_best_v1',
+};
 const MUTE_STORAGE_KEY = 'curbside_links_muted_v2';
 
-const INITIAL_BALL_POS: Vec3Tuple = [
-  TEE_POSITION[0],
-  TEE_POSITION[1] + BALL_RADIUS,
-  TEE_POSITION[2],
-];
+function resolvePlanCourseId(plan: CourseMasterPlan): CourseId {
+  return plan.courseId ?? 'classic';
+}
 
-const INITIAL_DIST_TO_PIN = Math.hypot(
-  HOLE_1_CUP.position[0] - INITIAL_BALL_POS[0],
-  HOLE_1_CUP.position[2] - INITIAL_BALL_POS[2],
-);
+const LEGACY_COURSE_ADAPTER_CACHE = new Map<CourseId, GeneratedCityCourse>();
+function getLegacyCourseAdapter(plan: CourseMasterPlan): GeneratedCityCourse {
+  const cid = resolvePlanCourseId(plan);
+  const existing = LEGACY_COURSE_ADAPTER_CACHE.get(cid);
+  if (existing) return existing;
+  const built = buildLegacyCourseAdapter(plan);
+  LEGACY_COURSE_ADAPTER_CACHE.set(cid, built);
+  return built;
+}
 
-const LEGACY_COURSE_ADAPTER = buildLegacyCourseAdapter(COURSE_MASTER_PLAN);
+function computeDistanceForPlan(pos: Vec3Tuple, plan: CourseMasterPlan): number {
+  return computeRemainingCourseDistance(plan, pos);
+}
 
-function computeDistance(pos: Vec3Tuple): number {
-  return Math.hypot(
-    HOLE_1_CUP.position[0] - pos[0],
-    HOLE_1_CUP.position[2] - pos[2],
-  );
+function formatZoneBanner(anchor: QaTeleportZoneSpec): string {
+  return anchor.zoneName.startsWith(`Zone ${anchor.zoneNumber}`)
+    ? anchor.zoneName
+    : `Zone ${anchor.zoneNumber}: ${anchor.zoneName}`;
+}
+
+function resolveZoneTelemetry(
+  pos: Vec3Tuple,
+  plan: CourseMasterPlan,
+): {
+  activeZoneNumber: GrandEscapadeZoneNumber;
+  activeZoneName: string;
+  activeZoneElevationLabel: string;
+  isSubterranean: boolean;
+} {
+  if (plan.courseId === 'classic') {
+    return {
+      activeZoneNumber: 1,
+      activeZoneName: '5th & Mercer Street',
+      activeZoneElevationLabel: '0.0m Street Level',
+      isSubterranean: false,
+    };
+  }
+  const zoneSpec = getEscapadeZoneAtPosition(pos);
+  const sub = isSubterraneanSubwayPosition(pos);
+  const loY = zoneSpec.elevationRangeY[0];
+  const hiY = zoneSpec.elevationRangeY[1];
+  const fmt = (v: number) => `${v > 0 ? '+' : ''}${v.toFixed(1)}m`;
+  return {
+    activeZoneNumber: zoneSpec.zoneNumber,
+    activeZoneName: zoneSpec.name,
+    activeZoneElevationLabel:
+      Math.abs(hiY - loY) < 0.2 ? fmt(loY) : `${fmt(loY)}..${fmt(hiY)}`,
+    isSubterranean: sub,
+  };
+}
+
+function resolveRecommendedClubForPlan(
+  pos: Vec3Tuple,
+  surface: PhysicsSurfaceTag,
+  plan: CourseMasterPlan,
+): ClubId {
+  const rec = recommendClubForLie(pos, surface);
+  if (plan.courseId === 'grand-escapade' && isSubterraneanSubwayPosition(pos)) {
+    const dist = computeDistanceForPlan(pos, plan);
+    if (surface === 'putting_green_turf' || dist <= AUTO_PUTTER_DISTANCE) {
+      return 'putter';
+    }
+    if (rec === 'driver' || rec === 'wedge') {
+      return 'skimmer';
+    }
+  }
+  return rec;
 }
 
 function mapShotPhaseToBallPhase(shotPhase: ShotPhase): BallPhase {
@@ -231,10 +325,10 @@ function mapShotPhaseToBallPhase(shotPhase: ShotPhase): BallPhase {
   }
 }
 
-function readStoredBest(): number | null {
+function readStoredBest(courseId: CourseId): number | null {
   if (typeof window === 'undefined') return null;
   try {
-    const raw = window.localStorage.getItem(BEST_STORAGE_KEY);
+    const raw = window.localStorage.getItem(BEST_STORAGE_KEY_BY_COURSE[courseId]);
     if (!raw) return null;
     const parsed = Number(raw);
     return Number.isFinite(parsed) && parsed >= 1 ? Math.round(parsed) : null;
@@ -243,10 +337,13 @@ function readStoredBest(): number | null {
   }
 }
 
-function writeStoredBest(val: number): void {
+function writeStoredBest(courseId: CourseId, val: number): void {
   if (typeof window === 'undefined') return;
   try {
-    window.localStorage.setItem(BEST_STORAGE_KEY, String(Math.round(val)));
+    window.localStorage.setItem(
+      BEST_STORAGE_KEY_BY_COURSE[courseId],
+      String(Math.round(val)),
+    );
   } catch {
     // Ignore private-mode storage errors
   }
@@ -273,40 +370,76 @@ function writeStoredMute(muted: boolean): void {
 let trickToastCounter = 0;
 let shotSeqCounter = 0;
 let teleportSeqCounter = 0;
+let bannerAutoClearTimer: number | null = null;
 
-function createInitialHoleSlice() {
+function clearBannerTimer(): void {
+  if (bannerAutoClearTimer !== null && typeof window !== 'undefined') {
+    window.clearTimeout(bannerAutoClearTimer);
+    bannerAutoClearTimer = null;
+  }
+}
+
+function scheduleBannerClear(delayMs = 2300): void {
+  clearBannerTimer();
+  if (typeof window !== 'undefined') {
+    bannerAutoClearTimer = window.setTimeout(() => {
+      bannerAutoClearTimer = null;
+      useCurbsideStore.setState({ lastEventBanner: null });
+    }, delayMs);
+  }
+}
+
+function createInitialHoleSlice(
+  plan: CourseMasterPlan,
+  teleportAnchor?: QaTeleportZoneSpec | null,
+) {
+  const startBallPos: Vec3Tuple = teleportAnchor
+    ? [
+        teleportAnchor.position[0],
+        teleportAnchor.position[1] + BALL_RADIUS,
+        teleportAnchor.position[2],
+      ]
+    : [
+        plan.teePosition[0],
+        plan.teePosition[1] + BALL_RADIUS,
+        plan.teePosition[2],
+      ];
+  const startYaw = teleportAnchor ? teleportAnchor.aimYaw : plan.initialAimYaw;
+  const startDir = resolveHorizontalAim(undefined, startYaw);
+  const startClub: ClubId = teleportAnchor
+    ? teleportAnchor.recommendedClub
+    : 'driver';
+  const zoneMeta = resolveZoneTelemetry(startBallPos, plan);
   return {
     strokes: 0,
     totalStrokes: 0,
     penaltyStrokes: 0,
-    selectedClub: 'driver' as ClubId,
+    selectedClub: startClub,
     manualClubOverride: false,
     shotPhase: 'aiming' as ShotPhase,
     ballPhase: 'resting' as BallPhase,
-    aimYaw: COURSE_MASTER_PLAN.initialAimYaw,
-    aimDirection: resolveHorizontalAim(
-      undefined,
-      COURSE_MASTER_PLAN.initialAimYaw,
-    ),
+    aimYaw: startYaw,
+    aimDirection: startDir,
     aimPower: 0,
     aimPreview: {
       isAiming: false,
       power: 0,
-      clubId: 'driver' as ClubId,
-      aimDirection: resolveHorizontalAim(
-        undefined,
-        COURSE_MASTER_PLAN.initialAimYaw,
-      ),
+      clubId: startClub,
+      aimDirection: startDir,
     },
-    ballPosition: [...INITIAL_BALL_POS] as Vec3Tuple,
-    lastSafeBallPosition: [...INITIAL_BALL_POS] as Vec3Tuple,
-    lastSafeLie: [...INITIAL_BALL_POS] as Vec3Tuple,
-    distanceToPinMeters: INITIAL_DIST_TO_PIN,
+    ballPosition: [...startBallPos] as Vec3Tuple,
+    lastSafeBallPosition: [...startBallPos] as Vec3Tuple,
+    lastSafeLie: [...startBallPos] as Vec3Tuple,
+    distanceToPinMeters: computeDistanceForPlan(startBallPos, plan),
     currentSurfaceTag: getMasterPlanSurfaceTagAt(
-      INITIAL_BALL_POS[0],
-      INITIAL_BALL_POS[2],
+      startBallPos[0],
+      startBallPos[2],
+      plan,
     ),
+    ...zoneMeta,
     isStreetScoutActive: false,
+    isCourseFlyoverActive: false,
+    flyoverProgress: null,
     cameraMode: 'follow' as CameraMode,
     cameraAuditStationId: null,
     isHoleComplete: false,
@@ -316,6 +449,7 @@ function createInitialHoleSlice() {
     propHitTimestamps: {},
     forceSteamActive: null,
     hasTakenFirstStroke: false,
+    hasUsedQaTeleport: Boolean(teleportAnchor),
     lastShot: null,
     pendingShot: null,
     pendingFountainDrop: null,
@@ -325,12 +459,28 @@ function createInitialHoleSlice() {
   };
 }
 
+const INITIAL_SEARCH =
+  typeof window !== 'undefined' ? window.location.search : '';
+const INITIAL_COURSE_ID: CourseId =
+  typeof window !== 'undefined'
+    ? resolveCourseIdFromSearchParams(INITIAL_SEARCH)
+    : DEFAULT_ACTIVE_COURSE_ID;
+const INITIAL_PLAN = getMasterPlanByCourseId(INITIAL_COURSE_ID);
+const INITIAL_QA_TELEPORT_ZONE =
+  INITIAL_COURSE_ID === 'grand-escapade' && INITIAL_SEARCH
+    ? resolveQaTeleportZone(
+        new URLSearchParams(INITIAL_SEARCH).get('qaTeleportZone'),
+      )
+    : null;
+
 export const useCurbsideStore = create<CurbsideState>((set, get) => ({
+  courseId: INITIAL_COURSE_ID,
+  activePlan: INITIAL_PLAN,
   holeNumber: 1,
-  holeName: '5th & Mercer',
-  par: 4,
-  holeDistanceMeters: COURSE_MASTER_PLAN.targetCenterlineMeters,
-  course: LEGACY_COURSE_ADAPTER,
+  holeName: INITIAL_PLAN.holeName,
+  par: INITIAL_PLAN.par,
+  holeDistanceMeters: INITIAL_PLAN.targetCenterlineMeters,
+  course: getLegacyCourseAdapter(INITIAL_PLAN),
 
   personalBest: null,
   dailyBest: null,
@@ -341,16 +491,20 @@ export const useCurbsideStore = create<CurbsideState>((set, get) => ({
   pendingTeleport: null,
   roundMode: 'hole1',
 
-  ...createInitialHoleSlice(),
+  ...createInitialHoleSlice(INITIAL_PLAN, INITIAL_QA_TELEPORT_ZONE),
 
   hydratePersonalBest: () => {
-    const best = readStoredBest();
+    const plan = get().activePlan;
+    const cid = resolvePlanCourseId(plan);
+    const best = readStoredBest(cid);
     const muted = readStoredMute();
     soundEngine.setMuted(muted);
     set({
       personalBest: best,
       dailyBest:
-        best !== null ? { bestStrokes: best, dateKey: 'hole-1' } : null,
+        best !== null
+          ? { bestStrokes: best, dateKey: cid }
+          : null,
       isMuted: muted,
       muted,
     });
@@ -358,6 +512,112 @@ export const useCurbsideStore = create<CurbsideState>((set, get) => ({
 
   hydrateDailyBest: () => {
     get().hydratePersonalBest();
+  },
+
+  setCourse: (nextCourseId) => {
+    clearBannerTimer();
+    const plan = getMasterPlanByCourseId(nextCourseId);
+    const cid = resolvePlanCourseId(plan);
+    const best = readStoredBest(cid);
+    teleportSeqCounter += 1;
+    const nextSeq = teleportSeqCounter;
+    const teeBallPos: Vec3Tuple = [
+      plan.teePosition[0],
+      plan.teePosition[1] + BALL_RADIUS,
+      plan.teePosition[2],
+    ];
+    set({
+      courseId: cid,
+      activePlan: plan,
+      holeName: plan.holeName,
+      par: plan.par,
+      holeDistanceMeters: plan.targetCenterlineMeters,
+      course: getLegacyCourseAdapter(plan),
+      personalBest: best,
+      dailyBest:
+        best !== null
+          ? { bestStrokes: best, dateKey: cid }
+          : null,
+      ...createInitialHoleSlice(plan),
+      pendingTeleport: { seq: nextSeq, position: teeBallPos },
+      pendingBallReset: true,
+    });
+  },
+
+  teleportToZone: (zoneNumber, opts) => {
+    const anchor = resolveQaTeleportZone(zoneNumber);
+    if (!anchor) return null;
+    clearBannerTimer();
+    const state = get();
+    const plan = getMasterPlanByCourseId('grand-escapade');
+    const cid = resolvePlanCourseId(plan);
+    const needCourseSwitch = state.courseId !== 'grand-escapade';
+    const ballPos: Vec3Tuple = [
+      anchor.position[0],
+      anchor.position[1] + BALL_RADIUS,
+      anchor.position[2],
+    ];
+    teleportSeqCounter += 1;
+    const nextSeq = teleportSeqCounter;
+    const zoneMeta = resolveZoneTelemetry(ballPos, plan);
+    const aimDir = resolveHorizontalAim(undefined, anchor.aimYaw);
+    const best = needCourseSwitch
+      ? readStoredBest('grand-escapade')
+      : state.personalBest;
+
+    set({
+      ...(needCourseSwitch
+        ? {
+            courseId: cid,
+            activePlan: plan,
+            holeName: plan.holeName,
+            par: plan.par,
+            holeDistanceMeters: plan.targetCenterlineMeters,
+            course: getLegacyCourseAdapter(plan),
+            personalBest: best,
+            dailyBest:
+              best !== null
+                ? { bestStrokes: best, dateKey: cid }
+                : null,
+          }
+        : {}),
+      ballPosition: ballPos,
+      lastSafeBallPosition: [...ballPos],
+      lastSafeLie: [...ballPos],
+      distanceToPinMeters: computeDistanceForPlan(ballPos, plan),
+      currentSurfaceTag: getMasterPlanSurfaceTagAt(ballPos[0], ballPos[2], plan),
+      ...zoneMeta,
+      shotPhase: 'aiming',
+      ballPhase: 'resting',
+      aimPower: 0,
+      aimYaw: anchor.aimYaw,
+      aimDirection: aimDir,
+      selectedClub: anchor.recommendedClub,
+      manualClubOverride: false,
+      isStreetScoutActive: false,
+      isCourseFlyoverActive: false,
+      flyoverProgress: null,
+      cameraMode: 'follow',
+      cameraAuditStationId: null,
+      isHoleComplete: false,
+      isRoundComplete: false,
+      pendingShot: null,
+      pendingFountainDrop: null,
+      pendingTeleport: { seq: nextSeq, position: [...ballPos] },
+      pendingBallReset: true,
+      hasUsedQaTeleport: true,
+      lastEventBanner: opts?.silent ? null : formatZoneBanner(anchor),
+      aimPreview: {
+        isAiming: false,
+        power: 0,
+        clubId: anchor.recommendedClub,
+        aimDirection: aimDir,
+      },
+    });
+    if (!opts?.silent) {
+      scheduleBannerClear(2300);
+    }
+    return anchor;
   },
 
   selectClub: (club, manual = true) => {
@@ -447,6 +707,8 @@ export const useCurbsideStore = create<CurbsideState>((set, get) => ({
   setStreetScout: (active) => {
     set({
       isStreetScoutActive: active,
+      isCourseFlyoverActive: false,
+      flyoverProgress: null,
       cameraMode: active ? 'street_scout' : 'follow',
       cameraAuditStationId: active ? null : get().cameraAuditStationId,
     });
@@ -458,6 +720,29 @@ export const useCurbsideStore = create<CurbsideState>((set, get) => ({
     get().setStreetScout(next);
   },
 
+  setCourseFlyover: (active, progress = null) => {
+    set({
+      isCourseFlyoverActive: active,
+      flyoverProgress: active ? progress : null,
+      isStreetScoutActive: false,
+      cameraMode: active ? 'street_scout' : 'follow',
+      cameraAuditStationId: active ? null : get().cameraAuditStationId,
+    });
+  },
+
+  toggleCourseFlyover: () => {
+    const next = !get().isCourseFlyoverActive;
+    soundEngine.playUiClick(0.8);
+    get().setCourseFlyover(next, null);
+  },
+
+  setFlyoverProgress: (progress) => {
+    set({
+      flyoverProgress:
+        progress === null ? null : Math.max(0, Math.min(1, progress)),
+    });
+  },
+
   toggleCameraMode: () => {
     get().toggleStreetScout();
   },
@@ -466,6 +751,8 @@ export const useCurbsideStore = create<CurbsideState>((set, get) => ({
     set({
       cameraAuditStationId: id,
       isStreetScoutActive: false,
+      isCourseFlyoverActive: false,
+      flyoverProgress: null,
       cameraMode: 'follow',
     });
   },
@@ -510,6 +797,7 @@ export const useCurbsideStore = create<CurbsideState>((set, get) => ({
         return { propHitTimestamps: nextTimestamps };
       }
       trickToastCounter += 1;
+      scheduleBannerClear(2300);
       return {
         propHitTimestamps: nextTimestamps,
         lastEventBanner: banner,
@@ -524,10 +812,12 @@ export const useCurbsideStore = create<CurbsideState>((set, get) => ({
 
   setEventBanner: (banner, kind = 'awning_bank') => {
     if (!banner) {
+      clearBannerTimer();
       set({ lastEventBanner: null });
       return;
     }
     trickToastCounter += 1;
+    scheduleBannerClear(2300);
     set({
       lastEventBanner: banner,
       trickToast: {
@@ -558,12 +848,15 @@ export const useCurbsideStore = create<CurbsideState>((set, get) => ({
   },
 
   updateBallTelemetry: (pos, surface) => {
+    const plan = get().activePlan;
     const resolvedSurface =
-      surface ?? getMasterPlanSurfaceTagAt(pos[0], pos[2]);
+      surface ?? getMasterPlanSurfaceTagAt(pos[0], pos[2], plan);
+    const zoneMeta = resolveZoneTelemetry(pos, plan);
     set({
       ballPosition: pos,
-      distanceToPinMeters: computeDistance(pos),
+      distanceToPinMeters: computeDistanceForPlan(pos, plan),
       currentSurfaceTag: resolvedSurface,
+      ...zoneMeta,
     });
   },
 
@@ -615,6 +908,7 @@ export const useCurbsideStore = create<CurbsideState>((set, get) => ({
     };
 
     soundEngine.playClubStrike(clubId, power);
+    clearBannerTimer();
 
     set({
       strokes: nextStrokes,
@@ -627,6 +921,8 @@ export const useCurbsideStore = create<CurbsideState>((set, get) => ({
       aimPower: 0,
       hasTakenFirstStroke: true,
       isStreetScoutActive: false,
+      isCourseFlyoverActive: false,
+      flyoverProgress: null,
       cameraMode: 'follow',
       cameraAuditStationId: null,
       lastEventBanner: null,
@@ -656,13 +952,18 @@ export const useCurbsideStore = create<CurbsideState>((set, get) => ({
   },
 
   markBallResting: (pos, opts) => {
-    const surface = getMasterPlanSurfaceTagAt(pos[0], pos[2]);
-    const dist = computeDistance(pos);
-    const recommended = recommendClubForLie(pos, surface);
-    const nextAimYaw = Math.atan2(
-      HOLE_1_CUP.position[0] - pos[0],
-      -(HOLE_1_CUP.position[2] - pos[2]),
-    );
+    const plan = get().activePlan;
+    const surface = getMasterPlanSurfaceTagAt(pos[0], pos[2], plan);
+    const dist = computeDistanceForPlan(pos, plan);
+    const recommended = resolveRecommendedClubForPlan(pos, surface, plan);
+    const zoneMeta = resolveZoneTelemetry(pos, plan);
+    const nextAimYaw =
+      plan.courseId === 'grand-escapade'
+        ? computeForwardCourseYaw(plan, pos, 18.0)
+        : Math.atan2(
+            plan.cup.position[0] - pos[0],
+            -(plan.cup.position[2] - pos[2]),
+          );
     const shouldAutoClub = opts?.autoSelectClub !== false;
 
     set((state) => {
@@ -671,10 +972,10 @@ export const useCurbsideStore = create<CurbsideState>((set, get) => ({
         pos[0] - state.lastSafeBallPosition[0],
         pos[2] - state.lastSafeBallPosition[2],
       );
-      // Preserve player's street aim on tiny short chips unless within short putt range or moved meaningfully
+      // Preserve player's street aim on short chips unless advancing along fairway or inside putter circle
       const shouldAutoAlignCup =
         state.hasTakenFirstStroke &&
-        dist < 35 &&
+        (plan.courseId === 'grand-escapade' ? dist > 0.35 : dist < 35) &&
         (movedDistXZ >= 0.65 || dist < AUTO_PUTTER_DISTANCE);
       const yawToUse = shouldAutoAlignCup ? nextAimYaw : state.aimYaw;
       const aimDir = resolveHorizontalAim(undefined, yawToUse);
@@ -684,6 +985,7 @@ export const useCurbsideStore = create<CurbsideState>((set, get) => ({
         lastSafeLie: [...pos],
         distanceToPinMeters: dist,
         currentSurfaceTag: surface,
+        ...zoneMeta,
         shotPhase: 'aiming',
         ballPhase: 'resting',
         selectedClub: nextClub,
@@ -701,22 +1003,32 @@ export const useCurbsideStore = create<CurbsideState>((set, get) => ({
     });
   },
 
-  teleportBall: (pos) => {
-    const surface = getMasterPlanSurfaceTagAt(pos[0], pos[2]);
-    const dist = computeDistance(pos);
+  teleportBall: (pos, opts) => {
+    const plan = get().activePlan;
+    const surface = getMasterPlanSurfaceTagAt(pos[0], pos[2], plan);
+    const dist = computeDistanceForPlan(pos, plan);
+    const zoneMeta = resolveZoneTelemetry(pos, plan);
     teleportSeqCounter += 1;
     const nextSeq = teleportSeqCounter;
-    const recommended = recommendClubForLie(pos, surface);
+    const recommended = resolveRecommendedClubForPlan(pos, surface, plan);
     set((state) => ({
+      ...(opts?.seedStrokes !== undefined
+        ? {
+            strokes: Math.max(0, Math.round(opts.seedStrokes)),
+            totalStrokes: Math.max(0, Math.round(opts.seedStrokes)),
+          }
+        : {}),
       ballPosition: [...pos],
       lastSafeBallPosition: [...pos],
       lastSafeLie: [...pos],
       distanceToPinMeters: dist,
       currentSurfaceTag: surface,
+      ...zoneMeta,
       shotPhase: 'aiming',
       ballPhase: 'resting',
       aimPower: 0,
       selectedClub: recommended,
+      hasUsedQaTeleport: true,
       isHoleComplete: false,
       isRoundComplete: false,
       pendingTeleport: { seq: nextSeq, position: [...pos] },
@@ -738,28 +1050,38 @@ export const useCurbsideStore = create<CurbsideState>((set, get) => ({
   triggerFountainHazard: (dropPos, splashPos) => {
     const state = get();
     if (state.isHoleComplete || state.shotPhase === 'fountain_drop') return;
+    const plan = state.activePlan;
     const fromPos: Vec3Tuple = splashPos
       ? [...splashPos]
       : [...state.ballPosition];
     const safeDrop: Vec3Tuple = dropPos
       ? [...dropPos]
-      : [
-          FOUNTAIN_QUICK_DROP_POSITION[0],
-          FOUNTAIN_QUICK_DROP_POSITION[1] + BALL_RADIUS,
-          FOUNTAIN_QUICK_DROP_POSITION[2],
-        ];
+      : plan.courseId === 'classic'
+        ? [
+            FOUNTAIN_QUICK_DROP_POSITION[0],
+            FOUNTAIN_QUICK_DROP_POSITION[1] + BALL_RADIUS,
+            FOUNTAIN_QUICK_DROP_POSITION[2],
+          ]
+        : [...state.lastSafeBallPosition];
     const nextStrokes = state.strokes + 1;
     const nextPenalties = state.penaltyStrokes + 1;
     teleportSeqCounter += 1;
     const nextSeq = teleportSeqCounter;
-    const yawToCup = Math.atan2(
-      HOLE_1_CUP.position[0] - safeDrop[0],
-      -(HOLE_1_CUP.position[2] - safeDrop[2]),
-    );
+    const dropSurface = getMasterPlanSurfaceTagAt(safeDrop[0], safeDrop[2], plan);
+    const dropClub = resolveRecommendedClubForPlan(safeDrop, dropSurface, plan);
+    const zoneMeta = resolveZoneTelemetry(safeDrop, plan);
+    const yawToCup =
+      plan.courseId === 'classic'
+        ? Math.atan2(
+            plan.cup.position[0] - safeDrop[0],
+            -(plan.cup.position[2] - safeDrop[2]),
+          )
+        : state.aimYaw;
     const dirToCup = resolveHorizontalAim(undefined, yawToCup);
 
     soundEngine.playFountainSplash(0.95);
     trickToastCounter += 1;
+    scheduleBannerClear(2300);
     const hitNow =
       typeof performance !== 'undefined'
         ? performance.now() * 0.001
@@ -774,15 +1096,17 @@ export const useCurbsideStore = create<CurbsideState>((set, get) => ({
       ballPosition: fromPos,
       lastSafeBallPosition: safeDrop,
       lastSafeLie: safeDrop,
-      distanceToPinMeters: computeDistance(safeDrop),
-      currentSurfaceTag: 'courtyard_paver',
-      selectedClub: 'putter',
+      distanceToPinMeters: computeDistanceForPlan(safeDrop, plan),
+      currentSurfaceTag: dropSurface,
+      ...zoneMeta,
+      selectedClub: plan.courseId === 'classic' ? 'putter' : dropClub,
       aimYaw: yawToCup,
       aimDirection: dirToCup,
       aimPower: 0,
       propHitTimestamps: {
         ...state.propHitTimestamps,
         'fountain-courtyard-front': hitNow,
+        'esc-z6-midtown-fountain': hitNow,
         fountain_water_hazard: hitNow,
       },
       lastEventBanner: 'Fountain Hazard +1',
@@ -801,8 +1125,62 @@ export const useCurbsideStore = create<CurbsideState>((set, get) => ({
       aimPreview: {
         isAiming: false,
         power: 0,
-        clubId: 'putter',
+        clubId: plan.courseId === 'classic' ? 'putter' : dropClub,
         aimDirection: dirToCup,
+      },
+    });
+  },
+
+  triggerOobHazard: (oobPos) => {
+    const state = get();
+    if (state.isHoleComplete || state.shotPhase === 'fountain_drop') return;
+    const plan = state.activePlan;
+    const fromPos: Vec3Tuple = oobPos ? [...oobPos] : [...state.ballPosition];
+    const safeDrop: Vec3Tuple = [...state.lastSafeBallPosition];
+    const nextStrokes = state.strokes + 1;
+    const nextPenalties = state.penaltyStrokes + 1;
+    teleportSeqCounter += 1;
+    const nextSeq = teleportSeqCounter;
+    const dropSurface = getMasterPlanSurfaceTagAt(safeDrop[0], safeDrop[2], plan);
+    const dropClub = resolveRecommendedClubForPlan(safeDrop, dropSurface, plan);
+    const zoneMeta = resolveZoneTelemetry(safeDrop, plan);
+
+    soundEngine.playCurbBank({ impactSpeed: 3.2, surfaceKey: 'oob-reset' });
+    trickToastCounter += 1;
+    scheduleBannerClear(2300);
+
+    set({
+      strokes: nextStrokes,
+      totalStrokes: nextStrokes,
+      penaltyStrokes: nextPenalties,
+      shotPhase: 'fountain_drop',
+      ballPhase: 'hazard_drop',
+      ballPosition: fromPos,
+      lastSafeBallPosition: safeDrop,
+      lastSafeLie: safeDrop,
+      distanceToPinMeters: computeDistanceForPlan(safeDrop, plan),
+      currentSurfaceTag: dropSurface,
+      ...zoneMeta,
+      selectedClub: dropClub,
+      aimPower: 0,
+      lastEventBanner: 'Out of Bounds +1',
+      trickToast: {
+        seq: trickToastCounter,
+        kind: 'water_penalty',
+        label: 'Out of Bounds +1',
+      },
+      pendingFountainDrop: {
+        seq: nextSeq,
+        from: fromPos,
+        to: safeDrop,
+        durationSec: OOB_RECOVERY_DURATION_SEC,
+      },
+      pendingBallReset: true,
+      aimPreview: {
+        ...state.aimPreview,
+        isAiming: false,
+        power: 0,
+        clubId: dropClub,
       },
     });
   },
@@ -810,23 +1188,28 @@ export const useCurbsideStore = create<CurbsideState>((set, get) => ({
   completeFountainDrop: (seq) => {
     const state = get();
     if (state.shotPhase !== 'fountain_drop') return;
+    const plan = state.activePlan;
     const drop = state.pendingFountainDrop;
     if (seq !== undefined && drop && drop.seq !== seq) return;
     const targetPos: Vec3Tuple = drop
       ? [...drop.to]
-      : [
-          FOUNTAIN_QUICK_DROP_POSITION[0],
-          FOUNTAIN_QUICK_DROP_POSITION[1] + BALL_RADIUS,
-          FOUNTAIN_QUICK_DROP_POSITION[2],
-        ];
+      : plan.courseId === 'classic'
+        ? [
+            FOUNTAIN_QUICK_DROP_POSITION[0],
+            FOUNTAIN_QUICK_DROP_POSITION[1] + BALL_RADIUS,
+            FOUNTAIN_QUICK_DROP_POSITION[2],
+          ]
+        : [...state.lastSafeBallPosition];
+    const zoneMeta = resolveZoneTelemetry(targetPos, plan);
     set({
       shotPhase: 'aiming',
       ballPhase: 'resting',
       ballPosition: targetPos,
       lastSafeBallPosition: targetPos,
       lastSafeLie: targetPos,
-      distanceToPinMeters: computeDistance(targetPos),
-      currentSurfaceTag: getMasterPlanSurfaceTagAt(targetPos[0], targetPos[2]),
+      distanceToPinMeters: computeDistanceForPlan(targetPos, plan),
+      currentSurfaceTag: getMasterPlanSurfaceTagAt(targetPos[0], targetPos[2], plan),
+      ...zoneMeta,
       pendingFountainDrop: null,
       pendingBallReset: false,
     });
@@ -839,30 +1222,47 @@ export const useCurbsideStore = create<CurbsideState>((set, get) => ({
   sinkHole: () => {
     const state = get();
     if (state.isHoleComplete) return;
+    const plan = state.activePlan;
+    const cid = resolvePlanCourseId(plan);
     const total = Math.max(1, state.strokes);
     const prevBest = state.personalBest;
     const nextBest = prevBest === null ? total : Math.min(prevBest, total);
     if (nextBest !== prevBest) {
-      writeStoredBest(nextBest);
+      writeStoredBest(cid, nextBest);
     }
 
-    soundEngine.playCupDrop(1.0);
+    soundEngine.playCupDrop({
+      intensity: 1.0,
+      isGoldenPin: Boolean(plan.cup.isGoldenPin),
+    });
+    const relToPar = total - plan.par;
+    const qaTeleportAceGuarded = total === 1 && state.hasUsedQaTeleport && plan.par > 3;
     const banner =
-      total === 1
+      total === 1 && !qaTeleportAceGuarded
         ? 'Hole-in-One!'
-        : total <= 2
-          ? 'Eagle!'
-          : total === 3
-            ? 'Birdie!'
-            : total === 4
-              ? 'Par!'
-              : 'Holed Out!';
+        : qaTeleportAceGuarded
+          ? plan.cup.isGoldenPin
+            ? 'Golden Pin Holed!'
+            : 'Holed Out!'
+          : relToPar <= -3
+            ? 'Albatross!'
+            : relToPar === -2
+              ? 'Eagle!'
+              : relToPar === -1
+                ? 'Birdie!'
+                : relToPar === 0
+                  ? 'Par!'
+                  : plan.cup.isGoldenPin
+                    ? 'Golden Pin Holed!'
+                    : 'Holed Out!';
+    clearBannerTimer();
     trickToastCounter += 1;
     const cuppedPos: Vec3Tuple = [
-      HOLE_1_CUP.position[0],
-      HOLE_1_CUP.position[1] - 0.08,
-      HOLE_1_CUP.position[2],
+      plan.cup.position[0],
+      plan.cup.position[1] - 0.08,
+      plan.cup.position[2],
     ];
+    const zoneMeta = resolveZoneTelemetry(plan.cup.position, plan);
 
     set({
       strokes: total,
@@ -874,10 +1274,14 @@ export const useCurbsideStore = create<CurbsideState>((set, get) => ({
       lastSafeLie: [...cuppedPos],
       isHoleComplete: true,
       isRoundComplete: true,
+      isStreetScoutActive: false,
+      isCourseFlyoverActive: false,
+      flyoverProgress: null,
       personalBest: nextBest,
-      dailyBest: { bestStrokes: nextBest, dateKey: 'hole-1' },
+      dailyBest: { bestStrokes: nextBest, dateKey: cid },
       distanceToPinMeters: 0,
       currentSurfaceTag: 'putting_green_turf',
+      ...zoneMeta,
       lastEventBanner: banner,
       trickToast: {
         seq: trickToastCounter,
@@ -894,12 +1298,19 @@ export const useCurbsideStore = create<CurbsideState>((set, get) => ({
   },
 
   replayHole: () => {
+    clearBannerTimer();
     soundEngine.playUiClick(0.9);
+    const plan = get().activePlan;
+    const teeBallPos: Vec3Tuple = [
+      plan.teePosition[0],
+      plan.teePosition[1] + BALL_RADIUS,
+      plan.teePosition[2],
+    ];
     teleportSeqCounter += 1;
     const nextSeq = teleportSeqCounter;
     set({
-      ...createInitialHoleSlice(),
-      pendingTeleport: { seq: nextSeq, position: [...INITIAL_BALL_POS] },
+      ...createInitialHoleSlice(plan),
+      pendingTeleport: { seq: nextSeq, position: teeBallPos },
       pendingBallReset: true,
     });
   },

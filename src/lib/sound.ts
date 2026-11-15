@@ -1,6 +1,20 @@
 'use client';
 
-import type { ClubId, SoundEventPayload, SoundEventType } from '@/types';
+import type { ClubId, CourseId, SoundEventPayload, SoundEventType } from '@/types';
+
+export type AcousticZoneProfile =
+  | 'sunlit_street'
+  | 'hillside_breeze'
+  | 'rooftop_sky'
+  | 'panoramic_overlook'
+  | 'subway_vault';
+
+export interface AcousticEnvironmentOptions {
+  courseId?: CourseId;
+  elevationY?: number;
+  ambientProfile?: AcousticZoneProfile;
+  isSubterranean?: boolean;
+}
 
 export type CurbsideSoundId =
   | SoundEventType
@@ -10,7 +24,16 @@ export type CurbsideSoundId =
   | 'steam_pop'
   | 'fountain_splash'
   | 'cup_drop'
-  | 'ui_click';
+  | 'ui_click'
+  | 'bell_tower_chime'
+  | 'copper_chute_whoosh'
+  | 'hvac_updraft_hum'
+  | 'skylight_glass_bank'
+  | 'turnstile_click'
+  | 'subway_stair_slide'
+  | 'subway_train_chime'
+  | 'golden_pin_finale'
+  | 'rooftop_breeze';
 
 export interface PlaySoundOptions {
   intensity?: number;
@@ -22,6 +45,8 @@ export interface PlaySoundOptions {
   flagIndex?: number;
   /** Optional shot power (0..1) for club strike scaling */
   power?: number;
+  /** Whether cup-out is the Stage 2 Grand Escapade Golden Pin finale */
+  isGoldenPin?: boolean;
 }
 
 export type SoundArg = number | PlaySoundOptions;
@@ -31,12 +56,18 @@ type WebkitWindow = Window & {
 };
 
 let audioCtx: AudioContext | null = null;
+let dryInputBus: GainNode | null = null;
+let wetFilterNode: BiquadFilterNode | null = null;
+let wetConvolver: ConvolverNode | null = null;
+let wetReverbGain: GainNode | null = null;
 let masterGain: GainNode | null = null;
 let compressor: DynamicsCompressorNode | null = null;
 let noiseBuffer: AudioBuffer | null = null;
 let isUnlocked = false;
 let unlockListenersAttached = false;
 let mutedState = false;
+let activeAcousticProfile: AcousticZoneProfile = 'sunlit_street';
+let activeSubterranean = false;
 
 // Minimum 45ms per-surface / per-voice cooldown to prevent multi-bounce clipping or spam
 const MIN_VOICE_COOLDOWN_MS = 45;
@@ -203,6 +234,74 @@ function getAudioContextConstructor(): typeof AudioContext | null {
   return window.AudioContext || (window as WebkitWindow).webkitAudioContext || null;
 }
 
+function createCeramicReverbIR(ctx: AudioContext): AudioBuffer {
+  const durationSec = 0.88;
+  const length = Math.max(1, Math.floor(ctx.sampleRate * durationSec));
+  const ir = ctx.createBuffer(2, length, ctx.sampleRate);
+  for (let ch = 0; ch < 2; ch += 1) {
+    const data = ir.getChannelData(ch);
+    let lp = 0;
+    for (let i = 0; i < length; i += 1) {
+      const t = i / length;
+      // Crisp ceramic early-reflection burst followed by smooth exponential tail
+      const earlyTap = i === Math.floor(ctx.sampleRate * (ch === 0 ? 0.017 : 0.023)) ? 0.55 : 0;
+      const white = Math.random() * 2 - 1;
+      lp = lp * 0.62 + white * 0.38;
+      const env = Math.pow(1 - t, 2.35) * 0.42;
+      data[i] = clamp(lp * env + earlyTap, -1, 1);
+    }
+  }
+  return ir;
+}
+
+function resolveZoneAcoustics(opts: AcousticEnvironmentOptions): {
+  profile: AcousticZoneProfile;
+  wetGain: number;
+  wetCutoffHz: number;
+  subterranean: boolean;
+} {
+  const elev = typeof opts.elevationY === 'number' && Number.isFinite(opts.elevationY)
+    ? opts.elevationY
+    : 0;
+  const subterranean = Boolean(
+    opts.isSubterranean || opts.ambientProfile === 'subway_vault' || elev < -1.0,
+  );
+  if (subterranean) {
+    return {
+      profile: 'subway_vault',
+      wetGain: 0.44,
+      wetCutoffHz: 3200,
+      subterranean: true,
+    };
+  }
+  if (
+    opts.ambientProfile === 'rooftop_sky' ||
+    opts.ambientProfile === 'panoramic_overlook' ||
+    elev >= 9.0
+  ) {
+    return {
+      profile: opts.ambientProfile ?? (elev >= 12.5 ? 'panoramic_overlook' : 'rooftop_sky'),
+      wetGain: 0.08,
+      wetCutoffHz: 4800,
+      subterranean: false,
+    };
+  }
+  if (opts.ambientProfile === 'hillside_breeze' || elev >= 1.5) {
+    return {
+      profile: 'hillside_breeze',
+      wetGain: 0.13,
+      wetCutoffHz: 4100,
+      subterranean: false,
+    };
+  }
+  return {
+    profile: 'sunlit_street',
+    wetGain: 0.16,
+    wetCutoffHz: 3600,
+    subterranean: false,
+  };
+}
+
 function ensureAudioGraph(): {
   ctx: AudioContext;
   out: AudioNode;
@@ -219,7 +318,7 @@ function ensureAudioGraph(): {
     }
   }
 
-  if (!compressor || !masterGain) {
+  if (!compressor || !masterGain || !dryInputBus) {
     compressor = audioCtx.createDynamicsCompressor();
     compressor.threshold.setValueAtTime(-14, audioCtx.currentTime);
     compressor.knee.setValueAtTime(18, audioCtx.currentTime);
@@ -229,6 +328,34 @@ function ensureAudioGraph(): {
 
     masterGain = audioCtx.createGain();
     masterGain.gain.setValueAtTime(mutedState ? 0 : 0.74, audioCtx.currentTime);
+
+    dryInputBus = audioCtx.createGain();
+    dryInputBus.gain.setValueAtTime(1.0, audioCtx.currentTime);
+    dryInputBus.connect(compressor);
+
+    try {
+      if (typeof audioCtx.createConvolver === 'function') {
+        wetFilterNode = audioCtx.createBiquadFilter();
+        wetFilterNode.type = 'lowpass';
+        wetFilterNode.frequency.setValueAtTime(3600, audioCtx.currentTime);
+
+        wetConvolver = audioCtx.createConvolver();
+        wetConvolver.buffer = createCeramicReverbIR(audioCtx);
+
+        wetReverbGain = audioCtx.createGain();
+        wetReverbGain.gain.setValueAtTime(0.16, audioCtx.currentTime);
+
+        dryInputBus.connect(wetFilterNode);
+        wetFilterNode.connect(wetConvolver);
+        wetConvolver.connect(wetReverbGain);
+        wetReverbGain.connect(compressor);
+      }
+    } catch {
+      // Fall back cleanly to dry compressor path if ConvolverNode is unavailable
+      wetFilterNode = null;
+      wetConvolver = null;
+      wetReverbGain = null;
+    }
 
     compressor.connect(masterGain);
     masterGain.connect(audioCtx.destination);
@@ -253,7 +380,39 @@ function ensureAudioGraph(): {
     }
   }
 
-  return { ctx: audioCtx, out: compressor, noise: noiseBuffer };
+  return { ctx: audioCtx, out: dryInputBus, noise: noiseBuffer };
+}
+
+/**
+ * Updates zone-aware room acoustics (sunlit street brick canyon vs airy rooftop sky
+ * vs warm vaulted ceramic-tile subway concourse reverb).
+ */
+export function setAcousticEnvironment(opts: AcousticEnvironmentOptions): void {
+  const resolved = resolveZoneAcoustics(opts);
+  const prevProfile = activeAcousticProfile;
+  const prevSubterranean = activeSubterranean;
+  activeAcousticProfile = resolved.profile;
+  activeSubterranean = resolved.subterranean;
+
+  if (audioCtx && wetReverbGain && wetFilterNode) {
+    const t = audioCtx.currentTime;
+    wetReverbGain.gain.cancelScheduledValues(t);
+    wetReverbGain.gain.setTargetAtTime(resolved.wetGain, t, 0.12);
+    wetFilterNode.frequency.cancelScheduledValues(t);
+    wetFilterNode.frequency.setTargetAtTime(resolved.wetCutoffHz, t, 0.12);
+  }
+
+  if (isUnlocked && canPlayNow()) {
+    if (!prevSubterranean && resolved.subterranean && canTriggerVoice('ambient:subway_entry', 2500)) {
+      playSubwayStairSlide({ intensity: 0.28, surfaceKey: 'ambient_entry' });
+    } else if (
+      prevProfile !== 'rooftop_sky' &&
+      resolved.profile === 'rooftop_sky' &&
+      canTriggerVoice('ambient:rooftop_breeze', 2800)
+    ) {
+      playRooftopBreeze(0.28);
+    }
+  }
 }
 
 function canPlayNow(): boolean {
@@ -1226,6 +1385,301 @@ function synthUiClick(
   });
 }
 
+function synthBellTowerChime(
+  ctx: AudioContext,
+  out: AudioNode,
+  t: number,
+  intensity: number,
+  brightness: number,
+): void {
+  // Warm bronze carillon strike (G4 fundamental + inharmonic bell partials)
+  triggerHaptic([12, 24, 10]);
+  const partials = [
+    { hz: 392.0, dur: 1.45, gain: 0.24 },
+    { hz: 784.0, dur: 0.95, gain: 0.12 },
+    { hz: 932.33, dur: 0.72, gain: 0.075 * brightness },
+    { hz: 1567.98, dur: 0.48, gain: 0.05 * brightness },
+  ];
+  partials.forEach((p) => {
+    scheduleTone(ctx, out, {
+      type: 'sine',
+      startTime: t,
+      duration: p.dur,
+      startFreq: p.hz,
+      endFreq: p.hz * 0.996,
+      peakGain: p.gain * intensity,
+      attack: 0.003,
+    });
+  });
+}
+
+function synthCopperChuteWhoosh(
+  ctx: AudioContext,
+  out: AudioNode,
+  noise: AudioBuffer,
+  t: number,
+  intensity: number,
+  brightness: number,
+): void {
+  // Swirling metallic copper spiral slide with helical bandpass sweep
+  triggerHaptic([10, 18, 12, 18, 14]);
+  scheduleFilteredNoise(ctx, out, noise, {
+    startTime: t,
+    duration: 0.85,
+    filterType: 'bandpass',
+    startFreq: 420 * brightness,
+    midFreq: { freq: 1180 * brightness, atOffset: 0.36 },
+    endFreq: 310,
+    q: 2.8,
+    peakGain: 0.24 * intensity,
+    attack: 0.045,
+  });
+  scheduleTone(ctx, out, {
+    type: 'triangle',
+    startTime: t,
+    duration: 0.65,
+    startFreq: 340,
+    midFreq: { freq: 520, atOffset: 0.28 },
+    endFreq: 210,
+    peakGain: 0.12 * intensity,
+    attack: 0.025,
+    lowpassHz: 1800,
+  });
+}
+
+function synthHvacUpdraftHum(
+  ctx: AudioContext,
+  out: AudioNode,
+  noise: AudioBuffer,
+  t: number,
+  intensity: number,
+): void {
+  // Rooftop HVAC vent lift burst — gentle fan turbine hum + air column lift
+  triggerHaptic([8, 14, 8]);
+  scheduleFilteredNoise(ctx, out, noise, {
+    startTime: t,
+    duration: 0.56,
+    filterType: 'bandpass',
+    startFreq: 240,
+    midFreq: { freq: 720, atOffset: 0.24 },
+    endFreq: 460,
+    q: 1.9,
+    peakGain: 0.22 * intensity,
+    attack: 0.03,
+  });
+  scheduleTone(ctx, out, {
+    type: 'sine',
+    startTime: t,
+    duration: 0.42,
+    startFreq: 138,
+    endFreq: 184,
+    peakGain: 0.12 * intensity,
+    attack: 0.02,
+  });
+}
+
+function synthSkylightGlassBank(
+  ctx: AudioContext,
+  out: AudioNode,
+  noise: AudioBuffer,
+  t: number,
+  intensity: number,
+  brightness: number,
+): void {
+  // Crisp tempered rooftop skylight glass ricochet
+  triggerHaptic(9);
+  scheduleTone(ctx, out, {
+    type: 'sine',
+    startTime: t,
+    duration: 0.21,
+    startFreq: 1480 * brightness,
+    endFreq: 1360 * brightness,
+    peakGain: 0.19 * intensity,
+    attack: 0.0015,
+  });
+  scheduleTone(ctx, out, {
+    type: 'triangle',
+    startTime: t,
+    duration: 0.075,
+    startFreq: 2840 * brightness,
+    endFreq: 2210,
+    peakGain: 0.085 * intensity,
+    attack: 0.001,
+    lowpassHz: 4800,
+  });
+  scheduleFilteredNoise(ctx, out, noise, {
+    startTime: t,
+    duration: 0.024,
+    filterType: 'highpass',
+    startFreq: 2600,
+    q: 1.1,
+    peakGain: 0.09 * intensity,
+    attack: 0.001,
+  });
+}
+
+function synthTurnstileClick(
+  ctx: AudioContext,
+  out: AudioNode,
+  noise: AudioBuffer,
+  t: number,
+  intensity: number,
+): void {
+  // Vintage brushed-brass NYC subway turnstile triple mechanical ratchet
+  triggerHaptic([10, 26, 8]);
+  [0, 0.055, 0.115].forEach((offset, idx) => {
+    const pitchScale = idx === 1 ? 1.16 : idx === 2 ? 0.88 : 1.0;
+    scheduleTone(ctx, out, {
+      type: 'triangle',
+      startTime: t + offset,
+      duration: 0.048,
+      startFreq: 640 * pitchScale,
+      endFreq: 280 * pitchScale,
+      peakGain: (idx === 0 ? 0.22 : 0.16) * intensity,
+      attack: 0.0015,
+      lowpassHz: 2800,
+    });
+    scheduleFilteredNoise(ctx, out, noise, {
+      startTime: t + offset,
+      duration: 0.018,
+      filterType: 'bandpass',
+      startFreq: 2100 * pitchScale,
+      q: 2.2,
+      peakGain: 0.1 * intensity,
+      attack: 0.001,
+    });
+  });
+}
+
+function synthSubwayStairSlide(
+  ctx: AudioContext,
+  out: AudioNode,
+  noise: AudioBuffer,
+  t: number,
+  intensity: number,
+): void {
+  // Brass handrail glide down ceramic subway steps
+  triggerHaptic(7);
+  scheduleFilteredNoise(ctx, out, noise, {
+    startTime: t,
+    duration: 0.44,
+    filterType: 'bandpass',
+    startFreq: 980,
+    endFreq: 520,
+    q: 2.0,
+    peakGain: 0.16 * intensity,
+    attack: 0.02,
+  });
+  scheduleTone(ctx, out, {
+    type: 'sine',
+    startTime: t,
+    duration: 0.34,
+    startFreq: 480,
+    endFreq: 310,
+    peakGain: 0.085 * intensity,
+    attack: 0.012,
+  });
+}
+
+function synthSubwayTrainChime(
+  ctx: AudioContext,
+  out: AudioNode,
+  t: number,
+  intensity: number,
+): void {
+  // Classic warm NYC subway two-tone door chime (Bb4 -> G4)
+  triggerHaptic([11, 30, 14]);
+  const notes = [
+    { hz: 466.16, offset: 0, dur: 0.28 },
+    { hz: 392.0, offset: 0.21, dur: 0.48 },
+  ];
+  notes.forEach((note) => {
+    scheduleTone(ctx, out, {
+      type: 'sine',
+      startTime: t + note.offset,
+      duration: note.dur,
+      startFreq: note.hz,
+      peakGain: 0.21 * intensity,
+      attack: 0.004,
+    });
+    scheduleTone(ctx, out, {
+      type: 'triangle',
+      startTime: t + note.offset,
+      duration: note.dur * 0.72,
+      startFreq: note.hz * 2,
+      peakGain: 0.055 * intensity,
+      attack: 0.003,
+      lowpassHz: 3200,
+    });
+  });
+}
+
+function synthRooftopBreeze(
+  ctx: AudioContext,
+  out: AudioNode,
+  noise: AudioBuffer,
+  t: number,
+  intensity: number,
+): void {
+  // Soft airy high-altitude rooftop wind shimmer
+  scheduleFilteredNoise(ctx, out, noise, {
+    startTime: t,
+    duration: 0.9,
+    filterType: 'bandpass',
+    startFreq: 520,
+    midFreq: { freq: 940, atOffset: 0.42 },
+    endFreq: 610,
+    q: 1.5,
+    peakGain: 0.13 * intensity,
+    attack: 0.12,
+  });
+}
+
+function synthGoldenPinFinale(
+  ctx: AudioContext,
+  out: AudioNode,
+  t: number,
+  intensity: number,
+): void {
+  // Subway cup rattle + classic two-tone door chime + radiant Gmaj9 Golden Pin triumph
+  triggerHaptic([18, 36, 16, 36, 26]);
+  synthCupRattleOnly(ctx, out, t, intensity);
+
+  // Quick train door chime salute into sunlit Gmaj9 brass/bell chord
+  scheduleTone(ctx, out, {
+    type: 'sine',
+    startTime: t + 0.14,
+    duration: 0.22,
+    startFreq: 466.16,
+    peakGain: 0.16 * intensity,
+    attack: 0.004,
+  });
+  const arpStart = t + 0.28;
+  const gmaj9 = [392.0, 493.88, 587.33, 739.99, 880.0, 1174.66, 1567.98];
+  gmaj9.forEach((hz, idx) => {
+    const noteTime = arpStart + idx * 0.062;
+    const isTop = idx === gmaj9.length - 1;
+    const dur = isTop ? 1.35 : 0.52;
+    scheduleTone(ctx, out, {
+      type: 'triangle',
+      startTime: noteTime,
+      duration: dur,
+      startFreq: hz,
+      peakGain: (isTop ? 0.25 : 0.17) * intensity,
+      attack: 0.004,
+      lowpassHz: 4800,
+    });
+    scheduleTone(ctx, out, {
+      type: 'sine',
+      startTime: noteTime,
+      duration: dur * 0.85,
+      startFreq: hz * 2,
+      peakGain: (isTop ? 0.09 : 0.045) * intensity,
+      attack: 0.003,
+    });
+  });
+}
+
 // ============================================================================
 // PUBLIC NAMED VOICE HELPERS
 // ============================================================================
@@ -1390,7 +1844,160 @@ export function playCupDrop(
   if (!canTriggerVoice(voiceKey, 350)) return;
   const ready = getReadyGraph();
   if (!ready) return;
-  synthCupDropAndVictory(ready.ctx, ready.out, ready.t, intensity);
+  const isGoldenPin =
+    (typeof intensityOrOpts === 'object' && Boolean(intensityOrOpts.isGoldenPin)) ||
+    activeSubterranean;
+  if (isGoldenPin) {
+    synthGoldenPinFinale(ready.ctx, ready.out, ready.t, intensity);
+  } else {
+    synthCupDropAndVictory(ready.ctx, ready.out, ready.t, intensity);
+  }
+}
+
+export function playBellTowerChime(
+  intensityOrOpts: SoundArg = 0.95,
+  impactSpeed?: number,
+): void {
+  const { intensity, brightness, surfaceKey } = resolveVelocityParams(
+    intensityOrOpts,
+    impactSpeed,
+    0.95,
+    10.0,
+    0.25,
+    1.2,
+  );
+  const voiceKey = surfaceKey ? `bell:${surfaceKey}` : 'bell_tower_chime';
+  if (!canTriggerVoice(voiceKey, 180)) return;
+  const ready = getReadyGraph();
+  if (!ready) return;
+  synthBellTowerChime(ready.ctx, ready.out, ready.t, intensity, brightness);
+}
+
+export function playCopperChuteWhoosh(
+  intensityOrOpts: SoundArg = 0.9,
+  impactSpeed?: number,
+): void {
+  const { intensity, brightness, surfaceKey } = resolveVelocityParams(
+    intensityOrOpts,
+    impactSpeed,
+    0.9,
+    14.0,
+    0.2,
+    1.2,
+  );
+  const voiceKey = surfaceKey ? `chute:${surfaceKey}` : 'copper_chute_whoosh';
+  if (!canTriggerVoice(voiceKey, 260)) return;
+  const ready = getReadyGraph();
+  if (!ready) return;
+  synthCopperChuteWhoosh(ready.ctx, ready.out, ready.noise, ready.t, intensity, brightness);
+}
+
+export function playHvacUpdraftHum(
+  intensityOrOpts: SoundArg = 0.9,
+  impactSpeed?: number,
+): void {
+  const { intensity, surfaceKey } = resolveVelocityParams(
+    intensityOrOpts,
+    impactSpeed,
+    0.9,
+    10.0,
+    0.2,
+    1.2,
+  );
+  const voiceKey = surfaceKey ? `hvac:${surfaceKey}` : 'hvac_updraft_hum';
+  if (!canTriggerVoice(voiceKey, 220)) return;
+  const ready = getReadyGraph();
+  if (!ready) return;
+  synthHvacUpdraftHum(ready.ctx, ready.out, ready.noise, ready.t, intensity);
+}
+
+export function playSkylightGlassBank(
+  intensityOrOpts: SoundArg = 0.85,
+  impactSpeed?: number,
+): void {
+  const { intensity, brightness, surfaceKey } = resolveVelocityParams(
+    intensityOrOpts,
+    impactSpeed,
+    0.85,
+    11.0,
+    0.2,
+    1.2,
+  );
+  const voiceKey = surfaceKey ? `skylight:${surfaceKey}` : 'skylight_glass_bank';
+  if (!canTriggerVoice(voiceKey, 75)) return;
+  const ready = getReadyGraph();
+  if (!ready) return;
+  synthSkylightGlassBank(ready.ctx, ready.out, ready.noise, ready.t, intensity, brightness);
+}
+
+export function playTurnstileClick(
+  intensityOrOpts: SoundArg = 0.9,
+  impactSpeed?: number,
+): void {
+  const { intensity, surfaceKey } = resolveVelocityParams(
+    intensityOrOpts,
+    impactSpeed,
+    0.9,
+    9.0,
+    0.2,
+    1.2,
+  );
+  const voiceKey = surfaceKey ? `turnstile:${surfaceKey}` : 'turnstile_click';
+  if (!canTriggerVoice(voiceKey, 160)) return;
+  const ready = getReadyGraph();
+  if (!ready) return;
+  synthTurnstileClick(ready.ctx, ready.out, ready.noise, ready.t, intensity);
+}
+
+export function playSubwayStairSlide(
+  intensityOrOpts: SoundArg = 0.8,
+  impactSpeed?: number,
+): void {
+  const { intensity, surfaceKey } = resolveVelocityParams(
+    intensityOrOpts,
+    impactSpeed,
+    0.8,
+    10.0,
+    0.18,
+    1.15,
+  );
+  const voiceKey = surfaceKey ? `stair:${surfaceKey}` : 'subway_stair_slide';
+  if (!canTriggerVoice(voiceKey, 240)) return;
+  const ready = getReadyGraph();
+  if (!ready) return;
+  synthSubwayStairSlide(ready.ctx, ready.out, ready.noise, ready.t, intensity);
+}
+
+export function playSubwayTrainChime(intensityOrOpts: SoundArg = 0.95): void {
+  const { intensity, surfaceKey } = resolveVelocityParams(
+    intensityOrOpts,
+    undefined,
+    0.95,
+    1.0,
+    0.2,
+    1.2,
+  );
+  const voiceKey = surfaceKey ? `train:${surfaceKey}` : 'subway_train_chime';
+  if (!canTriggerVoice(voiceKey, 320)) return;
+  const ready = getReadyGraph();
+  if (!ready) return;
+  synthSubwayTrainChime(ready.ctx, ready.out, ready.t, intensity);
+}
+
+export function playRooftopBreeze(intensityOrOpts: SoundArg = 0.5): void {
+  const { intensity } = resolveVelocityParams(intensityOrOpts, undefined, 0.5, 1.0, 0.12, 1.0);
+  if (!canTriggerVoice('rooftop_breeze', 1200)) return;
+  const ready = getReadyGraph();
+  if (!ready) return;
+  synthRooftopBreeze(ready.ctx, ready.out, ready.noise, ready.t, intensity);
+}
+
+export function playGoldenPinFinale(intensityOrOpts: SoundArg = 1.0): void {
+  const { intensity } = resolveVelocityParams(intensityOrOpts, undefined, 1.0, 1.0, 0.3, 1.2);
+  if (!canTriggerVoice('golden_pin_finale', 450)) return;
+  const ready = getReadyGraph();
+  if (!ready) return;
+  synthGoldenPinFinale(ready.ctx, ready.out, ready.t, intensity);
 }
 
 export function playUiClick(intensityOrOpts: SoundArg = 0.8): void {
@@ -1497,6 +2104,33 @@ export function playToySound(
     case 'ui_click':
       playUiClick(opts);
       break;
+    case 'bell_tower_chime':
+      playBellTowerChime(opts);
+      break;
+    case 'copper_chute_whoosh':
+      playCopperChuteWhoosh(opts);
+      break;
+    case 'hvac_updraft_hum':
+      playHvacUpdraftHum(opts);
+      break;
+    case 'skylight_glass_bank':
+      playSkylightGlassBank(opts);
+      break;
+    case 'turnstile_click':
+      playTurnstileClick(opts);
+      break;
+    case 'subway_stair_slide':
+      playSubwayStairSlide(opts);
+      break;
+    case 'subway_train_chime':
+      playSubwayTrainChime(opts);
+      break;
+    case 'golden_pin_finale':
+      playGoldenPinFinale(opts);
+      break;
+    case 'rooftop_breeze':
+      playRooftopBreeze(opts);
+      break;
     default: {
       const _exhaustive: never = sound;
       void _exhaustive;
@@ -1516,6 +2150,7 @@ export const soundEngine = {
   unlock: unlockAudioEngine,
   setMuted: setSoundMuted,
   isMuted: isSoundMuted,
+  setAcousticEnvironment,
   play: playToySound,
   playPayload: playSoundPayload,
   playClubStrike,
@@ -1526,6 +2161,15 @@ export const soundEngine = {
   playFountainSplash,
   playPigeonScatter,
   playCupDrop,
+  playBellTowerChime,
+  playCopperChuteWhoosh,
+  playHvacUpdraftHum,
+  playSkylightGlassBank,
+  playTurnstileClick,
+  playSubwayStairSlide,
+  playSubwayTrainChime,
+  playRooftopBreeze,
+  playGoldenPinFinale,
   playUiClick,
   playSwingTick,
 };

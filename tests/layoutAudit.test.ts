@@ -1255,3 +1255,6 @@ test('6. Cleanup Audit: zero leftover procedural seed/6x6 island generator files
     );
   }
 });
+
+// Execute Stage 2 ("The Grand Crosstown Escapade") CAD, Topography, Enclosure & Spline Audit Suite
+import './grandEscapadeAudit.test';

@@ -54,8 +54,10 @@ export const ELEVATIONS = {
   WATER_RIM_Y: 0.88,
 } as const;
 
-/** Exact resting zone elevations allowed for grounded props & structures */
-export type AllowedGroundDatum = -0.02 | 0 | 0.15 | 0.6;
+export type CourseId = 'classic' | 'grand-escapade';
+
+/** Resting zone elevations for grounded props & multi-level vertical urban structures */
+export type AllowedGroundDatum = number;
 
 export type CardinalDirection = 'north' | 'east' | 'south' | 'west';
 
@@ -70,12 +72,20 @@ export const FLAG_COLORS: readonly FlagColor[] = [
 ] as const;
 
 export interface FlagColorMeta {
-  color: FlagColor;
+  color: FlagColor | 'gold';
   label: string;
   hex: string;
   lightHex: string;
   emoji: string;
 }
+
+export const GOLDEN_PIN_COLOR_META: FlagColorMeta = {
+  color: 'gold',
+  label: 'Golden Pin',
+  hex: '#F59E0B',
+  lightHex: '#FDE68A',
+  emoji: '🏆',
+};
 
 export const FLAG_COLOR_META: Record<FlagColor, FlagColorMeta> = {
   red: {
@@ -155,6 +165,18 @@ export interface GroundZoneArcClipSpec {
   quadrant: 'sw' | 'se' | 'nw' | 'ne';
 }
 
+export type GrandEscapadeZoneNumber = 1 | 2 | 3 | 4 | 5 | 6 | 7;
+
+export type EscapadeMaterialVariant =
+  | 'cobblestone_hill'
+  | 'tenement_rooftop_deck'
+  | 'timber_bridge_plank'
+  | 'viaduct_limestone'
+  | 'copper_chute_metal'
+  | 'beaux_arts_granite'
+  | 'subway_ceramic_tile'
+  | 'subway_car_floor';
+
 export interface GroundSurfaceZoneSpec {
   id: string;
   label: string;
@@ -175,6 +197,9 @@ export interface GroundSurfaceZoneSpec {
   restitution: number;
   /** Linear roll damping applied when ball rolls on this zone */
   rollDamping: number;
+  /** Optional zone index (1..7) and visual material variant for Grand Escapade */
+  zoneNumber?: GrandEscapadeZoneNumber;
+  escapadeMaterialVariant?: EscapadeMaterialVariant;
   aabb: AABB3D;
 }
 
@@ -254,6 +279,8 @@ export interface WalkableRampSpec {
   slabThickness: number;
   friction: number;
   restitution: number;
+  zoneNumber?: GrandEscapadeZoneNumber;
+  escapadeMaterialVariant?: EscapadeMaterialVariant;
   aabb: AABB3D;
 }
 
@@ -291,9 +318,9 @@ export interface PerimeterBuildingSpec {
     minZ: number;
     maxZ: number;
   };
-  /** Total facade/roof height in meters (10m-16m primary, 18m-26m backdrop skyline) */
+  /** Total facade/roof height in meters (above groundY) */
   height: number;
-  stories: 3 | 4 | 5 | 6;
+  stories: number;
   palette: BuildingPaletteId;
   trimPalette: BuildingPaletteId;
   roofStyle: BuildingRoofStyle;
@@ -308,6 +335,7 @@ export interface PerimeterBuildingSpec {
   shopfrontAwningHex?: string;
   /** True if the flush left-sidewalk Scaffolding Shed bolts directly onto this facade */
   isScaffoldingHost?: boolean;
+  zoneNumber?: GrandEscapadeZoneNumber;
   aabb: AABB3D;
 }
 
@@ -318,7 +346,11 @@ export interface ArchitecturalWallSpec {
     | 'stone_retaining_wall'
     | 'wrought_iron_planter_wall'
     | 'subway_stair_parapet'
-    | 'courtyard_boundary_wall';
+    | 'courtyard_boundary_wall'
+    | 'rooftop_brick_parapet'
+    | 'viaduct_limestone_balustrade'
+    | 'subway_ceramic_vault_wall'
+    | 'subway_vault_ceiling_slab';
   groundY: number;
   topY: number;
   center: Vec3Tuple;
@@ -326,6 +358,7 @@ export interface ArchitecturalWallSpec {
   rotationY: number;
   surfaceTag: PhysicsSurfaceTag;
   restitution: number;
+  zoneNumber?: GrandEscapadeZoneNumber;
   aabb: AABB3D;
 }
 
@@ -355,6 +388,9 @@ export interface CourtyardPergolaSpec {
 export interface HoleCupSpec {
   id: string;
   flagColor: FlagColor;
+  /** True for Stage 2's finale metallic 24k Golden Pin inside the Subway Vault */
+  isGoldenPin?: boolean;
+  pinFinish?: 'standard' | 'golden';
   /** World cup center [x, +0.60, z] flush on sunlit courtyard putting green */
   position: Vec3Tuple;
   elevationY: number;
@@ -412,6 +448,23 @@ export type PropType =
   | 'street_lamp'
   | 'pigeon_flock';
 
+export type GrandEscapadePropType =
+  | PropType
+  | 'rooftop_water_tower'
+  | 'angled_skylight_bank'
+  | 'greenhouse_pergola'
+  | 'hvac_updraft_fan'
+  | 'stone_viaduct_arch'
+  | 'curved_balustrade_bank'
+  | 'glass_conservatory'
+  | 'rooftop_bell_tower'
+  | 'copper_spiral_chute'
+  | 'newspaper_kiosk'
+  | 'grand_subway_headhouse'
+  | 'brass_turnstile_gate'
+  | 'vintage_subway_car'
+  | 'subway_mosaic_pillar';
+
 export interface PropReactiveSpec {
   kind:
     | 'awning_cushion_bank'
@@ -423,7 +476,13 @@ export interface PropReactiveSpec {
     | 'van_ramp_and_roof_launch'
     | 'water_hazard'
     | 'patio_rough_damping'
-    | 'pigeon_scatter';
+    | 'pigeon_scatter'
+    | 'hvac_updraft_boost'
+    | 'skylight_angled_bank'
+    | 'bell_tower_chime'
+    | 'copper_chute_funnel'
+    | 'stairwell_brass_slide'
+    | 'subway_car_tunnel';
   zoneCenter: Vec3Tuple;
   zoneHalfExtents?: Vec3Tuple;
   zoneRadius?: number;
@@ -518,6 +577,19 @@ export interface SteamGrateLiftMetadata {
   targetFrontFringePoint: Vec3Tuple;
 }
 
+export interface PitchedBankColliderMetadata {
+  pitchDeg: number;
+  restitution: number;
+  friction?: number;
+  /** World-space center of the tilted sash/bank plane */
+  sashCenter: Vec3Tuple;
+  /** Local box dimensions [widthX, thicknessY, lengthZ] of the tilted sash */
+  sashSize: Vec3Tuple;
+  /** Outward world unit normal of the tilted bank surface */
+  worldNormal: Vec3Tuple;
+  boostVelocity?: Vec3Tuple;
+}
+
 export interface PlacedProp {
   id: string;
   name: string;
@@ -549,8 +621,12 @@ export interface PlacedProp {
   vanRampMeta?: DeliveryVanRampMetadata;
   treeOverhangMeta?: OverhangingTreeMetadata;
   hotdogAwningMeta?: HotdogAwningMetadata;
+  pitchedBankMeta?: PitchedBankColliderMetadata;
   hydrantBoostMeta?: HydrantGutterBoostMetadata;
   steamLiftMeta?: SteamGrateLiftMetadata;
+  /** Stage 2 Grand Escapade specialized prop archetype & vertical zone tag (1..7) */
+  escapadePropType?: GrandEscapadePropType;
+  zoneNumber?: GrandEscapadeZoneNumber;
   // Legacy optional tile indices kept optional for smooth component migration
   tileCol?: number;
   tileRow?: number;
@@ -561,12 +637,13 @@ export type CoursePropSpec = PlacedProp;
 export interface StrategicShotRouteSpec {
   id: string;
   name: string;
-  strokeNumber: 1 | 2;
+  strokeNumber: number;
   recommendedClub: 'driver' | 'wedge' | 'skimmer' | 'putter';
   origin: Vec3Tuple;
   targetPoint: Vec3Tuple;
   summary: string;
   keyPropIds: string[];
+  zoneNumber?: GrandEscapadeZoneNumber;
 }
 
 export type AuditStationId =
@@ -574,7 +651,8 @@ export type AuditStationId =
   | 'tee_backward_180'
   | 'mid_street'
   | 'corner_dogleg'
-  | 'courtyard_green_out';
+  | 'courtyard_green_out'
+  | `escapade_zone_${GrandEscapadeZoneNumber}`;
 
 export interface AuditCameraStationSpec {
   id: AuditStationId;
@@ -585,6 +663,8 @@ export interface AuditCameraStationSpec {
   lookAt: Vec3Tuple;
   fovDeg: number;
   expectedLandmarks: string[];
+  zoneNumber?: GrandEscapadeZoneNumber;
+  isSubterranean?: boolean;
 }
 
 export interface StreetScoutCameraSpec {
@@ -596,13 +676,133 @@ export interface StreetScoutCameraSpec {
   maxAllowedHeightY: number;
 }
 
-export interface CourseMasterPlan {
-  holeNumber: 1;
-  holeId: 'hole-1-5th-and-mercer';
-  holeName: 'Hole 1: 5th & Mercer';
+export interface QaTeleportZoneSpec {
+  zoneNumber: GrandEscapadeZoneNumber;
+  zoneId: string;
+  zoneName: string;
+  elevationLabel: string;
+  /** Grounded resting coordinate [x, surfaceY, z] on a flat 0%-grade pad */
+  position: Vec3Tuple;
+  /** Compass aim yaw in radians (0 = North -Z, PI/2 = East +X, PI = South +Z, -PI/2 = West -X) */
+  aimYaw: number;
+  /** Reference sightline target in world space */
+  lookAt: Vec3Tuple;
+  recommendedClub: 'driver' | 'wedge' | 'skimmer' | 'putter';
+  isSubterranean: boolean;
+}
+
+export interface GrandEscapadeZoneSpec {
+  zoneNumber: GrandEscapadeZoneNumber;
+  id: string;
+  name: string;
   subtitle: string;
-  par: 4;
-  targetCenterlineMeters: 72;
+  elevationRangeY: [number, number];
+  targetLengthMeters: number;
+  chunkBoundsXZ: {
+    minX: number;
+    maxX: number;
+    minZ: number;
+    maxZ: number;
+  };
+  /** Zone numbers that should remain mounted/simulated when player is in this zone */
+  activeChunkNeighbors: GrandEscapadeZoneNumber[];
+  isSubterranean: boolean;
+  ambientProfile:
+    | 'sunlit_street'
+    | 'hillside_breeze'
+    | 'rooftop_sky'
+    | 'panoramic_overlook'
+    | 'subway_vault';
+}
+
+export interface CopperChuteSegmentSpec {
+  index: number;
+  start: Vec3Tuple;
+  end: Vec3Tuple;
+  center: Vec3Tuple;
+  tangent: Vec3Tuple;
+  length: number;
+  yawRad: number;
+  pitchRad: number;
+  bankRollRad: number;
+}
+
+export interface CopperSpiralChuteSpec {
+  id: string;
+  entryFunnelBoundsXZ: {
+    minX: number;
+    maxX: number;
+    minZ: number;
+    maxZ: number;
+  };
+  entryPosition: Vec3Tuple;
+  exitSpoutPosition: Vec3Tuple;
+  exitLaunchVelocity: Vec3Tuple;
+  helixPivotXZ: Vec2Tuple;
+  helixRadiusMeters: number;
+  channelWidthMeters: number;
+  wallHeightMeters: number;
+  turns: number;
+  restitution: number;
+  friction: number;
+  waypoints: Vec3Tuple[];
+  segments: CopperChuteSegmentSpec[];
+}
+
+export interface SubwayLightShaftSpec {
+  id: string;
+  label: string;
+  /** Overhead ceiling oculus center [x, ceilingY, z] */
+  ceilingCenter: Vec3Tuple;
+  /** Illuminated floor pool center [x, floorY, z] */
+  floorTarget: Vec3Tuple;
+  grateSizeXZ: Vec2Tuple;
+  beamRadiusMeters: number;
+}
+
+export interface SubwayVaultEnclosureSpec {
+  id: string;
+  stationSignTitle: string;
+  stationSubtitle: string;
+  boundsXZ: {
+    minX: number;
+    maxX: number;
+    minZ: number;
+    maxZ: number;
+  };
+  platformFloorY: number;
+  vaultSpringlineY: number;
+  vaultCrownY: number;
+  archRibZs: number[];
+  sconcePositions: Vec3Tuple[];
+  lightShafts: SubwayLightShaftSpec[];
+}
+
+export interface GrandEscapadeQaPropSpec {
+  id: string;
+  title: string;
+  escapadePropType: GrandEscapadePropType;
+  fallbackPropType: PropType;
+  zoneNumber: GrandEscapadeZoneNumber;
+  category:
+    | 'hero-obstacle'
+    | 'dynamic-hazard'
+    | 'courtyard-furniture'
+    | 'street-architecture';
+  description: string;
+  localSize: Vec3Tuple;
+  localBoundsMin: Vec3Tuple;
+  localBoundsMax: Vec3Tuple;
+}
+
+export interface CourseMasterPlan {
+  courseId?: CourseId;
+  holeNumber: 1;
+  holeId: string;
+  holeName: string;
+  subtitle: string;
+  par: number;
+  targetCenterlineMeters: number;
   computedCenterlineMeters: number;
   worldBoundsXZ: {
     minX: number;
@@ -643,6 +843,20 @@ export interface CourseMasterPlan {
     };
     topY: number;
   };
+}
+
+export interface GrandEscapadeMasterPlan extends CourseMasterPlan {
+  courseId: 'grand-escapade';
+  par: 18;
+  targetCenterlineMeters: 380;
+  zones: GrandEscapadeZoneSpec[];
+  qaTeleportZones: Record<GrandEscapadeZoneNumber, QaTeleportZoneSpec>;
+  qaTeleportZoneList: QaTeleportZoneSpec[];
+  flyoverSplinePoints: Vec3Tuple[];
+  flyoverLookAtPoints: Vec3Tuple[];
+  copperChuteSpec: CopperSpiralChuteSpec;
+  subwayStationVault: SubwayVaultEnclosureSpec;
+  qaGalleryPropSpecs: GrandEscapadeQaPropSpec[];
 }
 
 // ============================================================================

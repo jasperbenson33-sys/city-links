@@ -1,6 +1,7 @@
 'use client';
 
 import React from 'react';
+import type * as THREE from 'three';
 import type {
   ClubId,
   CourseMasterPlan,
@@ -24,6 +25,8 @@ export interface CityIslandWorldProps {
   selectedClub?: ClubId;
   /** Live ball world coordinates for proximity-reactive props like scattering pigeons. */
   ballPosition?: Vec3Tuple;
+  /** Optional mutable ref to live ball world position (for zero-rerender spatial chunk culling). */
+  ballWorldPositionRef?: React.RefObject<THREE.Vector3 | null>;
   /** Last hit timestamps keyed by prop ID or PropType for bounce/splash reactions. */
   propHitTimestamps?: Record<string, number>;
   /** Include golden-hour lighting, sky dome, clouds & skyline (default true). */
@@ -48,6 +51,7 @@ export const CityIslandWorld = React.memo(function CityIslandWorld({
   sunkFlags,
   selectedClub = 'driver',
   ballPosition,
+  ballWorldPositionRef,
   propHitTimestamps,
   includeLighting = true,
   showHorizon = true,
@@ -61,6 +65,7 @@ export const CityIslandWorld = React.memo(function CityIslandWorld({
       sunkFlags={sunkFlags}
       selectedClub={selectedClub}
       ballPosition={ballPosition}
+      ballWorldPositionRef={ballWorldPositionRef}
       propHitTimestamps={propHitTimestamps}
       includeLighting={includeLighting}
       showHorizon={showHorizon}

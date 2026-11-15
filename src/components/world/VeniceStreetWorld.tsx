@@ -1,12 +1,14 @@
 'use client';
 
 import React, { useMemo } from 'react';
+import * as THREE from 'three';
 import { COURSE_MASTER_PLAN } from '@/config/courseMasterPlan';
 import type {
   ClubId,
   CourseMasterPlan,
   CoursePropSpec,
   FlagColor,
+  GrandEscapadeMasterPlan,
   Vec3Tuple,
 } from '@/types';
 import { LightingAndSky } from './LightingAndSky';
@@ -14,12 +16,21 @@ import { PerimeterEnclosure } from './architecture';
 import { StreetSurfaceWorld } from './street';
 import { CupFlagAssembly } from './tiles';
 import { GolfBagAndTeeProp, PlacedPropRenderer } from './props';
+import { GrandEscapadeZonesLayer } from './zones';
+
+function asGrandEscapadePlan(plan: CourseMasterPlan): GrandEscapadeMasterPlan | null {
+  return plan.courseId === 'grand-escapade' && 'zones' in plan
+    ? (plan as GrandEscapadeMasterPlan)
+    : null;
+}
 
 export interface VeniceStreetWorldProps {
   /** Authoritative street-level CAD master plan (defaults to COURSE_MASTER_PLAN for Hole 1). */
   plan?: CourseMasterPlan;
   /** Live ball world coordinates for proximity-reactive props (pigeons, steam gusts). */
   ballPosition?: Vec3Tuple;
+  /** Optional mutable ref to live ball world position (for zero-rerender spatial chunk culling). */
+  ballWorldPositionRef?: React.RefObject<THREE.Vector3 | null>;
   /** Currently equipped club (updates tour bag club preview beside start tee). */
   selectedClub?: ClubId;
   /** Last hit timestamps keyed by prop ID or PropType for bounce/splash reactions. */
@@ -42,19 +53,26 @@ const DEFAULT_SHADOW_TARGET: [number, number, number] = [9, 0, 2];
 
 const VeniceStaticBackdrop = React.memo(function VeniceStaticBackdrop({
   plan,
+  ballPositionRef,
   includeLighting,
   showHorizon,
   showWireframe,
 }: {
   plan: CourseMasterPlan;
+  ballPositionRef?: React.RefObject<THREE.Vector3 | null>;
   includeLighting: boolean;
   showHorizon: boolean;
   showWireframe: boolean;
 }) {
+  const escapadePlan = asGrandEscapadePlan(plan);
   return (
     <group name="venice-static-backdrop">
       {includeLighting && (
         <LightingAndSky
+          courseId={plan.courseId}
+          plan={plan}
+          ballPositionRef={ballPositionRef}
+          subwayVault={escapadePlan?.subwayStationVault}
           showHorizon={showHorizon}
           shadowTarget={DEFAULT_SHADOW_TARGET}
         />
@@ -67,6 +85,9 @@ const VeniceStaticBackdrop = React.memo(function VeniceStaticBackdrop({
         pergola={plan.courtyardPergola}
         stringLights={plan.stringLightSpans}
         skylineBackdrops={plan.skylineBackdrops}
+        subwayStationVault={escapadePlan?.subwayStationVault}
+        outerGroundSkirt={plan.outerGroundSkirt}
+        courseId={plan.courseId}
         showHorizon={showHorizon}
         showWireframe={showWireframe}
       />
@@ -81,6 +102,7 @@ const VeniceStaticBackdrop = React.memo(function VeniceStaticBackdrop({
         crosswalk={plan.aPositionCrosswalk}
         vanLoadingZone={plan.vanLoadingZone}
         cup={plan.cup}
+        courseId={plan.courseId}
         includeCupAssembly={false}
         showWireframe={showWireframe}
       />
@@ -129,6 +151,7 @@ function isDynamicProp(prop: CoursePropSpec): boolean {
 export const VeniceStreetWorld = React.memo(function VeniceStreetWorld({
   plan = COURSE_MASTER_PLAN,
   ballPosition,
+  ballWorldPositionRef,
   selectedClub = 'driver',
   propHitTimestamps,
   isHoleSunk,
@@ -141,15 +164,19 @@ export const VeniceStreetWorld = React.memo(function VeniceStreetWorld({
   const resolvedHoleSunk =
     isHoleSunk ?? Boolean(sunkFlags?.[plan.cup.flagColor]);
 
+  const escapadePlan = asGrandEscapadePlan(plan);
+  const isGrandEscapade = Boolean(escapadePlan && escapadePlan.zones.length > 0);
+
   const { staticProps, dynamicProps } = useMemo(() => {
     const s: CoursePropSpec[] = [];
     const d: CoursePropSpec[] = [];
+    if (isGrandEscapade) return { staticProps: s, dynamicProps: d };
     for (const p of plan.props) {
       if (isDynamicProp(p)) d.push(p);
       else s.push(p);
     }
     return { staticProps: s, dynamicProps: d };
-  }, [plan.props]);
+  }, [plan.props, isGrandEscapade]);
 
   const teePos = useMemo<[number, number, number]>(
     () => [plan.teePosition[0], plan.teePosition[1], plan.teePosition[2]],
@@ -170,6 +197,7 @@ export const VeniceStreetWorld = React.memo(function VeniceStreetWorld({
     <group name="venice-street-world">
       <VeniceStaticBackdrop
         plan={plan}
+        ballPositionRef={ballWorldPositionRef}
         includeLighting={includeLighting}
         showHorizon={showHorizon}
         showWireframe={showWireframe}
@@ -179,6 +207,7 @@ export const VeniceStreetWorld = React.memo(function VeniceStreetWorld({
       <CupFlagAssembly
         position={cupPos}
         color={plan.cup.flagColor}
+        isGoldenPin={plan.cup.isGoldenPin}
         isSunk={resolvedHoleSunk}
         cupRadius={plan.cup.cupRadius}
         cupDepth={plan.cup.cupDepth}
@@ -194,62 +223,75 @@ export const VeniceStreetWorld = React.memo(function VeniceStreetWorld({
         showWireframe={showWireframe}
       />
 
-      {/* Static streetscape & courtyard props isolated from dynamic prop updates */}
-      <StaticCoursePropsLayer
-        staticProps={staticProps}
-        showWireframe={showWireframe}
-      />
+      {isGrandEscapade ? (
+        <GrandEscapadeZonesLayer
+          plan={plan}
+          ballPosition={ballPosition}
+          ballWorldPositionRef={ballWorldPositionRef}
+          propHitTimestamps={propHitTimestamps}
+          showWireframe={showWireframe}
+          forceAction={forceAction}
+        />
+      ) : (
+        <>
+          {/* Static streetscape & courtyard props isolated from dynamic prop updates */}
+          <StaticCoursePropsLayer
+            staticProps={staticProps}
+            showWireframe={showWireframe}
+          />
 
-      {/* Reactive & proximity props — each memoized PlacedPropRenderer receives ONLY its own hit timestamp */}
-      <group name="venice-dynamic-props">
-        {dynamicProps.map((prop) => {
-          const hitTs =
-            propHitTimestamps?.[prop.id] ??
-            propHitTimestamps?.[prop.type] ??
-            -10;
-          const umbTs =
-            prop.type === 'hotdog_cart_umbrella'
-              ? hitTs !== -10
-                ? hitTs
-                : fallbackHit('hotdog-cart-corner', 'hotdog_cart_umbrella')
-              : prop.type === 'bistro_umbrella_set'
-                ? propHitTimestamps?.[prop.id] ?? -10
-                : -10;
-          const hydTs =
-            prop.type === 'fire_hydrant_jet'
-              ? hitTs !== -10
-                ? hitTs
-                : fallbackHit('hydrant-corner-se', 'fire_hydrant_jet')
-              : -10;
-          const fntTs =
-            prop.type === 'fountain_water_hazard'
-              ? hitTs !== -10
-                ? hitTs
-                : fallbackHit('fountain-courtyard-front', 'fountain_water_hazard')
-              : -10;
-          const vanTs =
-            prop.type === 'delivery_box_van'
-              ? hitTs !== -10
-                ? hitTs
-                : fallbackHit('delivery-van-east', 'delivery_box_van')
-              : -10;
+          {/* Reactive & proximity props — each memoized PlacedPropRenderer receives ONLY its own hit timestamp */}
+          <group name="venice-dynamic-props">
+            {dynamicProps.map((prop) => {
+              const hitTs =
+                propHitTimestamps?.[prop.id] ??
+                propHitTimestamps?.[prop.type] ??
+                -10;
+              const umbTs =
+                prop.type === 'hotdog_cart_umbrella'
+                  ? hitTs !== -10
+                    ? hitTs
+                    : fallbackHit('hotdog-cart-corner', 'hotdog_cart_umbrella')
+                  : prop.type === 'bistro_umbrella_set'
+                    ? propHitTimestamps?.[prop.id] ?? -10
+                    : -10;
+              const hydTs =
+                prop.type === 'fire_hydrant_jet'
+                  ? hitTs !== -10
+                    ? hitTs
+                    : fallbackHit('hydrant-corner-se', 'fire_hydrant_jet')
+                  : -10;
+              const fntTs =
+                prop.type === 'fountain_water_hazard'
+                  ? hitTs !== -10
+                    ? hitTs
+                    : fallbackHit('fountain-courtyard-front', 'fountain_water_hazard')
+                  : -10;
+              const vanTs =
+                prop.type === 'delivery_box_van'
+                  ? hitTs !== -10
+                    ? hitTs
+                    : fallbackHit('delivery-van-east', 'delivery_box_van')
+                  : -10;
 
-          return (
-            <PlacedPropRenderer
-              key={prop.id}
-              prop={prop}
-              ballPosition={prop.type === 'pigeon_flock' ? ballPosition : undefined}
-              lastUmbrellaHitAt={umbTs}
-              lastHydrantSurfAt={hydTs}
-              lastFountainSplashAt={fntTs}
-              lastVanRoofHitAt={vanTs}
-              showWireframe={showWireframe}
-              forceAction={forceAction}
-              isStandaloneQA={false}
-            />
-          );
-        })}
-      </group>
+              return (
+                <PlacedPropRenderer
+                  key={prop.id}
+                  prop={prop}
+                  ballPosition={prop.type === 'pigeon_flock' ? ballPosition : undefined}
+                  lastUmbrellaHitAt={umbTs}
+                  lastHydrantSurfAt={hydTs}
+                  lastFountainSplashAt={fntTs}
+                  lastVanRoofHitAt={vanTs}
+                  showWireframe={showWireframe}
+                  forceAction={forceAction}
+                  isStandaloneQA={false}
+                />
+              );
+            })}
+          </group>
+        </>
+      )}
 
       {forceAction && <group name="qa-force-action-active" />}
     </group>
